@@ -1,0 +1,22 @@
+{
+  "name": "@kuber/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "fastify": "^5.6.0",
+    "@kuber/contracts": "workspace:*",
+    "@kuber/eventstore": "workspace:*",
+    "@kuber/bus": "workspace:*",
+    "@kuber/gl": "workspace:*",
+    "@kuber/policy": "workspace:*",
+    "@kuber/channels": "workspace:*",
+    "@kuber/agent": "workspace:*",
+    "@kuber/reporting": "workspace:*",
+    "zod": "^4.1.0",
+    "postgres": "^3.4.7"
+  }
+}

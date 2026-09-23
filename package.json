@@ -1,0 +1,38 @@
+{
+  "name": "kuber-platform",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:integration": "KUBER_INTEGRATION=1 vitest run tests/integration",
+    "dev": "tsx watch apps/core/src/main.ts",
+    "start": "tsx apps/core/src/main.ts",
+    "migrate": "tsx packages/eventstore/src/migrate-cli.ts",
+    "demo": "tsx apps/core/src/demo.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "fast-check": "^4.3.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0",
+    "fastify": "^5.6.0",
+    "zod": "^4.1.0"
+  },
+  "dependencies": {
+    "@kuber/contracts": "workspace:*",
+    "@kuber/eventstore": "workspace:*",
+    "@kuber/bus": "workspace:*",
+    "@kuber/gl": "workspace:*",
+    "@kuber/policy": "workspace:*",
+    "@kuber/channels": "workspace:*",
+    "@kuber/agent": "workspace:*",
+    "@kuber/reporting": "workspace:*",
+    "@kuber/core": "workspace:*",
+    "postgres": "^3.4.7"
+  }
+}

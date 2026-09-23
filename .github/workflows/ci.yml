@@ -1,0 +1,28 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: kuber, POSTGRES_PASSWORD: kuber, POSTGRES_DB: postgres }
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U kuber" --health-interval 5s --health-retries 10
+      nats:
+        image: nats:2.11
+        ports: ["4222:4222"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+        env: { TEST_DATABASE_ADMIN_URL: "postgres://kuber:kuber@localhost:5432/postgres" }
+      # JetStream needs -js; the service container starts NATS without it, so run a JetStream server for integration
+      - run: docker run -d --name natsjs -p 4223:4222 nats:2.11 -js && sleep 2
+      - run: pnpm test:integration
+        env: { TEST_DATABASE_ADMIN_URL: "postgres://kuber:kuber@localhost:5432/postgres", NATS_URL: "nats://localhost:4223" }

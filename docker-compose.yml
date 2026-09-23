@@ -1,0 +1,22 @@
+# Local cell: one of each stateful component. Production runs these per cell on EKS (section 16.6).
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: kuber
+      POSTGRES_PASSWORD: kuber
+      POSTGRES_DB: kuber
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U kuber"], interval: 5s, retries: 10 }
+  nats:
+    image: nats:2.11
+    command: ["-js", "-sd", "/data"]
+    ports: ["4222:4222", "8222:8222"]
+    volumes: [natsdata:/data]
+  valkey:
+    image: valkey/valkey:8
+    ports: ["6379:6379"]
+volumes:
+  pgdata: {}
+  natsdata: {}
