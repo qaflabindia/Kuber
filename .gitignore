@@ -4,3 +4,7 @@ node_modules
 .svelte-kit
 build
 e2e-shots
+
+# Local credentials: never commit
+Secret/
+keys.md
