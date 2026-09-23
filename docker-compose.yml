@@ -66,6 +66,11 @@ services:
       DATABASE_URL: postgres://kuber_app:${APP_DB_PASSWORD:?missing}@postgres:5432/kuber?sslmode=verify-full
       MIGRATION_URL: postgres://kuber:${PG_PASSWORD:?missing}@postgres:5432/kuber?sslmode=verify-full
       APP_ROLE: kuber_app
+      # System connection (outbox relay, catch-up reads): the only role that sees every tenant.
+      # The core creates it on start and sets this password.
+      SYSTEM_DATABASE_URL: postgres://kuber_system:${SYSTEM_DB_PASSWORD:?run ./scripts/secure-setup.sh to add it}@postgres:5432/kuber?sslmode=verify-full
+      SYSTEM_ROLE: kuber_system
+      SYSTEM_DB_PASSWORD: ${SYSTEM_DB_PASSWORD:?missing}
       NATS_URL: tls://nats:4222
       NATS_TLS_CA: /certs/ca.crt
       NATS_TOKEN: ${NATS_TOKEN:?missing}

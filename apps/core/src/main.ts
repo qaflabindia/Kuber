@@ -26,6 +26,7 @@ if (requireTls) {
   const problems = [
     !/[?&]sslmode=verify-full\b/.test(env("DATABASE_URL")) && "DATABASE_URL must use sslmode=verify-full",
     !/[?&]sslmode=verify-full\b/.test(process.env.MIGRATION_URL ?? "?sslmode=verify-full") && "MIGRATION_URL must use sslmode=verify-full",
+    !/[?&]sslmode=verify-full\b/.test(process.env.SYSTEM_DATABASE_URL ?? "?sslmode=verify-full") && "SYSTEM_DATABASE_URL must use sslmode=verify-full",
     !env("NATS_URL", "").startsWith("tls://") && "NATS_URL must be tls://",
     !httpsCfg && "TLS_CERT_FILE and TLS_KEY_FILE are required to serve HTTPS",
   ].filter(Boolean);
@@ -37,6 +38,8 @@ const cell = await Cell.start({
   databaseUrl: env("DATABASE_URL"),
   migrationUrl: process.env.MIGRATION_URL,
   appRole: process.env.APP_ROLE,
+  systemDatabaseUrl: process.env.SYSTEM_DATABASE_URL,
+  systemRole: process.env.SYSTEM_ROLE ? { name: process.env.SYSTEM_ROLE, password: process.env.SYSTEM_DB_PASSWORD } : undefined,
   cellId: env("CELL_ID", "local"),
   bus: { natsUrl: env("NATS_URL", "nats://localhost:4222"), caFile: process.env.NATS_TLS_CA, token: process.env.NATS_TOKEN, retentionDays: Number(env("KUBER_BUS_RETENTION_DAYS", "7")) },
   policyDir: env("POLICY_DIR", "./policies"),

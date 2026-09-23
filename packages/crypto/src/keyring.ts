@@ -43,10 +43,13 @@ export class Keyring {
   private cache = new Map<string, { at: number; keys: TenantKeys }>();
   constructor(private sql: Sql, readonly kms: Kms, private ttlMs = 60_000) {}
 
+  /**
+   * `tenant` null is system scope (rewrap, status): it returns rows only when `sql` connects as a
+   * role in kuber_system_scope, as the owner does in the key tools. The cell's tenant pool is not.
+   */
   private tx<T>(tenant: string | null, fn: (t: import("postgres").TransactionSql) => Promise<T>): Promise<T> {
     return this.sql.begin(async (t) => {
       if (tenant) await t`SELECT set_config('kuber.tenant', ${tenant}, true)`;
-      else await t`SELECT set_config('kuber.role', 'system', true)`;
       return fn(t);
     }) as Promise<T>;
   }

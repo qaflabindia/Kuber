@@ -47,7 +47,6 @@ export class KeyAdmin {
 
   private sys<T>(fn: (t: TransactionSql) => Promise<T>) {
     return this.owner.begin(async (t) => {
-      await t`SELECT set_config('kuber.role', 'system', true)`;
       await t`SELECT set_config('kuber.maintenance', 'reseal', true)`;         // see es.guard_change()
       return fn(t);
     }) as Promise<T>;

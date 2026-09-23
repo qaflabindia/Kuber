@@ -2,6 +2,28 @@ import { KEYS_MIGRATION_SQL } from "@kuber/crypto";
 /** Event store schema. Each module contributes its own migrations in its own schema. */
 export interface Migration { id: string; sql: string }
 
+/** NOLOGIN role whose members see every tenant's rows (relay, catch-up reads, key maintenance). */
+export const SYSTEM_SCOPE_ROLE = "kuber_system_scope";
+
+const TENANT_CHECK = "tenant_id = current_setting('kuber.tenant', true)";
+
+/**
+ * Rewrites every policy that still grants system scope by session setting into the role-scoped
+ * form, in whichever schemas exist. Idempotent; module migrations applied before es-003 are covered.
+ */
+export const ROLE_SCOPED_POLICIES_SQL = `
+DO $$
+DECLARE p record;
+BEGIN
+  FOR p IN SELECT schemaname, tablename, policyname FROM pg_policies WHERE qual LIKE '%kuber.role%' LOOP
+    EXECUTE format($f$ALTER POLICY %I ON %I.%I USING (${TENANT_CHECK}) WITH CHECK (${TENANT_CHECK})$f$,
+                   p.policyname, p.schemaname, p.tablename);
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = p.schemaname AND tablename = p.tablename AND policyname = 'system_scope') THEN
+      EXECUTE format('CREATE POLICY system_scope ON %I.%I TO ${SYSTEM_SCOPE_ROLE} USING (true) WITH CHECK (true)', p.schemaname, p.tablename);
+    END IF;
+  END LOOP;
+END $$;`;
+
 export const EVENTSTORE_MIGRATIONS: Migration[] = [
   {
     id: "es-001-events",
@@ -100,20 +122,38 @@ CREATE TRIGGER events_append_only BEFORE UPDATE OR DELETE ON es.events
   FOR EACH ROW EXECUTE FUNCTION es.guard_change();
 ` + KEYS_MIGRATION_SQL + tenantRlsFor("keys"),
   },
+  {
+    id: "es-003-system-scope-role",
+    // System scope used to be a session setting (kuber.role = 'system') that any connection could
+    // set, so the application role could read every tenant. It is now membership of a database
+    // role: tenant policies check only kuber.tenant, and a second policy, granted to
+    // kuber_system_scope, opens every row. The tenant request role is never a member. The owner
+    // running migrations becomes one so key maintenance keeps working without superuser.
+    sql: `
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${SYSTEM_SCOPE_ROLE}') THEN CREATE ROLE ${SYSTEM_SCOPE_ROLE} NOLOGIN; END IF;
+END $$;
+GRANT ${SYSTEM_SCOPE_ROLE} TO CURRENT_USER;
+` + ROLE_SCOPED_POLICIES_SQL,
+  },
 ];
 
-/** SQL that enables tenant row-level security on every table in a module schema (defence in depth). */
+/**
+ * SQL that enables tenant row-level security on every table in a module schema (defence in depth).
+ * Module migrations applied before es-003 created the old setting-based policies; es-003 and
+ * ROLE_SCOPED_POLICIES_SQL rewrite those.
+ */
 export function tenantRlsFor(schema: string): string {
   return `
 DO $$
 DECLARE t record;
 BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${SYSTEM_SCOPE_ROLE}') THEN CREATE ROLE ${SYSTEM_SCOPE_ROLE} NOLOGIN; END IF;
   FOR t IN SELECT tablename FROM pg_tables WHERE schemaname = '${schema}' LOOP
     EXECUTE format('ALTER TABLE ${schema}.%I ENABLE ROW LEVEL SECURITY', t.tablename);
     EXECUTE format('ALTER TABLE ${schema}.%I FORCE ROW LEVEL SECURITY', t.tablename);
-    EXECUTE format($p$CREATE POLICY tenant_isolation ON ${schema}.%I
-      USING (current_setting('kuber.role', true) = 'system' OR tenant_id = current_setting('kuber.tenant', true))
-      WITH CHECK (current_setting('kuber.role', true) = 'system' OR tenant_id = current_setting('kuber.tenant', true))$p$, t.tablename);
+    EXECUTE format($p$CREATE POLICY tenant_isolation ON ${schema}.%I USING (${TENANT_CHECK}) WITH CHECK (${TENANT_CHECK})$p$, t.tablename);
+    EXECUTE format($p$CREATE POLICY system_scope ON ${schema}.%I TO ${SYSTEM_SCOPE_ROLE} USING (true) WITH CHECK (true)$p$, t.tablename);
   END LOOP;
 END $$;`;
 }
@@ -132,3 +172,11 @@ REVOKE UPDATE ON es.events FROM ${role};
 REVOKE UPDATE ON keys.tenant_keys FROM ${role};
 REVOKE INSERT, UPDATE ON keys.shredded FROM ${role};
 GRANT SELECT, INSERT ON public.schema_migrations TO ${role};`;
+
+/**
+ * The system role: the same privileges as the application role (no event updates, no key
+ * rotation), plus membership of kuber_system_scope so it sees every tenant. Used only by the
+ * outbox relay and system reads, never to serve a tenant request.
+ */
+export const systemGrants = (role: string, schemas: string[]) => appGrants(role, schemas) + `
+GRANT ${SYSTEM_SCOPE_ROLE} TO ${role};`;

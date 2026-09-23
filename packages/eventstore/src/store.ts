@@ -8,6 +8,8 @@
  *   so an event is published if and only if it was committed.
  * - Module ownership: a module may append only the event types it owns.
  * - Tenant isolation: every tenant operation runs with kuber.tenant set; RLS does the rest.
+ *   System scope (every tenant) is not a setting: it needs a connection whose role is a member
+ *   of kuber_system_scope, which only `systemSql` has.
  * - Encryption at rest: payloads are sealed with the tenant's data key before they touch the
  *   database; the outbox and broker carry the same ciphertext (see sealing.ts).
  */
@@ -39,8 +41,11 @@ export class EventStore {
   /**
    * `crypto` is required in every deployed cell; `null` (plaintext) exists only for the event
    * store's own unit tests and is refused by Cell.start.
+   * `systemSql` connects as a role in kuber_system_scope; it defaults to `sql`, which is right only
+   * when `sql` itself is such a role (the owner, in admin tools).
    */
-  constructor(private sql: Sql, private cellId = "local", readonly crypto: StoreCrypto | null = null) {}
+  constructor(private sql: Sql, private cellId = "local", readonly crypto: StoreCrypto | null = null,
+              private systemSql: Sql = sql) {}
 
   /** The tenant's keys (for modules that seal their own columns). */
   async keys(tenantId: string): Promise<TenantKeys> {
@@ -50,18 +55,25 @@ export class EventStore {
 
   /** Run `fn` in a transaction scoped to one tenant. */
   async tenantTx<T>(tenantId: string, fn: (tx: TransactionSql) => Promise<T>): Promise<T> {
-    return this.sql.begin(async (tx) => {
-      await tx`SELECT set_config('kuber.tenant', ${tenantId}, true)`;
-      return fn(tx);
-    }) as Promise<T>;
+    try {
+      return await (this.sql.begin(async (tx) => {
+        await tx`SELECT set_config('kuber.tenant', ${tenantId}, true)`;
+        return fn(tx);
+      }) as Promise<T>);
+    } catch (e) {
+      // A write into another tenant's rows is a bug or an attack, never a normal outcome: record it.
+      const err = e as { code?: string; message?: string };
+      if (err.code === "42501" && /row-level security/.test(err.message ?? "")) {
+        const table = /for table "([^"]+)"/.exec(err.message!)?.[1];   // PostgreSQL names the table, not its schema
+        console.error(JSON.stringify({ security: "rls_denied", cell: this.cellId, tenant: tenantId, table, message: err.message }));
+      }
+      throw e;
+    }
   }
 
-  /** Run `fn` in a transaction that may see every tenant (relay, projections, cell operations). */
+  /** Run `fn` in a transaction that may see every tenant (catch-up reads, storage checks), on the system connection. */
   async systemTx<T>(fn: (tx: TransactionSql) => Promise<T>): Promise<T> {
-    return this.sql.begin(async (tx) => {
-      await tx`SELECT set_config('kuber.role', 'system', true)`;
-      return fn(tx);
-    }) as Promise<T>;
+    return this.systemSql.begin(fn) as Promise<T>;
   }
 
   /** Append to one or more streams atomically. */
@@ -230,14 +242,16 @@ function upcast(type: string, version: number, data: unknown): unknown {
   return d;
 }
 
-/** Process an event at most once per consumer. `fn` runs in the same transaction as the inbox record. */
+/**
+ * Process an event at most once per consumer. `fn` runs in the same transaction as the inbox
+ * record, scoped to the event's tenant: a handler can never touch another tenant's rows.
+ */
 export async function once<T>(store: EventStore, consumer: string, env: Envelope,
                               fn: (tx: TransactionSql) => Promise<T>): Promise<T | undefined> {
-  return store.systemTx(async (tx) => {
+  return store.tenantTx(env.meta.tenantId, async (tx) => {
     const ins = await tx`INSERT INTO es.inbox (consumer, event_id) VALUES (${consumer}, ${env.eventId})
                          ON CONFLICT DO NOTHING RETURNING event_id`;
     if (ins.length === 0) return undefined;
-    await tx`SELECT set_config('kuber.tenant', ${env.meta.tenantId}, true)`;
     return fn(tx);
   });
 }

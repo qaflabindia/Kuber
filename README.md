@@ -83,7 +83,7 @@ Surfaces:
 | Event published iff committed | transactional outbox; relay marks after broker ack; JetStream de-duplicates by event ID | outbox test, NATS integration test |
 | Each event handled once per module | inbox table in the same transaction as the handler's writes | inbox tests |
 | Retries never double-post | deterministic journal IDs from request IDs; idempotent `PostJournal` | domain + cell tests |
-| Tenant isolation | row-level security on every table; app connects as a non-bypass role; stream IDs prefixed by tenant | RLS test, end-to-end isolation test |
+| Tenant isolation | row-level security on every table; tenant requests and event handlers connect as `kuber_app`, which sees only the tenant in `kuber.tenant`; only `kuber_system` (a member of `kuber_system_scope`) sees every tenant, and it is used by the outbox relay and system reads alone; denied cross-tenant writes are logged as `rls_denied`; stream IDs prefixed by tenant | RLS test, `tests/isolation.test.ts` |
 | Module boundaries | each event type has one owning module; the store refuses others | ownership test |
 | Agent autonomy stays within policy | `PolicyEngine` (strictest wins, runtime limits only lower autonomy), overrides after corrections | policy tests, correction test |
 
@@ -107,7 +107,17 @@ Or the infrastructure in containers and core and web on your machine, with reloa
 pnpm demo                                   # two-month walk-through with a throwaway in-memory key
 ```
 
-The server warns at start-up if the application role can bypass row-level security.
+The server warns at start-up if the application role can bypass row-level security, and refuses to start if it is a member of `kuber_system_scope`.
+
+Database roles:
+
+| Role | Used by | Sees |
+| --- | --- | --- |
+| `kuber` (owner, `MIGRATION_URL`) | migrations, key tools | every tenant |
+| `kuber_app` (`DATABASE_URL`) | API requests, event handlers | the tenant in `kuber.tenant` only |
+| `kuber_system` (`SYSTEM_DATABASE_URL`) | outbox relay, catch-up reads, storage checks | every tenant; no event or key updates |
+
+The core creates `kuber_system` on start with `SYSTEM_DB_PASSWORD`; `./kuber` and `./scripts/secure-setup.sh` add that password to an existing `secrets.env`.
 
 ## Data protection
 
@@ -191,7 +201,7 @@ This folder is the source of truth; there is no other working copy.
 ## Tests
 
 ```bash
-pnpm test:docker                                                                          # 99 tests, over TLS with the generated password
+pnpm test:docker                                                                          # 107 tests, over TLS with the generated password
 pnpm test:llm                                                                             # live Anthropic classifier; needs ANTHROPIC_API_KEY and KUBER_LLM_CLASSIFY_MODEL
 KUBER_INTEGRATION=1 NATS_URL=nats://localhost:4222 pnpm test:integration                 # real JetStream
 pnpm typecheck
@@ -238,7 +248,7 @@ Load tests from section 16.5 must run per cell before launch.
 
 ## Known limits and next steps
 
-- `kuber.role = 'system'` is a session setting the application role can set. Next: separate database roles for system consumers and tenant requests.
+- `kuber.tenant` is still set by the application for each request, so tenant scoping relies on the core choosing the right tenant; the database stops any role but `kuber_system` from seeing more than one.
 - Book state is cached in memory and caught up from the store; persistent snapshots (`es.snapshots`) are the next step for very large books.
 - JetStream consumers use `max_ack_pending = 1` for ordering; scale-out needs partitioned subjects (for example by tenant hash) per consumer.
 - Messages exceeding `max_deliver` need a dead-letter stream and alert.

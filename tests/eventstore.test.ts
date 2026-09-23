@@ -4,9 +4,9 @@ import postgres, { type Sql } from "postgres";
 import { EVENTSTORE_MIGRATIONS, ConcurrencyError, EventStore, OutboxRelay, appGrants, migrate, once, type NewEvent } from "@kuber/eventstore";
 import { MemoryBus } from "@kuber/bus";
 import type { Envelope } from "@kuber/contracts";
-import { APP_ROLE, freshDatabase } from "./helpers.ts";
+import { APP_ROLE, freshDatabase, grantSystemRole } from "./helpers.ts";
 
-let sql: Sql, store: EventStore, drop: () => Promise<void>;
+let sql: Sql, sys: Sql, store: EventStore, drop: () => Promise<void>;
 
 beforeAll(async () => {
   const db = await freshDatabase();
@@ -14,11 +14,13 @@ beforeAll(async () => {
   const owner = postgres(db.ownerUrl, { max: 1, onnotice: () => undefined });
   await migrate(owner, EVENTSTORE_MIGRATIONS);
   await owner.unsafe(appGrants(APP_ROLE, ["es"]));
+  await grantSystemRole(owner, ["es"]);
   await owner.end();
   sql = postgres(db.url, { max: 10, onnotice: () => undefined });
-  store = new EventStore(sql, "test");
+  sys = postgres(db.systemUrl, { max: 2, onnotice: () => undefined });
+  store = new EventStore(sql, "test", null, sys);
 });
-afterAll(async () => { await sql.end(); await drop(); });
+afterAll(async () => { await sql.end(); await sys.end(); await drop(); });
 
 const signal = (id: string): NewEvent => ({ type: "SignalReceived", data: { signalId: id, bookId: "b", channel: "chat", trust: "user", contentHash: id, lines: 1 } });
 
@@ -59,6 +61,12 @@ describe("event store", () => {
     expect(await store.readStream("t2", "t2/s/secret")).toHaveLength(1);
     const raw = await sql`SELECT count(*)::int AS n FROM es.events`;               // no tenant, no system role: sees nothing
     expect(raw[0]!.n).toBe(0);
+    const spoofed = await sql.begin(async (tx) => {                                  // the old system switch is gone
+      await tx`SELECT set_config('kuber.role', 'system', true)`;
+      return (await tx`SELECT count(*)::int AS n FROM es.events`)[0]!.n as number;
+    });
+    expect(spoofed).toBe(0);
+    expect(await store.systemTx(async (tx) => (await tx`SELECT count(DISTINCT tenant_id)::int AS n FROM es.events`)[0]!.n)).toBe(2);
   });
 
   it("refuses a stream outside the tenant and events owned by another module", async () => {
@@ -77,10 +85,12 @@ describe("event store", () => {
     const bus = new MemoryBus();
     const got: Envelope[] = [];
     await bus.subscribe({ name: "all", filter: ["kuber.test.>"], handler: async (e) => { got.push(e); } });
-    const relay = new OutboxRelay(sql, (s, e) => bus.publish(s, e));
+    expect(await new OutboxRelay(sql, (s, e) => bus.publish(s, e)).drainAll()).toBe(0);   // tenant role: sees no outbox
+    const relay = new OutboxRelay(sys, (s, e) => bus.publish(s, e));
     const n = await relay.drainAll();
     await bus.idle();
     const total = await store.systemTx(async (tx) => (await tx`SELECT count(*)::int AS n FROM es.events`)[0]!.n as number);
+    expect(n).toBeGreaterThan(0);
     expect(n).toBe(total);
     expect(got.map((e) => BigInt(e.globalPosition))).toEqual([...got.map((e) => BigInt(e.globalPosition))].sort((a, b) => (a < b ? -1 : 1)));
     expect(await relay.drainAll()).toBe(0);

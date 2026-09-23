@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DIR="${KUBER_HOME:-$HOME/.kuber}"
-[ -f "$DIR/secrets.env" ] || ./scripts/secure-setup.sh
+./scripts/secure-setup.sh >/dev/null   # idempotent; adds secrets introduced since setup
 set -a; . "$DIR/secrets.env"; set +a
 
 ./kuber up -d postgres nats valkey
@@ -15,10 +15,11 @@ pnpm install
 export NODE_EXTRA_CA_CERTS="$DIR/certs/ca.crt"
 export DATABASE_URL="postgres://kuber_app:${APP_DB_PASSWORD}@localhost:5432/kuber?sslmode=verify-full"
 export MIGRATION_URL="postgres://kuber:${PG_PASSWORD}@localhost:5432/kuber?sslmode=verify-full"
+export SYSTEM_DATABASE_URL="postgres://kuber_system:${SYSTEM_DB_PASSWORD}@localhost:5432/kuber?sslmode=verify-full"
 export NATS_URL=tls://localhost:4222 NATS_TLS_CA="$DIR/certs/ca.crt"
 export TLS_CERT_FILE="$DIR/certs/server.crt" TLS_KEY_FILE="$DIR/certs/server.key" KUBER_REQUIRE_TLS=true
 export KUBER_MASTER_KEY_FILE="$DIR/master.keys"
-export APP_ROLE=kuber_app CELL_ID=dev POLICY_DIR=./policies PORT=8080
+export APP_ROLE=kuber_app SYSTEM_ROLE=kuber_system CELL_ID=dev POLICY_DIR=./policies PORT=8080
 
 pnpm dev & CORE=$!
 (cd apps/web && CORE_URL=https://localhost:8080 pnpm dev) & WEB=$!

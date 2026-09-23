@@ -4,6 +4,8 @@
  * One relay per cell holds the leader lock (a PostgreSQL advisory lock), so ordering is
  * preserved. Rows are marked published only after the broker acknowledges; a crash in
  * between re-publishes, and the broker de-duplicates by event ID.
+ *
+ * It reads every tenant's outbox, so `sql` must connect as a role in kuber_system_scope.
  */
 import type { Sql } from "postgres";
 import type { Envelope } from "@kuber/contracts";
@@ -19,7 +21,6 @@ export class OutboxRelay {
   /** Publish one batch. Returns the number of events published. */
   async drainOnce(): Promise<number> {
     return this.sql.begin(async (tx) => {
-      await tx`SELECT set_config('kuber.role', 'system', true)`;
       const rows = await tx<{ id: string; subject: string; envelope: Envelope }[]>`
         SELECT id::text, subject, envelope FROM es.outbox
         WHERE published_at IS NULL ORDER BY id LIMIT ${this.batch} FOR UPDATE SKIP LOCKED`;

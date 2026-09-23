@@ -39,8 +39,8 @@ INSERT INTO reporting.daily
 ALTER TABLE reporting.daily ENABLE ROW LEVEL SECURITY;
 ALTER TABLE reporting.daily FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON reporting.daily
-  USING (current_setting('kuber.role', true) = 'system' OR tenant_id = current_setting('kuber.tenant', true))
-  WITH CHECK (current_setting('kuber.role', true) = 'system' OR tenant_id = current_setting('kuber.tenant', true));
+  USING (tenant_id = current_setting('kuber.tenant', true)) WITH CHECK (tenant_id = current_setting('kuber.tenant', true));
+CREATE POLICY system_scope ON reporting.daily TO kuber_system_scope USING (true) WITH CHECK (true);
 `,
 }, {
   id: "reporting-003-voucher-type",
