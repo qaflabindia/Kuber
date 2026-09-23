@@ -1,33 +1,79 @@
-# Local cell: one of each stateful component plus the core API.
+# Local cell: one of each stateful component plus core and web.
 # Production runs these per cell on EKS (implementation design, section 16.6).
+#
+# Hardened by default:
+#   - secrets and keys live in ~/.kuber (scripts/secure-setup.sh), never in this repository;
+#     start with ./kuber, which passes them in. Plain `docker compose up` fails with instructions.
+#   - every internal link is TLS with certificate verification (local CA in ~/.kuber/certs);
+#     PostgreSQL refuses non-TLS TCP; the core refuses to start without TLS (KUBER_REQUIRE_TLS).
+#   - data is encrypted by the core before it reaches PostgreSQL or NATS (~/.kuber/master.keys).
+#   - every published port is bound to 127.0.0.1.
 name: kuber
+
+x-secrets: &need
+  KUBER_HOME: ${KUBER_HOME:?run ./scripts/secure-setup.sh, then start with ./kuber}
+
 services:
   postgres:
     image: postgres:16
     environment:
       POSTGRES_USER: kuber
-      POSTGRES_PASSWORD: kuber
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?run ./scripts/secure-setup.sh, then start with ./kuber}
       POSTGRES_DB: kuber
-    ports: ["127.0.0.1:5432:5432"]   # loopback only: never expose the database beyond this machine
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?missing}
+    # The server key must be owned by postgres with mode 0600: copy it in from the read-only mount.
+    entrypoint: ["sh", "-c", "install -o postgres -g postgres -m 600 /certs/server.key /var/lib/postgresql/server.key && install -o postgres -g postgres -m 644 /certs/server.crt /var/lib/postgresql/server.crt && exec docker-entrypoint.sh \"$@\"", "--"]
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/var/lib/postgresql/server.crt
+      - -c
+      - ssl_key_file=/var/lib/postgresql/server.key
+      - -c
+      - ssl_min_protocol_version=TLSv1.2
+      - -c
+      - hba_file=/etc/kuber/pg_hba.conf
+      - -c
+      - password_encryption=scram-sha-256
+    ports: ["127.0.0.1:5432:5432"]
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./deploy/postgres-init.sql:/docker-entrypoint-initdb.d/01-app-role.sql:ro
+      - ./deploy/postgres-init.sh:/docker-entrypoint-initdb.d/01-app-role.sh:ro
+      - ./deploy/pg_hba.conf:/etc/kuber/pg_hba.conf:ro
+      - ${KUBER_HOME:?missing}/certs:/certs:ro
     healthcheck: { test: ["CMD-SHELL", "pg_isready -U kuber -d kuber"], interval: 5s, retries: 20 }
+
   nats:
     image: nats:2.11
-    command: ["-js", "-sd", "/data", "-m", "8222"]
-    ports: ["127.0.0.1:4222:4222", "127.0.0.1:8222:8222"]
-    volumes: [natsdata:/data]
+    command: ["-js", "-sd", "/data", "--tls", "--tlscert", "/certs/server.crt", "--tlskey", "/certs/server.key", "--auth", "${NATS_TOKEN:?missing}"]
+    ports: ["127.0.0.1:4222:4222"]
+    volumes: [natsdata:/data, "${KUBER_HOME:?missing}/certs:/certs:ro"]
+
   valkey:
     image: valkey/valkey:8
+    command: ["valkey-server", "--port", "0", "--tls-port", "6379", "--tls-cert-file", "/certs/server.crt", "--tls-key-file", "/certs/server.key",
+              "--tls-ca-cert-file", "/certs/ca.crt", "--tls-auth-clients", "no", "--requirepass", "${VALKEY_PASSWORD:?missing}"]
     ports: ["127.0.0.1:6379:6379"]
+    volumes: ["${KUBER_HOME:?missing}/certs:/certs:ro"]
+
   core:
     build: .
-    environment:
-      DATABASE_URL: postgres://kuber_app:kuber_app@postgres:5432/kuber
-      MIGRATION_URL: postgres://kuber:kuber@postgres:5432/kuber
+    environment: &core-env
+      <<: *need
+      DATABASE_URL: postgres://kuber_app:${APP_DB_PASSWORD:?missing}@postgres:5432/kuber?sslmode=verify-full
+      MIGRATION_URL: postgres://kuber:${PG_PASSWORD:?missing}@postgres:5432/kuber?sslmode=verify-full
       APP_ROLE: kuber_app
-      NATS_URL: nats://nats:4222
+      NATS_URL: tls://nats:4222
+      NATS_TLS_CA: /certs/ca.crt
+      NATS_TOKEN: ${NATS_TOKEN:?missing}
+      NODE_EXTRA_CA_CERTS: /certs/ca.crt
+      TLS_CERT_FILE: /certs/server.crt
+      TLS_KEY_FILE: /certs/server.key
+      KUBER_REQUIRE_TLS: "true"
+      KUBER_MASTER_KEY_FILE: /kuber/master.keys
       CELL_ID: local-1
       PORT: "8080"
       # Copilot model (optional). Without both, the canvas uses Kuber's deterministic router.
@@ -37,22 +83,42 @@ services:
       KUBER_MCP_TOKENS: ${KUBER_MCP_TOKENS:-}
       # External MCP servers the copilot may read from (optional): [{"name": "...", "url": "...", "allow": [...]}]
       KUBER_MCP_SERVERS: ${KUBER_MCP_SERVERS:-}
-    ports: ["127.0.0.1:8080:8080"]
+    volumes:
+      - ${KUBER_HOME:?missing}/master.keys:/kuber/master.keys:ro
+      - ${KUBER_HOME:?missing}/certs:/certs:ro
+    ports: ["127.0.0.1:8080:8080"]      # HTTPS; the browser talks only to web
     depends_on:
       postgres: { condition: service_healthy }
       nats: { condition: service_started }
     restart: unless-stopped
+
   web:
     build: { context: ., dockerfile: apps/web/Dockerfile }
     environment:
-      CORE_URL: http://core:8080
+      CORE_URL: https://core:8080
+      NODE_EXTRA_CA_CERTS: /certs/ca.crt
       ORIGIN: http://localhost:3000
-      # Signs the session cookie. Override in .env for anything beyond local use.
-      SESSION_SECRET: ${SESSION_SECRET:-local-dev-only-change-me-0123456789abcdef}
+      SESSION_SECRET: ${SESSION_SECRET:?missing}
+    volumes: ["${KUBER_HOME:?missing}/certs/ca.crt:/certs/ca.crt:ro"]
     ports: ["127.0.0.1:3000:3000"]
     depends_on:
       core: { condition: service_started }
     restart: unless-stopped
+
+  # Operator commands: ./kuber run --rm tools <command>   (see apps/core/src/keys-cli.ts)
+  tools:
+    build: .
+    profiles: ["tools"]
+    entrypoint: ["npx", "tsx", "apps/core/src/keys-cli.ts"]
+    environment:
+      <<: *core-env
+      KUBER_MASTER_KEY_FILE: /kuber/master.keys
+    volumes:
+      - ${KUBER_HOME:?missing}:/kuber              # read-write: rotate-master rewrites master.keys
+      - ${KUBER_HOME:?missing}/certs:/certs:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+
 volumes:
   pgdata: {}
   natsdata: {}

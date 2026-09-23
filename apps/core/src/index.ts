@@ -5,3 +5,4 @@ export { route, amountIn, dateIn } from "./copilot/router.ts";
 export type { LlmProvider, Turn, Message, LlmTool } from "./copilot/provider.ts";
 export { parseGrants } from "./mcp.ts";
 export { kuberTools, planText } from "./tools.ts";
+export { KeyAdmin, SEALED_COLUMNS } from "./keys-admin.ts";

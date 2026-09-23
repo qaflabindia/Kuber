@@ -12,15 +12,36 @@ import type { Bus, Subscription } from "./index.ts";
 
 const DUPLICATE_WINDOW_NS = 10 * 60 * 1_000_000_000; // 10 minutes
 
+export interface NatsOptions { streamName?: string; caFile?: string; retentionDays?: number; token?: string }
+
+/** tls:// servers require TLS; with a CA file the server certificate is verified against it. */
+const tlsFor = (servers: string, caFile?: string) =>
+  servers.startsWith("tls://") || caFile ? { tls: { ...(caFile ? { caFile } : {}) } } : {};
+
+/** Drop every retained message of Kuber streams (operator command; events live in PostgreSQL). */
+export async function purgeKuberStreams(servers: string, caFile?: string, token?: string) {
+  const nc = await connect({ servers, name: "kuber-admin", ...tlsFor(servers, caFile), ...(token ? { token } : {}) });
+  try {
+    const jsm = await jetstreamManager(nc);
+    const out: Record<string, number> = {};
+    for await (const s of jsm.streams.list()) if (s.config.name.startsWith("KUBER_")) out[s.config.name] = (await jsm.streams.purge(s.config.name)).purged;
+    return out;
+  } finally { await nc.close(); }
+}
+
 export class NatsBus implements Bus {
   private stopFns: (() => void)[] = [];
   private constructor(private nc: NatsConnection, private js: JetStreamClient,
                       private jsm: JetStreamManager, private stream: string) {}
 
-  static async connect(servers: string, cellId: string, streamName = `KUBER_${cellId.replace(/\W/g, "_").toUpperCase()}`) {
-    const nc = await connect({ servers, name: `kuber-core-${cellId}` });
+  static async connect(servers: string, cellId: string, opts: NatsOptions = {}) {
+    const streamName = opts.streamName ?? `KUBER_${cellId.replace(/\W/g, "_").toUpperCase()}`;
+    const nc = await connect({ servers, name: `kuber-core-${cellId}`, ...tlsFor(servers, opts.caFile), ...(opts.token ? { token: opts.token } : {}) });
     const jsm = await jetstreamManager(nc);
-    const cfg = { name: streamName, subjects: [`kuber.${cellId}.>`], duplicate_window: DUPLICATE_WINDOW_NS };
+    // The broker is transport, not the system of record (PostgreSQL is): keep messages only as long
+    // as consumers could need them, so the broker's disk never accumulates a second copy of history.
+    const cfg = { name: streamName, subjects: [`kuber.${cellId}.>`], duplicate_window: DUPLICATE_WINDOW_NS,
+      max_age: (opts.retentionDays ?? 7) * 86_400 * 1_000_000_000 };
     try { await jsm.streams.info(streamName); await jsm.streams.update(streamName, cfg); }
     catch { await jsm.streams.add(cfg); }
     return new NatsBus(nc, jetstream(nc), jsm, streamName);

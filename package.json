@@ -8,13 +8,14 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:docker": "TEST_DATABASE_ADMIN_URL=postgres://kuber:kuber@localhost:5432/postgres vitest run",
+    "test:docker": "bash scripts/test-docker.sh",
     "e2e": "node scripts/e2e/walkthrough.mjs",
     "test:integration": "KUBER_INTEGRATION=1 vitest run tests/integration",
     "dev": "tsx watch apps/core/src/main.ts",
     "start": "tsx apps/core/src/main.ts",
     "migrate": "tsx packages/eventstore/src/migrate-cli.ts",
-    "demo": "tsx apps/core/src/demo.ts"
+    "demo": "tsx apps/core/src/demo.ts",
+    "keys": "tsx apps/core/src/keys-cli.ts"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
@@ -25,7 +26,8 @@
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
     "vitest": "^3.2.0",
-    "zod": "^4.1.0"
+    "zod": "^4.1.0",
+    "@kuber/crypto": "workspace:*"
   },
   "dependencies": {
     "@kuber/agent": "workspace:*",

@@ -16,6 +16,7 @@ import {
   type Decision, type Envelope, type EventData, type Line,
 } from "@kuber/contracts";
 import { once, type EventStore, type MetaInput, type NewEvent } from "@kuber/eventstore";
+import { isToken, type TenantKeys } from "@kuber/crypto";
 import type { Level, PolicyEngine } from "@kuber/policy";
 import { SUSPENSE, classify } from "./classify.ts";
 
@@ -94,9 +95,10 @@ export class Agent {
     const signed = BigInt(txn.amount) * (txn.direction === "in" ? 1n : -1n);
     const baseMeta: MetaInput = { principal: AGENT_PRINCIPAL, correlationId: env.meta.correlationId, causationId: env.eventId };
     const events: NewEvent[] = [];
+    const keys = await this.store.keys(t);
 
     // 1. party
-    const { partyId, partyName, isNew } = await this.resolveParty(tx, t, txn.counterpartyHint ?? narrationKey(txn.narration));
+    const { partyId, partyName, isNew } = await this.resolveParty(tx, t, txn.counterpartyHint ?? narrationKey(txn.narration), keys);
     if (partyId) events.push({ type: "PartyResolved", data: { txnId: d.txnId, partyId, partyName: partyName!, isNew } });
 
     // 2. an authoritative line may confirm an earlier provisional entry instead of posting again
@@ -118,7 +120,7 @@ export class Agent {
     // 3. classify
     const accounts = await this.accountSet(tx, t, d.bookId);
     if (!accounts.has(txn.instrument)) throw new AgentError("unknown_instrument", `book ${d.bookId} has no account ${txn.instrument}`);
-    const c = await classify(tx, t, d.bookId, accounts, { direction: txn.direction, narration: txn.narration, partyId, partyName, purpose: txn.purposeHint });
+    const c = await classify(tx, t, d.bookId, accounts, { direction: txn.direction, narration: txn.narration, partyId, partyName, purpose: txn.purposeHint }, keys);
     events.push({ type: "TransactionClassified", data: { txnId: d.txnId, accountId: c.accountId, confidence: c.confidence, source: c.source } });
 
     const provisional = d.trust === "provisional" || (d.trust === "user" && txn.instrument !== "CASH");
@@ -150,7 +152,7 @@ export class Agent {
         const dueBy = addDays(this.clock(), RATIFY_DAYS);
         events.push({ type: "RatificationRequested", data: { requestId, dueBy } });
         await tx`INSERT INTO agent.ratifications VALUES (${t}, ${requestId}, ${journalIdForRequest(t, requestId)}, ${d.txnId},
-                 ${dueBy}, 'open', ${txn.narration}, null, null) ON CONFLICT DO NOTHING`;
+                 ${dueBy}, 'open', ${keys.seal(txn.narration, `agent.ratifications.narration|${requestId}`)}, null, null) ON CONFLICT DO NOTHING`;
       }
     } else {
       const draftId = stableId("draft", `${t}/${d.txnId}`);
@@ -159,7 +161,7 @@ export class Agent {
         confidence: c.confidence, partyName: partyName ?? undefined, amount: txn.amount, direction: txn.direction } });
       await tx`INSERT INTO agent.drafts (tenant_id, draft_id, txn_id, book_id, status, proposal, decision)
                VALUES (${t}, ${draftId}, ${d.txnId}, ${d.bookId}, ${status},
-                       ${tx.json({ ...proposal, accountId: c.accountId, confidence: c.confidence, classifiedBy: c.source, partyName, partyId, amount: txn.amount, direction: txn.direction } as never)},
+                       ${tx.json({ $c: keys.sealJson({ ...proposal, accountId: c.accountId, confidence: c.confidence, classifiedBy: c.source, partyName, partyId, amount: txn.amount, direction: txn.direction }, `agent.drafts.proposal|${draftId}`) } as never)},
                        ${tx.json(decision as never)}) ON CONFLICT DO NOTHING`;
     }
     await this.store.append("agent", t, { streamId: stream, expected: "any", events }, meta, tx);
@@ -168,9 +170,11 @@ export class Agent {
   // ------------------------------------------------------------------ commands from people
   async approveDraft(tenantId: string, draftId: string, principal: string, accountId?: string) {
     return this.store.tenantTx(tenantId, async (tx) => {
-      const [d] = await tx<{ txn_id: string; book_id: string; status: string; proposal: Proposal }[]>`
+      const keys = await this.store.keys(tenantId);
+      const [row] = await tx<{ txn_id: string; book_id: string; status: string; proposal: unknown }[]>`
         SELECT txn_id, book_id, status, proposal FROM agent.drafts WHERE tenant_id = ${tenantId} AND draft_id = ${draftId} FOR UPDATE`;
-      if (!d) throw new AgentError("not_found", `no draft ${draftId}`);
+      if (!row) throw new AgentError("not_found", `no draft ${draftId}`);
+      const d = { ...row, proposal: openProposal(keys, draftId, row.proposal) };
       if (d.status !== "queued" && d.status !== "awaiting_approval") throw new AgentError("not_open", `draft ${draftId} is ${d.status}`);
       const final = accountId ?? d.proposal.accountId;
       const accounts = await this.accountSet(tx, tenantId, d.book_id);
@@ -185,7 +189,7 @@ export class Agent {
       ];
       // a person's approval states that this counterparty belongs to this account: learn it
       if (final !== SUSPENSE && d.proposal.partyName) {
-        events.push(...(await this.learn(tx, tenantId, d.proposal.partyName, final, principal)));
+        events.push(...(await this.learn(tx, tenantId, d.proposal.partyName, final, principal, keys)));
         if (d.proposal.partyId) await tx`UPDATE agent.parties SET confirmed = true WHERE tenant_id = ${tenantId} AND party_id = ${d.proposal.partyId}`;
       }
       await tx`UPDATE agent.drafts SET status = 'posted', resolved_by = ${principal}, resolved_at = now() WHERE tenant_id = ${tenantId} AND draft_id = ${draftId}`;
@@ -231,8 +235,9 @@ export class Agent {
       const requestId = `corr-${uuid()}`;
       const events: NewEvent[] = [{ type: "CorrectionRequested", data: { requestId, bookId: j.book_id, journalId, fromAccount: j.counter_account, toAccount } }];
       if (j.party_id && opts.learn) {
+        const keys = await this.store.keys(tenantId);
         const [p] = await tx<{ name: string }[]>`SELECT name FROM agent.parties WHERE tenant_id = ${tenantId} AND party_id = ${j.party_id}`;
-        if (p) events.push(...(await this.learn(tx, tenantId, p.name, toAccount, principal)));
+        if (p) events.push(...(await this.learn(tx, tenantId, openText(keys, p.name, `agent.parties.name|${j.party_id}`), toAccount, principal, keys)));
       }
       if (j.principal === AGENT_PRINCIPAL) {
         const until = addDays(this.clock(), CORRECTION_LIMIT_DAYS);
@@ -252,39 +257,46 @@ export class Agent {
 
   async addRule(tenantId: string, pattern: string, accountId: string, principal: string) {
     return this.store.tenantTx(tenantId, async (tx) => {
-      const events = await this.learn(tx, tenantId, pattern, accountId, principal);
+      const events = await this.learn(tx, tenantId, pattern, accountId, principal, await this.store.keys(tenantId));
       await this.store.append("agent", tenantId, { streamId: `${tenantId}/rules`, expected: "any", events }, { principal }, tx);
     });
   }
 
   // ------------------------------------------------------------------ queries
   async queue(tenantId: string) {
-    return this.store.tenantTx(tenantId, (tx) => tx`
+    const keys = await this.store.keys(tenantId);
+    const rows = await this.store.tenantTx(tenantId, (tx) => tx<QueueRow[]>`
       SELECT draft_id, txn_id, book_id, status, proposal, decision, created_at FROM agent.drafts
       WHERE tenant_id = ${tenantId} AND status IN ('queued','awaiting_approval') ORDER BY created_at, draft_id`);
+    return rows.map((r): QueueRow => ({ ...r, proposal: openProposal(keys, r.draft_id, r.proposal) }));
   }
 
   async openRatifications(tenantId: string) {
-    return this.store.tenantTx(tenantId, (tx) => tx`
+    const keys = await this.store.keys(tenantId);
+    const rows = await this.store.tenantTx(tenantId, (tx) => tx<{ request_id: string; journal_id: string; txn_id: string; due_by: string; narration: string }[]>`
       SELECT request_id, journal_id, txn_id, due_by::text AS due_by, narration FROM agent.ratifications
       WHERE tenant_id = ${tenantId} AND status = 'open' ORDER BY due_by, request_id`);
+    return rows.map((r) => ({ ...r, narration: openText(keys, r.narration, `agent.ratifications.narration|${r.request_id}`) }));
   }
 
   // ------------------------------------------------------------------ helpers
-  private async learn(tx: TransactionSql, tenantId: string, pattern: string, accountId: string, principal: string): Promise<NewEvent[]> {
+  private async learn(tx: TransactionSql, tenantId: string, pattern: string, accountId: string, principal: string, keys: TenantKeys): Promise<NewEvent[]> {
     const p = pattern.toLowerCase().trim();
+    const idx = keys.index("rule", p);
     const [last] = await tx<{ account_id: string }[]>`
-      SELECT account_id FROM agent.rules WHERE tenant_id = ${tenantId} AND pattern = ${p} ORDER BY rule_id DESC LIMIT 1`;
+      SELECT account_id FROM agent.rules WHERE tenant_id = ${tenantId} AND pattern_idx = ${idx} ORDER BY rule_id DESC LIMIT 1`;
     if (last?.account_id === accountId) return [];
-    await tx`INSERT INTO agent.rules (tenant_id, pattern, account_id, created_by) VALUES (${tenantId}, ${p}, ${accountId}, ${principal})`;
+    await tx`INSERT INTO agent.rules (tenant_id, pattern, pattern_idx, account_id, created_by)
+             VALUES (${tenantId}, ${keys.seal(p, `agent.rules.pattern|${idx}`)}, ${idx}, ${accountId}, ${principal})`;
     return [{ type: "RuleLearned", data: { pattern: p, accountId } }];
   }
 
-  private async resolveParty(tx: TransactionSql, tenantId: string, key: string | null) {
+  private async resolveParty(tx: TransactionSql, tenantId: string, key: string | null, keys: TenantKeys) {
     const alias = (key ?? "").trim().toLowerCase();
     if (!alias) return { partyId: null, partyName: null, isNew: false };
-    const partyId = stableId("party", `${tenantId}/${alias}`).slice(0, 18);
-    const ins = await tx`INSERT INTO agent.parties (tenant_id, party_id, name) VALUES (${tenantId}, ${partyId}, ${alias})
+    // Keyed pseudonym: without the tenant's index key a party id cannot be linked to a name.
+    const partyId = `p.${keys.index("party", alias)}`;
+    const ins = await tx`INSERT INTO agent.parties (tenant_id, party_id, name) VALUES (${tenantId}, ${partyId}, ${keys.seal(alias, `agent.parties.name|${partyId}`)})
                          ON CONFLICT DO NOTHING RETURNING party_id`;
     return { partyId, partyName: alias, isNew: ins.length > 0 };
   }
@@ -327,3 +339,17 @@ export function narrationKey(narr: string): string | null {
 
 /** Exposed for the API layer. */
 export type AgentDecision = Decision;
+
+/* eslint-disable @typescript-eslint/no-explicit-any -- proposal and decision are JSON documents */
+interface QueueRow { draft_id: string; txn_id: string; book_id: string; status: string; proposal: any; decision: any; created_at: Date }
+
+// ------------------------------------------------------------------ sealed columns
+/** Open a sealed text column; values written before encryption pass through (the migration seals them). */
+function openText(keys: TenantKeys, v: string, ctx: string): string {
+  return isToken(v) ? keys.openText(v, ctx) : v;
+}
+
+function openProposal(keys: TenantKeys, draftId: string, v: unknown): Proposal {
+  const c = (v as { $c?: unknown } | null)?.$c;
+  return (isToken(c) ? keys.openJson(c, `agent.drafts.proposal|${draftId}`) : v) as Proposal;
+}

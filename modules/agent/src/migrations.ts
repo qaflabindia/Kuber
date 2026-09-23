@@ -37,4 +37,10 @@ CREATE TABLE agent.overrides (
   tenant_id TEXT NOT NULL, key TEXT NOT NULL, max_level TEXT NOT NULL, until DATE NOT NULL, reason TEXT NOT NULL,
   PRIMARY KEY (tenant_id, key));
 ` + tenantRlsFor("agent"),
+}, {
+  id: "agent-002-sealed-columns",
+  // Names, patterns, narrations and draft proposals are stored sealed; rules are found by a keyed
+  // blind index of the pattern instead of the pattern itself.
+  sql: `ALTER TABLE agent.rules ADD COLUMN pattern_idx TEXT;
+CREATE INDEX rules_pattern_idx ON agent.rules (tenant_id, pattern_idx);`,
 }];

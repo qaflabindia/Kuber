@@ -76,4 +76,4 @@ export class MemoryBus implements Bus {
   async close() { this.subs = []; }
 }
 
-export { NatsBus } from "./nats.ts";
+export { NatsBus, purgeKuberStreams, type NatsOptions } from "./nats.ts";

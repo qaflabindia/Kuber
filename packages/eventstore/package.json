@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "postgres": "^3.4.7",
-    "@kuber/contracts": "workspace:*"
+    "@kuber/contracts": "workspace:*",
+    "@kuber/crypto": "workspace:*"
   }
 }

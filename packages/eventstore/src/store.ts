@@ -8,12 +8,16 @@
  *   so an event is published if and only if it was committed.
  * - Module ownership: a module may append only the event types it owns.
  * - Tenant isolation: every tenant operation runs with kuber.tenant set; RLS does the rest.
+ * - Encryption at rest: payloads are sealed with the tenant's data key before they touch the
+ *   database; the outbox and broker carry the same ciphertext (see sealing.ts).
  */
 import type { Sql, TransactionSql } from "postgres";
 import {
   OWNER, SCHEMA_VERSION, subjectFor, uuid, validateEvent,
   type Envelope, type EventData, type EventType, type Meta,
 } from "@kuber/contracts";
+import { CryptoError, type Keyring, type TenantKeys } from "@kuber/crypto";
+import { GENESIS_LINK, isSealed, linkOf, openEventData, sealEvent, type LegacyPolicy } from "./sealing.ts";
 
 export type Expected = number | "no_stream" | "any";
 export type ModuleName = "gl" | "channels" | "agent";
@@ -29,8 +33,20 @@ export class ConcurrencyError extends Error {
   }
 }
 
+export interface StoreCrypto { keyring: Keyring; legacy?: LegacyPolicy }
+
 export class EventStore {
-  constructor(private sql: Sql, private cellId = "local") {}
+  /**
+   * `crypto` is required in every deployed cell; `null` (plaintext) exists only for the event
+   * store's own unit tests and is refused by Cell.start.
+   */
+  constructor(private sql: Sql, private cellId = "local", readonly crypto: StoreCrypto | null = null) {}
+
+  /** The tenant's keys (for modules that seal their own columns). */
+  async keys(tenantId: string): Promise<TenantKeys> {
+    if (!this.crypto) throw new CryptoError("no_key", "this event store has no keyring");
+    return this.crypto.keyring.forTenant(tenantId);
+  }
 
   /** Run `fn` in a transaction scoped to one tenant. */
   async tenantTx<T>(tenantId: string, fn: (tx: TransactionSql) => Promise<T>): Promise<T> {
@@ -64,23 +80,30 @@ export class EventStore {
         e.data = validateEvent(e.type, e.data) as never;
       }
     }
+    const keys = this.crypto ? await this.crypto.keyring.forTenant(tenantId) : null;
     const run = async (t: TransactionSql) => {
       const out: Envelope[] = [];
       for (const r of reqs) {
-        const [{ v }] = await t<{ v: number }[]>`
-          SELECT COALESCE(MAX(stream_version), 0)::int AS v FROM es.events WHERE stream_id = ${r.streamId}` as unknown as [{ v: number }];
+        const [{ v, link: lastLink }] = await t<{ v: number; link: string | null }[]>`
+          SELECT COALESCE(MAX(stream_version), 0)::int AS v,
+                 (SELECT link FROM es.events WHERE stream_id = ${r.streamId} ORDER BY stream_version DESC LIMIT 1) AS link
+          FROM es.events WHERE stream_id = ${r.streamId}` as unknown as [{ v: number; link: string | null }];
+        let prevLink = lastLink ?? GENESIS_LINK;
         if (r.expected === "no_stream" && v !== 0) throw new ConcurrencyError(r.streamId, r.expected, v);
         if (typeof r.expected === "number" && v !== r.expected) throw new ConcurrencyError(r.streamId, r.expected, v);
         let version = v;
         for (const e of r.events) {
           version += 1;
           const eventId = uuid();
+          const sealed = keys ? sealEvent(keys, eventId, e.type, r.streamId, e.data) : null;
+          const stored = sealed ? sealed.sealed : e.data;
+          const link = sealed ? linkOf(prevLink, sealed.digest, r.streamId, version) : null;
           let row;
           try {
             [row] = await t<{ global_position: string; recorded_at: Date }[]>`
-              INSERT INTO es.events (event_id, tenant_id, stream_id, stream_version, type, schema_version, module, data, meta)
+              INSERT INTO es.events (event_id, tenant_id, stream_id, stream_version, type, schema_version, module, data, meta, digest, link)
               VALUES (${eventId}, ${tenantId}, ${r.streamId}, ${version}, ${e.type}, ${SCHEMA_VERSION}, ${module},
-                      ${t.json(e.data as never)}, ${t.json(fullMeta as never)})
+                      ${t.json(stored as never)}, ${t.json(fullMeta as never)}, ${sealed?.digest ?? null}, ${link})
               RETURNING global_position::text, recorded_at`;
           } catch (err: unknown) {
             if ((err as { code?: string }).code === "23505") throw new ConcurrencyError(r.streamId, r.expected, version - 1);
@@ -91,8 +114,10 @@ export class EventStore {
             type: e.type, schemaVersion: SCHEMA_VERSION, data: e.data, meta: fullMeta,
             recordedAt: row!.recorded_at.toISOString(),
           };
+          // The outbox (and so the broker) carries the sealed payload, never the plaintext.
           await t`INSERT INTO es.outbox (global_position, tenant_id, subject, envelope)
-                  VALUES (${row!.global_position}, ${tenantId}, ${subjectFor(this.cellId, e.type, tenantId)}, ${t.json(env as never)})`;
+                  VALUES (${row!.global_position}, ${tenantId}, ${subjectFor(this.cellId, e.type, tenantId)}, ${t.json({ ...env, data: stored } as never)})`;
+          if (link) prevLink = link;
           out.push(env);
         }
       }
@@ -107,7 +132,27 @@ export class EventStore {
       SELECT event_id, global_position::text, stream_id, stream_version, type, schema_version, data, meta, recorded_at
       FROM es.events WHERE stream_id = ${streamId} AND stream_version > ${fromVersion} ORDER BY stream_version`;
     const rows = tx ? await q(tx) : await this.tenantTx(tenantId, (t) => q(t));
-    return rows.map(toEnvelope);
+    return this.openRows(rows);
+  }
+
+  /** Decrypt stored rows; plaintext rows are refused unless the legacy policy allows them. */
+  private async openRows(rows: Row[]): Promise<Envelope[]> {
+    const keysBy = new Map<string, TenantKeys>();
+    const out: Envelope[] = [];
+    for (const r of rows) {
+      let data = r.data;
+      if (isSealed(data)) {
+        if (!this.crypto) throw new CryptoError("no_key", "sealed event read without a keyring");
+        const tenant = r.meta.tenantId;
+        let k = keysBy.get(tenant);
+        if (!k) { k = await this.crypto.keyring.forTenant(tenant); keysBy.set(tenant, k); }
+        data = openEventData(k, r.event_id, r.type, r.stream_id, data).data;
+      } else if (this.crypto && (this.crypto.legacy ?? "reject") === "reject") {
+        throw new CryptoError("plaintext", `event ${r.event_id} is stored unencrypted; run: keys encrypt-legacy`);
+      }
+      out.push(toEnvelope({ ...r, data }));
+    }
+    return out;
   }
 
   async streamVersion(tenantId: string, streamId: string): Promise<number> {
@@ -130,7 +175,36 @@ export class EventStore {
   async readAll(fromPosition = "0", limit = 1000): Promise<Envelope[]> {
     return this.systemTx(async (t) => (await t<Row[]>`
       SELECT event_id, global_position::text, stream_id, stream_version, type, schema_version, data, meta, recorded_at
-      FROM es.events WHERE global_position > ${fromPosition} ORDER BY global_position LIMIT ${limit}`).map(toEnvelope));
+      FROM es.events WHERE global_position > ${fromPosition} ORDER BY global_position LIMIT ${limit}`)).then((rows) => this.openRows(rows));
+  }
+
+  /**
+   * Storage integrity: recompute every stream's link chain from stored digests (no keys needed)
+   * and, with `deep`, decrypt each event and recompute its digest. Returns problems found.
+   */
+  async verifyStorage(opts: { deep?: boolean; tenantId?: string } = {}): Promise<{ streams: number; events: number; problems: string[] }> {
+    const rows = await this.systemTx((t) => t<(Row & { digest: string | null; link: string | null })[]>`
+      SELECT event_id, global_position::text, stream_id, stream_version, type, schema_version, data, meta, recorded_at, digest, link
+      FROM es.events ${opts.tenantId ? t`WHERE tenant_id = ${opts.tenantId}` : t``} ORDER BY stream_id, stream_version`);
+    const problems: string[] = [];
+    let prev = GENESIS_LINK, stream = "", streams = 0;
+    const keysBy = new Map<string, TenantKeys | null>();
+    for (const r of rows) {
+      if (r.stream_id !== stream) { stream = r.stream_id; prev = GENESIS_LINK; streams++; }
+      if (!r.digest || !r.link) { problems.push(`${r.stream_id}#${r.stream_version}: not sealed (legacy plaintext)`); continue; }
+      if (linkOf(prev, r.digest, r.stream_id, r.stream_version) !== r.link) problems.push(`${r.stream_id}#${r.stream_version}: link chain broken`);
+      prev = r.link;
+      if (opts.deep && this.crypto && isSealed(r.data)) {
+        const tenant = r.meta.tenantId;
+        if (!keysBy.has(tenant)) keysBy.set(tenant, await this.crypto.keyring.forTenant(tenant).catch(() => null));
+        const k = keysBy.get(tenant);
+        if (!k) continue;                                               // shredded: structure only
+        try {
+          if (openEventData(k, r.event_id, r.type, r.stream_id, r.data).digest !== r.digest) problems.push(`${r.stream_id}#${r.stream_version}: digest mismatch`);
+        } catch (e) { problems.push(`${r.stream_id}#${r.stream_version}: ${(e as Error).message}`); }
+      }
+    }
+    return { streams, events: rows.length, problems };
   }
 }
 

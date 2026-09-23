@@ -10,6 +10,7 @@
     "@kuber/contracts": "workspace:*",
     "@kuber/eventstore": "workspace:*",
     "@kuber/policy": "workspace:*",
-    "postgres": "^3.4.7"
+    "postgres": "^3.4.7",
+    "@kuber/crypto": "workspace:*"
   }
 }

@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { formatINR, uuid } from "@kuber/contracts";
 import { renderText } from "@kuber/reporting";
 import { Cell } from "./cell.ts";
+import { MemoryKms } from "@kuber/crypto";
 
 const ROOT = join(import.meta.dirname, "..", "..", "..");
 const T = `demo-${Date.now().toString(36)}`, B = "main", OWNER = "owner:laksh";
@@ -16,6 +17,8 @@ const cell = await Cell.start({
   databaseUrl: process.env.DATABASE_URL ?? "postgres://kuber@localhost:5432/kuber",
   migrationUrl: process.env.MIGRATION_URL, appRole: process.env.APP_ROLE,
   policyDir: join(ROOT, "policies"), clock: () => clock.value,
+  // The demo uses a throwaway in-memory master key: its data is unreadable after the process exits.
+  kms: new MemoryKms(),
 });
 const csv = (f: string) => readFileSync(join(ROOT, "samples", f), "utf8");
 const say = (s: string) => console.log(`\n${s}`);

@@ -19,7 +19,7 @@ import { HELP } from "./copilot/router.ts";
 import { registerMcp } from "./mcp.ts";
 import type { Who } from "./tools.ts";
 
-export interface ServerOptions { copilot?: Copilot; mcpGrants?: Map<string, Who>; clock?: () => string }
+export interface ServerOptions { copilot?: Copilot; mcpGrants?: Map<string, Who>; clock?: () => string; https?: { key: Buffer; cert: Buffer } }
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -34,7 +34,10 @@ const toLine = (l: z.infer<typeof ApiLine>): Line => ({
 });
 
 export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstance {
-  const app = Fastify({ logger: false, bodyLimit: 5 * 1024 * 1024 });
+  // Fastify's overloads differ for http and https; the instance API used below is the same.
+  const app = (opts.https
+    ? Fastify({ logger: false, bodyLimit: 5 * 1024 * 1024, https: { ...opts.https, minVersion: "TLSv1.2" } })
+    : Fastify({ logger: false, bodyLimit: 5 * 1024 * 1024 })) as unknown as FastifyInstance;
   const clock = opts.clock ?? (() => new Date().toISOString().slice(0, 10));
   const copilot = opts.copilot ?? new Copilot(cell, null, null, clock);
   app.addContentTypeParser("text/csv", { parseAs: "string" }, (_req, body, done) => done(null, body));

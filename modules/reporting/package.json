@@ -9,6 +9,7 @@
   "dependencies": {
     "@kuber/contracts": "workspace:*",
     "@kuber/eventstore": "workspace:*",
-    "postgres": "^3.4.7"
+    "postgres": "^3.4.7",
+    "@kuber/crypto": "workspace:*"
   }
 }

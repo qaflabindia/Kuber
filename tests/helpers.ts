@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { Cell } from "@kuber/core";
+import { MemoryKms } from "@kuber/crypto";
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const POLICY_DIR = join(ROOT, "policies");
@@ -18,12 +19,15 @@ export async function freshDatabase(): Promise<{ url: string; ownerUrl: string; 
   const name = `kuber_test_${randomBytes(4).toString("hex")}`;
   const admin = postgres(ADMIN_URL, { max: 1, onnotice: () => undefined });
   await admin.unsafe(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${APP_ROLE}') THEN
-    CREATE ROLE ${APP_ROLE} LOGIN PASSWORD '${APP_ROLE}' NOSUPERUSER NOBYPASSRLS; END IF; END $$`);
+    CREATE ROLE ${APP_ROLE} LOGIN PASSWORD '${(process.env.TEST_APP_DB_PASSWORD ?? APP_ROLE).replace(/'/g, "")}' NOSUPERUSER NOBYPASSRLS; END IF; END $$`);
   await admin.unsafe(`CREATE DATABASE ${name}`);
   await admin.end();
-  const ownerUrl = ADMIN_URL.replace(/\/[^/]+$/, `/${name}`);
+  const u = new URL(ADMIN_URL);                      // keep credentials and ?sslmode=… of the admin URL
+  u.pathname = `/${name}`;
+  const ownerUrl = u.toString();
   // Same credentials as deploy/postgres-init.sql, so tests run against the Docker Postgres too.
-  const url = ownerUrl.replace(/\/\/[^@]+@/, `//${APP_ROLE}:${APP_ROLE}@`);
+  const app = new URL(ownerUrl); app.username = APP_ROLE; app.password = process.env.TEST_APP_DB_PASSWORD ?? APP_ROLE;
+  const url = app.toString();
   return {
     url, ownerUrl,
     drop: async () => {
@@ -37,6 +41,6 @@ export async function freshDatabase(): Promise<{ url: string; ownerUrl: string; 
 export async function startCell(clockDate: { value: string }, extra: Partial<Parameters<typeof Cell.start>[0]> = {}) {
   const db = await freshDatabase();
   const cell = await Cell.start({ databaseUrl: db.url, migrationUrl: db.ownerUrl, appRole: APP_ROLE, policyDir: POLICY_DIR,
-    clock: () => clockDate.value, ...extra });
+    clock: () => clockDate.value, kms: new MemoryKms(), ...extra });
   return { cell, db, stop: async () => { await cell.close(); await db.drop(); } };
 }

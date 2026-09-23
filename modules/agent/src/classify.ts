@@ -5,6 +5,7 @@
  * is explainable and repeatable.
  */
 import type { TransactionSql } from "postgres";
+import { isToken, type TenantKeys } from "@kuber/crypto";
 
 export const SUSPENSE = "SUSPENSE";
 
@@ -26,11 +27,13 @@ export interface Classification { accountId: string; confidence: number; source:
 
 export async function classify(tx: TransactionSql, tenantId: string, bookId: string, accounts: Set<string>, input: {
   direction: "in" | "out"; narration: string; partyId: string | null; partyName: string | null; purpose?: string | undefined;
-}): Promise<Classification> {
+}, keys?: TenantKeys): Promise<Classification> {
   const text = [input.narration, input.partyName ?? "", input.purpose ?? ""].join(" ").toLowerCase();
 
-  const rules = await tx<{ pattern: string; account_id: string }[]>`
-    SELECT pattern, account_id FROM agent.rules WHERE tenant_id = ${tenantId} ORDER BY rule_id DESC`;
+  const stored = await tx<{ pattern: string; pattern_idx: string | null; account_id: string }[]>`
+    SELECT pattern, pattern_idx, account_id FROM agent.rules WHERE tenant_id = ${tenantId} ORDER BY rule_id DESC`;
+  // Patterns are sealed; substring matching happens here, after decryption, never in SQL.
+  const rules = stored.map((r) => ({ ...r, pattern: keys && isToken(r.pattern) ? keys.openText(r.pattern, `agent.rules.pattern|${r.pattern_idx}`) : r.pattern }));
   for (const r of rules) {
     if (text.includes(r.pattern) && accounts.has(r.account_id)) return { accountId: r.account_id, confidence: 0.99, source: `rule '${r.pattern}'` };
   }

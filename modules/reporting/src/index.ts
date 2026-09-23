@@ -4,6 +4,7 @@
  * Every figure can be drilled through to its journal lines.
  */
 import type { Sql, TransactionSql } from "postgres";
+import { isToken, type TenantKeys } from "@kuber/crypto";
 import { formatINR, type Envelope, type EventData } from "@kuber/contracts";
 import { once, tenantRlsFor, type EventStore, type Migration } from "@kuber/eventstore";
 
@@ -81,11 +82,13 @@ export class Reporting {
       return;
     }
     const d = env.data as EventData<"JournalPosted">;
+    // Narrations are sealed; amounts, dates and account codes stay queryable for statements.
+    const narration = (await this.store.keys(t)).seal(d.narration, narrationCtx(d.journalId));
     let i = 0;
     for (const l of d.lines) {
       i++;
       const ins = await tx`INSERT INTO reporting.lines VALUES (${t}, ${d.bookId}, ${d.journalId}, ${i}, ${d.seq}, ${d.txnDate}, ${l.accountId},
-               ${l.amount}, ${l.partyId ?? null}, ${tx.json(l.dimensions as never)}, ${d.narration}, ${d.provisional}, ${d.reverses ?? null},
+               ${l.amount}, ${l.partyId ?? null}, ${tx.json(l.dimensions as never)}, ${narration}, ${d.provisional}, ${d.reverses ?? null},
                ${env.meta.principal}, ${d.voucherType ?? "journal"}) ON CONFLICT DO NOTHING RETURNING 1`;
       if (!ins.length) continue;
       const amt = BigInt(l.amount);
@@ -213,20 +216,29 @@ export class Reporting {
 
   /** Most recent journals with their lines, newest first. */
   async recentJournals(tenantId: string, bookId: string, limit = 20) {
-    return this.store.tenantTx(tenantId, (tx) => tx`
+    const keys = await this.store.keys(tenantId);
+    return openNarrations(keys, await this.store.tenantTx(tenantId, (tx) => tx<({ journal_id: string; narration: string } & Record<string, any>)[]>`
       SELECT journal_id, max(seq) AS seq, max(txn_date)::text AS txn_date, max(narration) AS narration,
              bool_or(provisional) AS provisional, max(reverses) AS reverses, max(principal) AS principal,
              json_agg(json_build_object('accountId', account_id, 'amount', amount::text, 'partyId', party_id) ORDER BY line_no) AS lines
       FROM reporting.lines WHERE tenant_id = ${tenantId} AND book_id = ${bookId}
-      GROUP BY journal_id ORDER BY max(seq) DESC LIMIT ${Math.min(Math.max(limit, 1), 200)}`);
+      GROUP BY journal_id ORDER BY max(seq) DESC LIMIT ${Math.min(Math.max(limit, 1), 200)}`));
   }
 
   /** Drill-through: the journal lines behind an account balance. */
   async drill(tenantId: string, bookId: string, accountId: string, from: string | null = null, to: string | null = null) {
-    return this.store.tenantTx(tenantId, (tx) => tx`
+    const keys = await this.store.keys(tenantId);
+    return openNarrations(keys, await this.store.tenantTx(tenantId, (tx) => tx<({ journal_id: string; narration: string } & Record<string, any>)[]>`
       SELECT journal_id, seq, txn_date::text, amount::text, party_id, narration, provisional, reverses, principal
       FROM reporting.lines WHERE tenant_id = ${tenantId} AND book_id = ${bookId} AND account_id = ${accountId}
         AND (${from}::date IS NULL OR txn_date >= ${from}::date) AND (${to}::date IS NULL OR txn_date <= ${to}::date)
-      ORDER BY txn_date, seq, line_no`);
+      ORDER BY txn_date, seq, line_no`));
   }
+}
+
+/** One context per journal: every line of a journal carries the same narration. */
+export const narrationCtx = (journalId: string) => `reporting.lines.narration|${journalId}`;
+
+function openNarrations<T extends { journal_id: string; narration: string }>(keys: TenantKeys, rows: T[]): T[] {
+  return rows.map((r) => (isToken(r.narration) ? { ...r, narration: keys.openText(r.narration, narrationCtx(r.journal_id)) } : r));
 }

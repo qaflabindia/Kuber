@@ -87,36 +87,93 @@ Requirements: Node 22+, pnpm 10, Docker (or local PostgreSQL 16 and NATS 2.11).
 Everything in containers:
 
 ```bash
-docker compose up -d --build               # postgres, nats (JetStream), valkey, core API on :8080
-curl localhost:8080/healthz
-docker compose logs -f core
+./scripts/secure-setup.sh                   # once: master key, certificates, passwords in ~/.kuber
+./kuber up -d --build                       # postgres, nats, valkey (TLS), core (HTTPS) on :8080, web on :3000
+curl --cacert ~/.kuber/certs/ca.crt https://localhost:8080/healthz
+./kuber logs -f core
 ```
 
-Or the infrastructure in containers and the API on your machine:
+Or the infrastructure in containers and core and web on your machine, with reload:
 
 ```bash
-docker compose up -d postgres nats valkey  # the app role kuber_app is created by deploy/postgres-init.sql
-pnpm install
-
-export MIGRATION_URL=postgres://kuber:kuber@localhost:5432/kuber        # owner: migrations and grants only
-export DATABASE_URL=postgres://kuber_app:kuber_app@localhost:5432/kuber # application role: RLS applies
-export APP_ROLE=kuber_app NATS_URL=nats://localhost:4222 CELL_ID=in-mum-1
-pnpm start                                  # API on :8080, relay and consumers in-process
-pnpm demo                                   # two-month freelancer walk-through, printed statements
+./scripts/dev.sh                            # same keys, TLS and passwords; see the script
+pnpm demo                                   # two-month walk-through with a throwaway in-memory key
 ```
 
 The server warns at start-up if the application role can bypass row-level security.
+
+## Data protection
+
+**Threat model**
+- **Protected against:**
+  - a stolen disk, volume, database dump or backup;
+  - an attacker who can read, copy or alter database rows;
+  - traffic sniffing between services;
+  - one tenant reading another's data.
+- **Not protected against:** a compromised running core process or a compromised host. Both hold keys in memory. That is the limit of any server-side encryption that still lets agents work unattended.
+
+**Encryption at rest (application-level, AES-256-GCM)**
+- **Envelope encryption.** A master key in a key-management service (KMS) unlocks per-tenant data keys; those keys encrypt the data.
+  - Locally, the KMS is `~/.kuber/master.keys` (permissions 0600, outside the repository).
+  - `packages/crypto` defines the KMS interface, so AWS KMS, GCP KMS or Vault Transit can replace the local file.
+  - Tenant keys are stored only in wrapped (locked) form, in `keys.tenant_keys`.
+- **Events** are encrypted before they reach PostgreSQL. The same ciphertext goes through the outbox and NATS, so no plaintext copy of an event exists at rest.
+- **Sensitive columns are encrypted:**
+  - payee names, rule patterns, draft proposals and narrations;
+  - ops plans and their actions.
+- **Some fields stay readable so reports can run in SQL:** amounts, dates and account codes in the reporting projection, and principals and tenant ids in event metadata.
+- **Each ciphertext is bound to its tenant and its exact row.** A value copied to another row or tenant does not decrypt.
+- **Payee ids are keyed pseudonyms** (`p.<HMAC>`), so a guessed merchant name cannot be confirmed from the database.
+- **Tamper evidence.** Each stream has a link chain over salted digests. It can be verified without keys, and still after re-encryption or crypto-shredding.
+- **Database guards:**
+  - `es.events` is append-only. The only permitted update is an owner-run maintenance reseal, which cannot change an event's identity or meaning.
+  - The application role cannot update events or keys, and cannot shred.
+
+**In transit**
+- A local CA issues one service certificate.
+- PostgreSQL requires TLS for TCP connections, with password authentication (SCRAM); clients connect with `sslmode=verify-full`.
+- NATS and Valkey accept TLS only, with token and password authentication.
+- core serves HTTPS.
+- The core refuses to start without all of this (`KUBER_REQUIRE_TLS=true`).
+- All published ports are bound to 127.0.0.1. The browser session cookie is encrypted (AES-256-GCM).
+
+**Operating it**
+- **First install:**
+  1. `./scripts/secure-setup.sh` creates the master key, certificates and passwords.
+  2. `./kuber up -d --build` starts the stack.
+- **Existing plaintext install:** `./scripts/secure-migrate.sh`. It rotates the database passwords, turns on TLS, encrypts every legacy row, purges the broker, verifies, then takes a backup.
+- **Keys** (`./kuber run --rm tools <command>`):
+
+  | Command | What it does |
+  | --- | --- |
+  | `status` | Shows master keys, tenant key versions and shredded tenants |
+  | `verify` | Checks link chains and digests; lists anything still plaintext |
+  | `rotate-master` | Adds a new master key and re-wraps every tenant key under it |
+  | `retire-master <id>` | Removes an old master key once nothing is wrapped with it |
+  | `rotate-tenant <t>` | Creates a new tenant data key and re-encrypts under it |
+  | `drop-retired <t>` | Drops old tenant data keys after a 5-minute grace, and only when unused |
+  | `shred <t> --reason … --confirm <t>` | Crypto-shreds a tenant (irreversible) |
+  | `purge-bus` | Drops broker messages |
+
+- **Crypto-shredding:**
+  - Deletes the tenant's keys and purges its readable projections.
+  - The encrypted events remain, unreadable, but their structure still verifies.
+  - Copies in backups become unreadable too.
+- **Backups:**
+  - `./scripts/backup.sh` streams `pg_dump` through chunked AES-256-GCM under a fresh file key, then verifies the result.
+  - `./scripts/restore.sh <file>` restores into a new database; `--replace` restores over the live one.
+  - Keep `master.keys` and the backups in different places. Either one alone is useless.
 
 ## Develop on this machine
 
 This folder is the source of truth; there is no other working copy.
 
-- Whole stack in containers: `docker compose up -d --build`, then open http://localhost:3000.
+- Whole stack in containers: `./scripts/secure-setup.sh` once, then `./kuber up -d --build`, then open http://localhost:3000.
 - Native with reload:
   - Run `./scripts/dev.sh`. Postgres, NATS and Valkey run in Docker; core and web run from source (core on 8080, web on 3000).
   - `pnpm` 10.28 is required: `corepack enable`.
 - Tests:
-  - Start the database with `docker compose up -d postgres`, then run `pnpm test:docker`.
+  - Start the database with `./kuber up -d postgres`, then run `pnpm test:docker`. It connects over TLS with the generated owner password.
   - Each test file gets its own database, dropped afterwards.
   - `pnpm test` uses `TEST_DATABASE_ADMIN_URL`, or `postgres://kuber@localhost:5433/postgres` if it is unset.
 - Browser walkthrough:

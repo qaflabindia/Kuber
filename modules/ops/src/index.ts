@@ -14,6 +14,7 @@ import type { Sql } from "postgres";
 import { canonical, sha256, uuid, type Line } from "@kuber/contracts";
 import { tenantRlsFor, type EventStore, type Migration } from "@kuber/eventstore";
 import { DomainError, type BookState } from "@kuber/gl";
+import { isToken, type TenantKeys } from "@kuber/crypto";
 import { balancesFromState } from "./math.ts";
 import { OPERATIONS } from "./operations.ts";
 import type { Action, Effect, OpContext, OpDef, OpName, Plan, PlanJournal, Services } from "./types.ts";
@@ -79,26 +80,29 @@ export class Operations {
     };
     plan.hash = sha256(canonical({ op: plan.op, book, basisSeq: plan.basisSeq, actions: d.actions }));
     if (committable) {
+      // Plans and their actions contain narrations and amounts: stored sealed, bound to the plan id.
+      const keys = await this.store.keys(tenant);
       await this.store.tenantTx(tenant, (tx) => tx`
         INSERT INTO ops.plans (tenant_id, plan_id, book_id, op, status, plan, actions, hash, basis_seq, created_by)
-        VALUES (${tenant}, ${plan.planId}, ${book}, ${plan.op}, 'proposed', ${tx.json(plan as never)}, ${tx.json(d.actions as never)},
-                ${plan.hash}, ${plan.basisSeq}, ${principal})`);
+        VALUES (${tenant}, ${plan.planId}, ${book}, ${plan.op}, 'proposed', ${tx.json(seal(keys, plan.planId, "plan", plan) as never)},
+                ${tx.json(seal(keys, plan.planId, "actions", d.actions) as never)}, ${plan.hash}, ${plan.basisSeq}, ${principal})`);
     }
     return plan;
   }
 
   async get(tenant: string, planId: string): Promise<Plan> {
-    const [r] = await this.store.tenantTx(tenant, (tx) => tx<{ plan: Plan; status: Plan["status"]; result: unknown }[]>`
+    const [r] = await this.store.tenantTx(tenant, (tx) => tx<{ plan: unknown; status: Plan["status"]; result: unknown }[]>`
       SELECT plan, status, result FROM ops.plans WHERE tenant_id = ${tenant} AND plan_id = ${planId}`);
     if (!r) throw new OpsError("no_plan", `no plan ${planId}`, 404);
-    return { ...r.plan, status: r.status };
+    return { ...open<Plan>(await this.store.keys(tenant), planId, "plan", r.plan), status: r.status };
   }
 
   async pending(tenant: string, book: string): Promise<Plan[]> {
-    const rows = await this.store.tenantTx(tenant, (tx) => tx<{ plan: Plan }[]>`
-      SELECT plan FROM ops.plans WHERE tenant_id = ${tenant} AND book_id = ${book} AND status = 'proposed'
+    const keys = await this.store.keys(tenant);
+    const rows = await this.store.tenantTx(tenant, (tx) => tx<{ plan_id: string; plan: unknown }[]>`
+      SELECT plan_id, plan FROM ops.plans WHERE tenant_id = ${tenant} AND book_id = ${book} AND status = 'proposed'
       ORDER BY created_at DESC LIMIT 50`);
-    return rows.map((r) => r.plan);
+    return rows.map((r) => open<Plan>(keys, r.plan_id, "plan", r.plan));
   }
 
   async discard(tenant: string, planId: string, principal: string) {
@@ -114,9 +118,11 @@ export class Operations {
    * marks the plan stale (and refuses) when the book moved since the simulation.
    */
   async commit(tenant: string, planId: string, principal: string, hash: string) {
-    const [row] = await this.store.tenantTx(tenant, (tx) => tx<{ plan: Plan; actions: Action[]; status: string; hash: string; basis_seq: number; book_id: string }[]>`
+    const [stored] = await this.store.tenantTx(tenant, (tx) => tx<{ plan: unknown; actions: unknown; status: string; hash: string; basis_seq: number; book_id: string }[]>`
       SELECT plan, actions, status, hash, basis_seq, book_id FROM ops.plans WHERE tenant_id = ${tenant} AND plan_id = ${planId}`);
-    if (!row) throw new OpsError("no_plan", `no plan ${planId}`, 404);
+    if (!stored) throw new OpsError("no_plan", `no plan ${planId}`, 404);
+    const keys = await this.store.keys(tenant);
+    const row = { ...stored, plan: open<Plan>(keys, planId, "plan", stored.plan), actions: open<Action[]>(keys, planId, "actions", stored.actions) };
     if (row.status !== "proposed") throw new OpsError("not_open", `plan is ${row.status}`);
     if (row.hash !== hash) throw new OpsError("hash_mismatch", "the plan you approved is not the plan on record; simulate again");
     if (row.plan.blocked) throw new OpsError("blocked", "a blocking check failed; resolve it and simulate again");
@@ -175,4 +181,12 @@ function effectsOf(s: BookState, journals: PlanJournal[]): Effect[] {
     return { accountId: id, name: s.accounts.get(id)?.name ?? (id === "RETAINED" ? "Retained surplus" : id),
       nature: s.accounts.get(id)?.nature ?? "equity", before: (b * sign).toString(), after: ((b + d) * sign).toString() };
   }).sort((a, b) => a.accountId.localeCompare(b.accountId));
+}
+
+// ------------------------------------------------------------------ sealed columns
+const planCtx = (planId: string, field: string) => `ops.plans.${field}|${planId}`;
+const seal = (keys: TenantKeys, planId: string, field: string, v: unknown) => ({ $c: keys.sealJson(v, planCtx(planId, field)) });
+function open<T>(keys: TenantKeys, planId: string, field: string, v: unknown): T {
+  const c = (v as { $c?: unknown } | null)?.$c;
+  return (isToken(c) ? keys.openJson<T>(c, planCtx(planId, field)) : v) as T;
 }

@@ -1,3 +1,4 @@
+import { KEYS_MIGRATION_SQL } from "@kuber/crypto";
 /** Event store schema. Each module contributes its own migrations in its own schema. */
 export interface Migration { id: string; sql: string }
 
@@ -70,10 +71,40 @@ CREATE POLICY outbox_tenant ON es.outbox
   WITH CHECK (current_setting('kuber.role', true) = 'system' OR tenant_id = current_setting('kuber.tenant', true));
 `,
   },
+  {
+    id: "es-002-sealed-events",
+    // Payloads are stored sealed ({"$c": token}); digest/link form a per-stream hash chain over
+    // salted plaintext digests that stays verifiable without keys (after re-encryption or shredding).
+    sql: `
+ALTER TABLE es.events ADD COLUMN digest TEXT;
+ALTER TABLE es.events ADD COLUMN link TEXT;
+
+-- Events stay facts: never deleted, never changed in meaning. The only permitted update is a
+-- maintenance reseal (legacy encryption, key rotation) run by the owner role with
+-- kuber.maintenance = 'reseal': it may replace the ciphertext, set a missing digest and rebuild
+-- links, and nothing else. The application role has no UPDATE privilege at all.
+CREATE FUNCTION es.guard_change() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' AND current_setting('kuber.maintenance', true) = 'reseal'
+     AND NEW.global_position = OLD.global_position AND NEW.event_id = OLD.event_id
+     AND NEW.tenant_id = OLD.tenant_id AND NEW.stream_id = OLD.stream_id AND NEW.stream_version = OLD.stream_version
+     AND NEW.type = OLD.type AND NEW.schema_version = OLD.schema_version AND NEW.module = OLD.module
+     AND NEW.meta = OLD.meta AND NEW.recorded_at IS NOT DISTINCT FROM OLD.recorded_at
+     AND (OLD.digest IS NULL OR NEW.digest = OLD.digest) THEN
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION 'es.events is append-only';
+END $$;
+DROP TRIGGER events_append_only ON es.events;
+CREATE TRIGGER events_append_only BEFORE UPDATE OR DELETE ON es.events
+  FOR EACH ROW EXECUTE FUNCTION es.guard_change();
+` + KEYS_MIGRATION_SQL + tenantRlsFor("keys"),
+  },
 ];
 
 /** SQL that enables tenant row-level security on every table in a module schema (defence in depth). */
-export const tenantRlsFor = (schema: string) => `
+export function tenantRlsFor(schema: string): string {
+  return `
 DO $$
 DECLARE t record;
 BEGIN
@@ -85,6 +116,7 @@ BEGIN
       WITH CHECK (current_setting('kuber.role', true) = 'system' OR tenant_id = current_setting('kuber.tenant', true))$p$, t.tablename);
   END LOOP;
 END $$;`;
+}
 
 /**
  * Grants for the application role. The application must connect as a role that is neither a
@@ -95,4 +127,8 @@ GRANT USAGE ON SCHEMA ${s} TO ${role};
 GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA ${s} TO ${role};
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA ${s} TO ${role};`).join("\n") + `
 REVOKE UPDATE ON es.events FROM ${role};
+-- Key records: the application may create a tenant's first keys and read them; rotation,
+-- re-wrapping and shredding are operator actions that run with the owner role.
+REVOKE UPDATE ON keys.tenant_keys FROM ${role};
+REVOKE INSERT, UPDATE ON keys.shredded FROM ${role};
 GRANT SELECT, INSERT ON public.schema_migrations TO ${role};`;
