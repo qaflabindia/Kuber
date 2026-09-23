@@ -3,3 +3,4 @@ node_modules
 *.log
 .svelte-kit
 build
+e2e-shots

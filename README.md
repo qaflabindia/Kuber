@@ -107,6 +107,23 @@ pnpm demo                                   # two-month freelancer walk-through,
 
 The server warns at start-up if the application role can bypass row-level security.
 
+## Develop on this machine
+
+This folder is the source of truth; there is no other working copy.
+
+- Whole stack in containers: `docker compose up -d --build`, then open http://localhost:3000.
+- Native with reload:
+  - Run `./scripts/dev.sh`. Postgres, NATS and Valkey run in Docker; core and web run from source (core on 8080, web on 3000).
+  - `pnpm` 10.28 is required: `corepack enable`.
+- Tests:
+  - Start the database with `docker compose up -d postgres`, then run `pnpm test:docker`.
+  - Each test file gets its own database, dropped afterwards.
+  - `pnpm test` uses `TEST_DATABASE_ADMIN_URL`, or `postgres://kuber@localhost:5433/postgres` if it is unset.
+- Browser walkthrough:
+  - Run `npx playwright install chromium` once, then `pnpm e2e` against a running stack.
+  - It writes screenshots to `e2e-shots/` and fails on any browser console error.
+- Typecheck: `pnpm typecheck` checks core. For web, run `cd apps/web && pnpm check`.
+
 ## Tests
 
 ```bash

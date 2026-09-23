@@ -18,11 +18,12 @@ export async function freshDatabase(): Promise<{ url: string; ownerUrl: string; 
   const name = `kuber_test_${randomBytes(4).toString("hex")}`;
   const admin = postgres(ADMIN_URL, { max: 1, onnotice: () => undefined });
   await admin.unsafe(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${APP_ROLE}') THEN
-    CREATE ROLE ${APP_ROLE} LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$`);
+    CREATE ROLE ${APP_ROLE} LOGIN PASSWORD '${APP_ROLE}' NOSUPERUSER NOBYPASSRLS; END IF; END $$`);
   await admin.unsafe(`CREATE DATABASE ${name}`);
   await admin.end();
   const ownerUrl = ADMIN_URL.replace(/\/[^/]+$/, `/${name}`);
-  const url = ownerUrl.replace(/\/\/[^@]+@/, `//${APP_ROLE}@`);
+  // Same credentials as deploy/postgres-init.sql, so tests run against the Docker Postgres too.
+  const url = ownerUrl.replace(/\/\/[^@]+@/, `//${APP_ROLE}:${APP_ROLE}@`);
   return {
     url, ownerUrl,
     drop: async () => {
