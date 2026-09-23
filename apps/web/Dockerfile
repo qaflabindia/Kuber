@@ -13,6 +13,7 @@ FROM node:22-bookworm-slim
 WORKDIR /app
 ENV NODE_ENV=production PORT=3000 BODY_SIZE_LIMIT=3M
 COPY --from=build /out /app
+RUN chmod -R a+rX,go-w /app
 USER node
 EXPOSE 3000
 HEALTHCHECK --interval=10s --timeout=3s CMD node -e "fetch('http://localhost:3000/signin').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

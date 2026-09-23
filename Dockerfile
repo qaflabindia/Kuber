@@ -22,6 +22,9 @@ WORKDIR /app
 ENV NODE_ENV=production PORT=8080 POLICY_DIR=/app/policies
 COPY --from=deps /app /app
 COPY . .
+# Host file modes (a 0600 checkout) must not decide what the runtime user can read: code is
+# read-only for everyone, writable by no one at runtime.
+RUN chmod -R a+rX,go-w /app
 USER node
 EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=3s CMD node -e "fetch((process.env.TLS_CERT_FILE?'https':'http')+'://localhost:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
