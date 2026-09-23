@@ -44,10 +44,19 @@ Channels ──TransactionExtracted──▶ Agent ──PostingRequested──�
 
 Requirements: Node 22+, pnpm 10, Docker (or local PostgreSQL 16 and NATS 2.11).
 
+Everything in containers:
+
 ```bash
-docker compose up -d                       # postgres, nats (JetStream), valkey
+docker compose up -d --build               # postgres, nats (JetStream), valkey, core API on :8080
+curl localhost:8080/healthz
+docker compose logs -f core
+```
+
+Or the infrastructure in containers and the API on your machine:
+
+```bash
+docker compose up -d postgres nats valkey  # the app role kuber_app is created by deploy/postgres-init.sql
 pnpm install
-psql postgres://kuber:kuber@localhost:5432/kuber -c "CREATE ROLE kuber_app LOGIN PASSWORD 'kuber_app' NOSUPERUSER NOBYPASSRLS"
 
 export MIGRATION_URL=postgres://kuber:kuber@localhost:5432/kuber        # owner: migrations and grants only
 export DATABASE_URL=postgres://kuber_app:kuber_app@localhost:5432/kuber # application role: RLS applies

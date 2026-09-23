@@ -1,4 +1,6 @@
-# Local cell: one of each stateful component. Production runs these per cell on EKS (section 16.6).
+# Local cell: one of each stateful component plus the core API.
+# Production runs these per cell on EKS (implementation design, section 16.6).
+name: kuber
 services:
   postgres:
     image: postgres:16
@@ -7,16 +9,32 @@ services:
       POSTGRES_PASSWORD: kuber
       POSTGRES_DB: kuber
     ports: ["5432:5432"]
-    volumes: [pgdata:/var/lib/postgresql/data]
-    healthcheck: { test: ["CMD-SHELL", "pg_isready -U kuber"], interval: 5s, retries: 10 }
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres-init.sql:/docker-entrypoint-initdb.d/01-app-role.sql:ro
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U kuber -d kuber"], interval: 5s, retries: 20 }
   nats:
     image: nats:2.11
-    command: ["-js", "-sd", "/data"]
+    command: ["-js", "-sd", "/data", "-m", "8222"]
     ports: ["4222:4222", "8222:8222"]
     volumes: [natsdata:/data]
   valkey:
     image: valkey/valkey:8
     ports: ["6379:6379"]
+  core:
+    build: .
+    environment:
+      DATABASE_URL: postgres://kuber_app:kuber_app@postgres:5432/kuber
+      MIGRATION_URL: postgres://kuber:kuber@postgres:5432/kuber
+      APP_ROLE: kuber_app
+      NATS_URL: nats://nats:4222
+      CELL_ID: local-1
+      PORT: "8080"
+    ports: ["8080:8080"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_started }
+    restart: unless-stopped
 volumes:
   pgdata: {}
   natsdata: {}
