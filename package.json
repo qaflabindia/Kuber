@@ -34,5 +34,6 @@
     "@kuber/reporting": "workspace:*",
     "@kuber/core": "workspace:*",
     "postgres": "^3.4.7"
-  }
+  },
+  "packageManager": "pnpm@10.28.0"
 }
