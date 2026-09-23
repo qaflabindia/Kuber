@@ -11,6 +11,7 @@ import { PolicyEngine } from "@kuber/policy";
 import { Channels } from "@kuber/channels";
 import { AGENT_MIGRATIONS, Agent } from "@kuber/agent";
 import { REPORTING_MIGRATIONS, Reporting } from "@kuber/reporting";
+import { OPS_MIGRATIONS, Operations } from "@kuber/ops";
 
 export interface CellOptions {
   /** Application connection: must be a role without SUPERUSER or BYPASSRLS, or tenant isolation does not apply. */
@@ -31,14 +32,15 @@ export class Cell {
     public readonly cellId: string, public readonly sql: Sql, public readonly store: EventStore, public readonly bus: Bus,
     public readonly relay: OutboxRelay, public readonly gl: GeneralLedger, public readonly channels: Channels,
     public readonly agent: Agent, public readonly reporting: Reporting, public readonly policies: PolicyEngine,
+    public readonly ops: Operations,
   ) {}
 
   static async start(o: CellOptions): Promise<Cell> {
     const cellId = o.cellId ?? "local";
-    const migrations = [...EVENTSTORE_MIGRATIONS, ...AGENT_MIGRATIONS, ...REPORTING_MIGRATIONS];
+    const migrations = [...EVENTSTORE_MIGRATIONS, ...AGENT_MIGRATIONS, ...REPORTING_MIGRATIONS, ...OPS_MIGRATIONS];
     const owner = postgres(o.migrationUrl ?? o.databaseUrl, { max: 1, onnotice: () => undefined });
     await migrate(owner, migrations);
-    if (o.appRole) await owner.unsafe(appGrants(o.appRole, ["es", "agent", "reporting"]));
+    if (o.appRole) await owner.unsafe(appGrants(o.appRole, ["es", "agent", "reporting", "ops"]));
     await owner.end();
     const sql = postgres(o.databaseUrl, { max: o.poolSize ?? 10, onnotice: () => undefined });
     const [r] = await sql<{ bypass: boolean }[]>`SELECT (rolsuper OR rolbypassrls) AS bypass FROM pg_roles WHERE rolname = current_user`;
@@ -51,13 +53,14 @@ export class Cell {
     const channels = new Channels(store);
     const agent = new Agent(sql, store, policies, o.clock);
     const reporting = new Reporting(sql, store);
+    const ops = new Operations(sql, store, { gl, reporting, agent, policies }, o.clock);
 
     const s = (module: string, type: string) => `kuber.${cellId}.${module}.${type}.*`;
     await bus.subscribe({ name: "gl", filter: [s("agent", "PostingRequested"), s("agent", "CorrectionRequested")], handler: gl.handler });
     await bus.subscribe({ name: "agent", filter: [s("channels", "TransactionExtracted"), s("gl", "BookOpened"), s("gl", "AccountAdded"),
       s("gl", "JournalPosted"), s("gl", "JournalReversed")], handler: agent.handler });
     await bus.subscribe({ name: "reporting", filter: [s("gl", "BookOpened"), s("gl", "AccountAdded"), s("gl", "JournalPosted")], handler: reporting.handler });
-    return new Cell(cellId, sql, store, bus, relay, gl, channels, agent, reporting, policies);
+    return new Cell(cellId, sql, store, bus, relay, gl, channels, agent, reporting, policies, ops);
   }
 
   /** In-process runs: publish everything pending and wait until every module has caught up. */

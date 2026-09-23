@@ -24,7 +24,10 @@
   --brass-wash: rgba(201, 168, 106, 0.1);
   --sage: #8dbba4;       /* money in, healthy */
   --sage-wash: rgba(141, 187, 164, 0.12);
-  --clay: #df9a80;       /* needs attention */
+  --clay: #df9a80;
+  /* chart series: validated for CVD and contrast on --ink-1 (dataviz validator, dark mode) */
+  --series-in: #3987e5;
+  --series-out: #d95926;       /* needs attention */
   --clay-wash: rgba(223, 154, 128, 0.12);
   --focus: #e3c98f;
 

@@ -41,6 +41,18 @@ export interface Draft {
 export interface Ratification { request_id: string; journal_id: string; txn_id: string; due_by: string; narration: string }
 export interface DrillLine { journal_id: string; seq: number; txn_date: string; amount: string; party_id: string | null; narration: string; provisional: boolean; reverses: string | null; principal: string }
 
+export interface PlanCheck { label: string; ok: boolean; blocking: boolean; detail?: string }
+export interface PlanSection { title: string; kind: "kv" | "table"; columns?: string[]; rows: (string | number | null)[][]; money?: number[] }
+export interface Plan {
+  planId: string; op: string; bookId: string; kind: "read" | "write"; gate: "policy" | "human"; title: string; summary: string;
+  policy: { ids: string[]; level: string; approver: string; reasons: string[] } | null;
+  checks: PlanCheck[]; journals: { journalId: string; txnDate: string; narration: string; voucherType: string; lines: { accountId: string; name: string; amount: string; dimensions?: Record<string, string> }[] }[];
+  effects: { accountId: string; name: string; nature: string; before: string; after: string }[];
+  sections: PlanSection[]; data?: unknown; notes: string[]; links: [string, string][];
+  basisSeq: number; createdAt: string; createdBy: string; hash: string; status: "preview" | "proposed" | "committed" | "discarded" | "stale"; blocked: boolean; needsPerson: boolean;
+}
+export interface CopilotReply { reply: string; cards: Plan[]; suggestions?: string[]; engine: string; trace: { tool: string; ok: boolean }[] }
+
 export const api = (s: Pick<Session, "tenant" | "principal">) => ({
   books: () => call<{ book_id: string; accounts: number }[]>(s, "GET", "/books"),
   openBook: (bookId: string, entityId: string, entityType: string) => call(s, "POST", "/books", { bookId, entityId, entityType }),
@@ -60,5 +72,11 @@ export const api = (s: Pick<Session, "tenant" | "principal">) => ({
     call<Statement>(s, "GET", `/books/${book}/reports/${kind}${Object.keys(q).length ? "?" + new URLSearchParams(q) : ""}`),
   drill: (book: string, account: string, q: Record<string, string> = {}) =>
     call<DrillLine[]>(s, "GET", `/books/${book}/accounts/${encodeURIComponent(account)}/lines${Object.keys(q).length ? "?" + new URLSearchParams(q) : ""}`),
+  copilotInfo: () => call<{ engine: string; suggestions: string[] }>(s, "GET", "/copilot"),
+  ask: (book: string, text: string, history: { role: "user" | "assistant"; text: string }[]) => call<CopilotReply>(s, "POST", `/books/${book}/copilot`, { text, history }),
+  plan: (book: string, op: string, input: unknown = {}) => call<Plan>(s, "POST", `/books/${book}/ops/${op}`, input),
+  plans: (book: string) => call<Plan[]>(s, "GET", `/books/${book}/plans`),
+  commit: (id: string, hash: string) => call<{ planId: string; status: string; steps?: string[]; message?: string }>(s, "POST", `/plans/${id}/commit`, { hash }),
+  discard: (id: string) => call(s, "POST", `/plans/${id}/discard`, {}),
   verify: (book: string) => call<{ intact: boolean; firstBrokenJournal: string | null }>(s, "GET", `/books/${book}/verify`),
 });

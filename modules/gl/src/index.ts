@@ -8,7 +8,7 @@ import { ConcurrencyError, once, type EventStore, type MetaInput } from "@kuber/
 import { DomainError, decide, emptyBook, evolve, verifyChain, type BookCommand, type BookState } from "./book.ts";
 import { SEEDS } from "./seeds.ts";
 
-export { DomainError, verifyChain, type BookCommand, type BookState } from "./book.ts";
+export { DomainError, verifyChain, validateJournal, type BookCommand, type BookState } from "./book.ts";
 export { SEEDS } from "./seeds.ts";
 
 export const bookStream = (tenantId: string, bookId: string) => `${tenantId}/book/${bookId}`;

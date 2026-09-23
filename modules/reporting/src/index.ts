@@ -41,6 +41,14 @@ CREATE POLICY tenant_isolation ON reporting.daily
   USING (current_setting('kuber.role', true) = 'system' OR tenant_id = current_setting('kuber.tenant', true))
   WITH CHECK (current_setting('kuber.role', true) = 'system' OR tenant_id = current_setting('kuber.tenant', true));
 `,
+}, {
+  id: "reporting-003-voucher-type",
+  sql: `
+-- Closing vouchers move the year's income and expenses into retained surplus; income-statement
+-- reports add them back so a closed year still shows what it earned and spent.
+ALTER TABLE reporting.lines ADD COLUMN voucher_type TEXT NOT NULL DEFAULT 'journal';
+CREATE INDEX lines_closing ON reporting.lines (tenant_id, book_id, txn_date) WHERE voucher_type = 'closing';
+`,
 }];
 
 export interface Row { label: string; amount: bigint; accountId?: string; section?: string }
@@ -78,7 +86,7 @@ export class Reporting {
       i++;
       const ins = await tx`INSERT INTO reporting.lines VALUES (${t}, ${d.bookId}, ${d.journalId}, ${i}, ${d.seq}, ${d.txnDate}, ${l.accountId},
                ${l.amount}, ${l.partyId ?? null}, ${tx.json(l.dimensions as never)}, ${d.narration}, ${d.provisional}, ${d.reverses ?? null},
-               ${env.meta.principal}) ON CONFLICT DO NOTHING RETURNING 1`;
+               ${env.meta.principal}, ${d.voucherType ?? "journal"}) ON CONFLICT DO NOTHING RETURNING 1`;
       if (!ins.length) continue;
       const amt = BigInt(l.amount);
       await tx`INSERT INTO reporting.daily VALUES (${t}, ${d.bookId}, ${l.accountId}, ${d.txnDate}, ${l.amount},
@@ -92,7 +100,7 @@ export class Reporting {
   }
 
   /** Balances per account (children rolled into their own rows; parents shown separately by the caller if needed). */
-  private async balances(tenantId: string, bookId: string, from: string | null, to: string | null) {
+  async balances(tenantId: string, bookId: string, from: string | null, to: string | null) {
     return this.store.tenantTx(tenantId, async (tx) => {
       const rows = await tx<{ account_id: string; name: string; nature: string; bal: string; dr: string; cr: string }[]>`
         SELECT a.account_id, a.name, a.nature,
@@ -119,7 +127,8 @@ export class Reporting {
   }
 
   async profitAndLoss(tenantId: string, bookId: string, from: string | null, to: string | null): Promise<Statement> {
-    const b = await this.balances(tenantId, bookId, from, to);
+    const closing = await this.closingNet(tenantId, bookId, from, to);
+    const b = (await this.balances(tenantId, bookId, from, to)).map((a) => ({ ...a, bal: a.bal - (closing.get(a.account_id) ?? 0n) }));
     const inc = b.filter((a) => a.nature === "income" && a.bal !== 0n);
     const exp = b.filter((a) => a.nature === "expense" && a.bal !== 0n);
     const ti = inc.reduce((s, a) => s - a.bal, 0n), te = exp.reduce((s, a) => s + a.bal, 0n);
@@ -155,6 +164,35 @@ export class Reporting {
         { label: `Assets on ${d2}`, amount: y.a }, { label: `Liabilities on ${d2}`, amount: y.l }, { label: `Capital on ${d2}`, amount: y.c },
         { label: "Add: drawings", amount: drawings }, { label: "Less: capital introduced", amount: introduced }],
       totals: { "Profit / (loss) for the period": y.c - x.c + drawings - introduced } };
+  }
+
+  /** Net of closing vouchers per account in a range, so income statements can add them back. */
+  async closingNet(tenantId: string, bookId: string, from: string | null, to: string | null): Promise<Map<string, bigint>> {
+    const rows = await this.store.tenantTx(tenantId, (tx) => tx<{ account_id: string; net: string }[]>`
+      SELECT account_id, SUM(amount)::text AS net FROM reporting.lines
+      WHERE tenant_id = ${tenantId} AND book_id = ${bookId} AND voucher_type = 'closing'
+        AND (${from}::date IS NULL OR txn_date >= ${from}::date) AND (${to}::date IS NULL OR txn_date <= ${to}::date)
+      GROUP BY account_id`);
+    return new Map(rows.map((r) => [r.account_id, BigInt(r.net)]));
+  }
+
+  /** Monthly movement per account nature (closing vouchers excluded), for trends and run-rate. */
+  async monthly(tenantId: string, bookId: string, from: string, to: string) {
+    const rows = await this.store.tenantTx(tenantId, (tx) => tx<{ month: string; nature: string; account_id: string; net: string }[]>`
+      SELECT to_char(date_trunc('month', l.txn_date), 'YYYY-MM') AS month, a.nature, l.account_id, SUM(l.amount)::text AS net
+      FROM reporting.lines l JOIN reporting.accounts a ON a.tenant_id = l.tenant_id AND a.book_id = l.book_id AND a.account_id = l.account_id
+      WHERE l.tenant_id = ${tenantId} AND l.book_id = ${bookId} AND l.voucher_type <> 'closing'
+        AND l.txn_date >= ${from}::date AND l.txn_date <= ${to}::date
+      GROUP BY 1, 2, 3 ORDER BY 1`);
+    return rows.map((r) => ({ ...r, net: BigInt(r.net) }));
+  }
+
+  /** Last date with any posting, and the projection checkpoint (for freshness checks). */
+  async position(tenantId: string, bookId: string) {
+    const [r] = await this.store.tenantTx(tenantId, (tx) => tx<{ last_date: string | null; seq: number | null }[]>`
+      SELECT (SELECT max(txn_date)::text FROM reporting.lines WHERE tenant_id = ${tenantId} AND book_id = ${bookId}) AS last_date,
+             (SELECT seq FROM reporting.checkpoints WHERE tenant_id = ${tenantId} AND book_id = ${bookId}) AS seq`);
+    return { lastDate: r?.last_date ?? null, seq: r?.seq ?? 0 };
   }
 
   /** Books this tenant has, with the entity type inferred from the chart. */

@@ -1,32 +1,26 @@
 <script lang="ts">
   import "$lib/styles/app.css";
   import { page } from "$app/state";
+  import { goto } from "$app/navigation";
   import Icon from "$lib/components/Icon.svelte";
-  import Capture from "$lib/components/Capture.svelte";
 
   let { data, children } = $props();
-  let captureOpen = $state(false);
 
-  const nav = $derived.by(() => {
+  // No menu: the rail lists only what is waiting for the person, and disappears when nothing is.
+  const waiting = $derived.by(() => {
     const sh = data.shell;
     if (!sh) return [];
-    const items: { href: string; label: string; icon: string; count?: number; tone?: string }[] = [
-      { href: "/", label: "Today", icon: "today" },
-    ];
-    if (sh.reviewCount) items.push({ href: "/review", label: "Review", icon: "review", count: sh.reviewCount, tone: sh.awaitingApproval ? "clay" : "brass" });
-    if (sh.confirmCount) items.push({ href: "/confirm", label: "Confirm", icon: "confirm", count: sh.confirmCount });
-    items.push({ href: "/import", label: "Import", icon: "import" });
-    if (sh.hasJournals) {
-      items.push({ href: "/reports/profit-and-loss", label: "Reports", icon: "reports" });
-      items.push({ href: "/ledger", label: "Ledger", icon: "ledger" });
-    }
+    const items: { href: string; label: string; icon: string; count: number; tone: string }[] = [];
+    if (sh.pendingPlans) items.push({ href: "/", label: sh.pendingPlans === 1 ? "Plan to approve" : "Plans to approve", icon: "confirm", count: sh.pendingPlans, tone: "brass" });
+    if (sh.reviewCount) items.push({ href: "/review", label: "Entries to review", icon: "review", count: sh.reviewCount, tone: sh.awaitingApproval ? "clay" : "brass" });
+    if (sh.confirmCount) items.push({ href: "/confirm", label: "Postings to confirm", icon: "confirm", count: sh.confirmCount, tone: "brass" });
     return items;
   });
+  const onCanvas = $derived(page.url.pathname === "/");
 
-  const active = (href: string) => href === "/" ? page.url.pathname === "/" : page.url.pathname.startsWith(href.split("/").slice(0, 2).join("/"));
-
+  function focusAsk() { if (onCanvas) document.getElementById("ask")?.focus(); else goto("/?ask"); }
   function onKey(e: KeyboardEvent) {
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k" && data.shell) { e.preventDefault(); captureOpen = true; }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k" && data.shell) { e.preventDefault(); focusAsk(); }
   }
 </script>
 
@@ -43,21 +37,24 @@
         <span class="word">Kuber</span>
       </a>
 
-      <button class="capture-btn" onclick={() => (captureOpen = true)}>
+      <button class="capture-btn" onclick={focusAsk}>
         <Icon name="spark" size={16} />
-        <span>Tell Kuber</span>
+        <span>Ask Kuber</span>
         <span class="kbd">⌘K</span>
       </button>
 
-      <nav aria-label="Main">
-        {#each nav as item (item.href)}
-          <a href={item.href} class:active={active(item.href)} aria-current={active(item.href) ? "page" : undefined}>
-            <Icon name={item.icon} />
-            <span>{item.label}</span>
-            {#if item.count}<span class="count {item.tone ?? ''}">{item.count}</span>{/if}
-          </a>
-        {/each}
-      </nav>
+      {#if waiting.length}
+        <div class="waiting" aria-label="Waiting for you">
+          <div class="wl">Waiting for you</div>
+          {#each waiting as item (item.href + item.label)}
+            <a href={item.href} class:active={page.url.pathname === item.href && item.href !== "/"}>
+              <Icon name={item.icon} size={16} />
+              <span>{item.label}</span>
+              <span class="count {item.tone}">{item.count}</span>
+            </a>
+          {/each}
+        </div>
+      {/if}
 
       <div class="rail-foot">
         <div class="integrity" class:ok={data.shell.intact} title="Every posted journal is chained with SHA-256; this is recomputed on each visit.">
@@ -78,11 +75,11 @@
     </aside>
 
     <main class="main">
+      {#if !onCanvas}<a class="back" href="/"><Icon name="arrowRight" size={14} /> Canvas</a>{/if}
       {@render children()}
     </main>
   </div>
 
-  <Capture bind:open={captureOpen} />
 {:else}
   {@render children()}
 {/if}
@@ -103,14 +100,17 @@
   }
   .capture-btn:hover { background: rgba(201, 168, 106, 0.16); }
   .capture-btn span:nth-child(2) { flex: 1; text-align: left; }
-  nav { display: grid; gap: 2px; }
-  nav a {
-    display: flex; align-items: center; gap: 12px; height: 40px; padding: 0 12px; border-radius: var(--r-md);
-    color: var(--text-2); font-weight: 500; transition: background 0.12s var(--ease), color 0.12s var(--ease);
+  .waiting { display: grid; gap: 2px; }
+  .wl { font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--text-3); font-weight: 600; padding: 0 12px 6px; }
+  .waiting a {
+    display: flex; align-items: center; gap: 10px; height: 38px; padding: 0 12px; border-radius: var(--r-md);
+    color: var(--text-2); font-weight: 500; font-size: 13.5px; transition: background 0.12s var(--ease), color 0.12s var(--ease);
   }
-  nav a:hover { background: var(--ink-2); color: var(--text); }
-  nav a.active { background: var(--ink-2); color: var(--text); box-shadow: inset 2px 0 0 var(--brass); }
-  nav a span:nth-child(2) { flex: 1; }
+  .waiting a:hover, .waiting a.active { background: var(--ink-2); color: var(--text); }
+  .waiting a span:nth-child(2) { flex: 1; }
+  .back { display: inline-flex; gap: 6px; align-items: center; color: var(--text-3); font-size: 13px; margin-bottom: 18px; }
+  .back :global(svg) { transform: rotate(180deg); }
+  .back:hover { color: var(--text); }
   .count { font-size: 11.5px; font-weight: 700; min-width: 22px; height: 20px; padding: 0 7px; border-radius: 999px;
     display: inline-flex; align-items: center; justify-content: center; background: var(--ink-3); color: var(--text-2); }
   .count.brass { background: var(--brass-wash); color: var(--brass-2); }
@@ -130,7 +130,7 @@
   @media (max-width: 900px) {
     .shell { grid-template-columns: 1fr; }
     .rail { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; padding: 12px 16px; }
-    nav { grid-auto-flow: column; overflow-x: auto; }
+    .waiting { grid-auto-flow: column; overflow-x: auto; } .wl { display: none; }
     .rail-foot, .capture-btn .kbd { display: none; }
     .main { padding: 24px 16px 64px; }
   }

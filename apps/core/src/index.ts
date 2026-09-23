@@ -1,2 +1,7 @@
 export { Cell, type CellOptions } from "./cell.ts";
 export { buildServer } from "./server.ts";
+export { Copilot, type CopilotReply } from "./copilot/index.ts";
+export { route, amountIn, dateIn } from "./copilot/router.ts";
+export type { LlmProvider, Turn, Message, LlmTool } from "./copilot/provider.ts";
+export { parseGrants } from "./mcp.ts";
+export { kuberTools, planText } from "./tools.ts";

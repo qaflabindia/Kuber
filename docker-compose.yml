@@ -30,6 +30,13 @@ services:
       NATS_URL: nats://nats:4222
       CELL_ID: local-1
       PORT: "8080"
+      # Copilot model (optional). Without both, the canvas uses Kuber's deterministic router.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      KUBER_LLM_MODEL: ${KUBER_LLM_MODEL:-}
+      # MCP server for external agents (optional): {"<token>": {"tenant": "...", "book": "main", "principal": "agent:<name>"}}
+      KUBER_MCP_TOKENS: ${KUBER_MCP_TOKENS:-}
+      # External MCP servers the copilot may read from (optional): [{"name": "...", "url": "...", "allow": [...]}]
+      KUBER_MCP_SERVERS: ${KUBER_MCP_SERVERS:-}
     ports: ["127.0.0.1:8080:8080"]
     depends_on:
       postgres: { condition: service_healthy }

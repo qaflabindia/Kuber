@@ -26,6 +26,46 @@ Channels ──TransactionExtracted──▶ Agent ──PostingRequested──�
                           policy .md │                          └─PostingRejected (on invariant breach)
 ```
 
+## Agentic operations: no menus, simulate then approve
+
+There are no ERP screens or menus. Eleven **operations** (`modules/ops`) cover the book-keeping
+lifecycle, and three surfaces drive the same operations with the same authority rules:
+
+| Stage | Operations |
+| --- | --- |
+| Capture | `record` |
+| Commit | `post` (drafted entries in bulk) |
+| Assure | `balance` (trial balance, chain, suspense, freshness), `reconcile` (statement vs books with timing items) |
+| Distribute | `allocate` (weights to the paisa, across accounts or cost centres), `rebalance` (asset pool to target shares) |
+| Period | `close` (month lock; year-end closing voucher to retained surplus), `carry_forward` (opening position check and sign-off) |
+| Insight | `report`, `simulate` (what-if, never posts), `dashboard` |
+
+Every write is a **plan** computed from the authoritative book state. A plan contains:
+
+- the exact journals it would post
+- the before and after balance of each affected account
+- pre-checks, including the ledger's own validation
+- the governing policy
+- a hash over its actions and the book version it was computed from
+
+`commit` executes only if the hash matches and the book has not moved since the simulation. What a person approves is exactly what is posted. Blocked plans are shown but not stored.
+
+Authority:
+
+- A person can commit what they have seen.
+- An agent (`agent:*`) can commit only when the operation is policy-gated and policy grants L3 or higher.
+- `allocate`, `rebalance`, `close` and `carry_forward` always wait for a person.
+
+Surfaces:
+
+- **Canvas (web).** A command bar, answers as plan cards with Approve and Discard, plans waiting for approval, and a live position card. The ledger, reports, review and import views are drill-down targets only.
+- **Copilot** (`POST …/books/:b/copilot`).
+  - With `ANTHROPIC_API_KEY` and `KUBER_LLM_MODEL` set, a Claude model plans with the tools. The model is not hard-coded; set a current model ID from Anthropic's documentation.
+  - Without them, a deterministic intent router handles the common commands.
+  - The copilot runs as `agent:copilot` and has no commit tool: every change it proposes waits on the canvas.
+- **MCP server** (`POST /mcp`, Streamable HTTP, stateless). It is enabled by `KUBER_MCP_TOKENS`, which maps bearer tokens (at least 24 characters) to one tenant, one book and an `agent:` principal. The tools are `kuber_<operation>`, `kuber_accounts`, `kuber_plans` and `kuber_commit`. For Claude Desktop, use a remote connector or `npx mcp-remote http://localhost:8080/mcp --header "Authorization: Bearer <token>"`.
+- **MCP client.** `KUBER_MCP_SERVERS` lists external MCP servers (bank feeds, GST, mail) whose allow-listed or read-only tools the copilot may call. Their output is labelled untrusted data.
+
 ## Guarantees and how they are enforced
 
 | Guarantee | Mechanism | Test |
@@ -121,4 +161,7 @@ Load tests from section 16.5 must run per cell before launch.
 - JetStream consumers use `max_ack_pending = 1` for ordering; scale-out needs partitioned subjects (for example by tenant hash) per consumer.
 - Messages exceeding `max_deliver` need a dead-letter stream and alert.
 - Party resolution is exact-alias only; fuzzy matching and the LLM classifier slot are not built.
-- SvelteKit front end, passkeys, command signing, Temporal timers, ClickHouse cube and Centrifugo live updates arrive in phase 1.
+- Plans are computed from the book state at one version and refused if it moves; a posting between the commit check and the last action of a multi-step plan (for example a year-end close) is narrowed by soft-locking first, not eliminated.
+- `carry_forward` verifies and signs off; the ledger is continuous, so balances are not re-posted and pending drafts dated in a closed year must be decided before the close.
+- The rules router covers common phrasings only; open-ended requests need the model.
+- Passkeys, command signing, Temporal timers, ClickHouse cube and Centrifugo live updates arrive in phase 1.

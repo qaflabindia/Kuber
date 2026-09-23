@@ -12,7 +12,14 @@ import { Account, IsoDate, Principal, parseAmount, uuid, type Line } from "@kube
 import { ConcurrencyError } from "@kuber/eventstore";
 import { DomainError } from "@kuber/gl";
 import { AgentError } from "@kuber/agent";
+import { OpsError } from "@kuber/ops";
 import type { Cell } from "./cell.ts";
+import { Copilot } from "./copilot/index.ts";
+import { HELP } from "./copilot/router.ts";
+import { registerMcp } from "./mcp.ts";
+import type { Who } from "./tools.ts";
+
+export interface ServerOptions { copilot?: Copilot; mcpGrants?: Map<string, Who>; clock?: () => string }
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -26,8 +33,10 @@ const toLine = (l: z.infer<typeof ApiLine>): Line => ({
   ...(l.partyId ? { partyId: l.partyId } : {}), dimensions: l.dimensions ?? {},
 });
 
-export function buildServer(cell: Cell): FastifyInstance {
+export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstance {
   const app = Fastify({ logger: false, bodyLimit: 5 * 1024 * 1024 });
+  const clock = opts.clock ?? (() => new Date().toISOString().slice(0, 10));
+  const copilot = opts.copilot ?? new Copilot(cell, null, null, clock);
   app.addContentTypeParser("text/csv", { parseAs: "string" }, (_req, body, done) => done(null, body));
 
   const who = (req: FastifyRequest<{ Params: { tenant: string } }>) => {
@@ -40,6 +49,7 @@ export function buildServer(cell: Cell): FastifyInstance {
     if (err instanceof ZodError) return reply.code(400).send({ error: "invalid_request", issues: err.issues });
     if (err instanceof DomainError) return reply.code(422).send({ error: err.code, message: err.message });
     if (err instanceof AgentError) return reply.code(err.code === "not_found" ? 404 : 409).send({ error: err.code, message: err.message });
+    if (err instanceof OpsError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof ConcurrencyError) return reply.code(409).send({ error: "conflict", message: err.message });
     const status = (err as { statusCode?: number }).statusCode ?? 500;
     if (status >= 500) console.error(err);
@@ -164,6 +174,31 @@ export function buildServer(cell: Cell): FastifyInstance {
     const limit = Number((req.query as { limit?: string }).limit ?? 20);
     return cell.reporting.recentJournals(who(req).tenant, req.params.book, Number.isFinite(limit) ? limit : 20);
   });
+  // ------------------------------------------------------------ copilot and MCP
+  app.get<P>("/v1/tenants/:tenant/copilot", async (req) => { who(req); return { engine: copilot.engine, suggestions: HELP }; });
+  app.post<P>("/v1/tenants/:tenant/books/:book/copilot", async (req) => {
+    const { tenant, principal } = who(req);
+    const b = z.object({ text: z.string().min(1).max(2000), history: z.array(z.object({ role: z.enum(["user", "assistant"]), text: z.string().max(4000) })).max(20).default([]) }).parse(req.body);
+    return copilot.ask({ tenant, book: req.params.book, principal }, b.text, b.history);
+  });
+  if (opts.mcpGrants?.size) registerMcp(app, cell, opts.mcpGrants);
+
+  // ------------------------------------------------------------ operations: simulate, then commit
+  app.get<P>("/v1/tenants/:tenant/ops", async (req) => { who(req); return cell.ops.list(); });
+  app.post<{ Params: { tenant: string; book: string; op: string } }>("/v1/tenants/:tenant/books/:book/ops/:op", async (req) => {
+    const { tenant, principal } = who(req);
+    return cell.ops.plan(tenant, req.params.book, principal, req.params.op, req.body ?? {});
+  });
+  app.get<P>("/v1/tenants/:tenant/books/:book/plans", async (req) => { const { tenant } = who(req); return cell.ops.pending(tenant, req.params.book); });
+  app.get<T>("/v1/tenants/:tenant/plans/:id", async (req) => { const { tenant } = who(req); return cell.ops.get(tenant, req.params.id); });
+  app.post<T>("/v1/tenants/:tenant/plans/:id/commit", async (req, reply) => {
+    const { tenant, principal } = who(req);
+    const b = z.object({ hash: z.string().length(64) }).parse(req.body);
+    const r = await cell.ops.commit(tenant, req.params.id, principal, b.hash);
+    return reply.code(r.status === "committed" ? 200 : 202).send(r);
+  });
+  app.post<T>("/v1/tenants/:tenant/plans/:id/discard", async (req) => { const { tenant, principal } = who(req); return cell.ops.discard(tenant, req.params.id, principal); });
+
   app.get<P>("/v1/tenants/:tenant/books/:book/verify", async (req) => {
     const broken = await cell.gl.verify(who(req).tenant, req.params.book);
     return { intact: broken === null, firstBrokenJournal: broken };
