@@ -12,6 +12,7 @@ COPY modules/channels/package.json modules/channels/
 COPY modules/agent/package.json modules/agent/
 COPY modules/reporting/package.json modules/reporting/
 COPY apps/core/package.json apps/core/
+COPY apps/web/package.json apps/web/
 RUN pnpm install --frozen-lockfile
 
 FROM node:22-bookworm-slim

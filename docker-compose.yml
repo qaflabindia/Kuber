@@ -35,6 +35,17 @@ services:
       postgres: { condition: service_healthy }
       nats: { condition: service_started }
     restart: unless-stopped
+  web:
+    build: { context: ., dockerfile: apps/web/Dockerfile }
+    environment:
+      CORE_URL: http://core:8080
+      ORIGIN: http://localhost:3000
+      # Signs the session cookie. Override in .env for anything beyond local use.
+      SESSION_SECRET: ${SESSION_SECRET:-local-dev-only-change-me-0123456789abcdef}
+    ports: ["127.0.0.1:3000:3000"]
+    depends_on:
+      core: { condition: service_started }
+    restart: unless-stopped
 volumes:
   pgdata: {}
   natsdata: {}

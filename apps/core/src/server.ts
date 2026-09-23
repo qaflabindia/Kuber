@@ -142,8 +142,8 @@ export function buildServer(cell: Cell): FastifyInstance {
     return reply.code(201).send(b);
   });
 
-  const money = (s: { title: string; rows: { label: string; amount: bigint }[]; totals: Record<string, bigint> }) => ({
-    title: s.title, rows: s.rows.map((r) => ({ label: r.label, amount: r.amount.toString() })),
+  const money = (s: { title: string; rows: { label: string; amount: bigint; accountId?: string; section?: string }[]; totals: Record<string, bigint> }) => ({
+    title: s.title, rows: s.rows.map((r) => ({ label: r.label, amount: r.amount.toString(), ...(r.accountId ? { accountId: r.accountId } : {}), ...(r.section ? { section: r.section } : {}) })),
     totals: Object.fromEntries(Object.entries(s.totals).map(([k, v]) => [k, v.toString()])), unit: "paise",
   });
   type R = { Params: { tenant: string; book: string }; Querystring: { asOf?: string; from?: string; to?: string; account?: string } };
@@ -157,6 +157,12 @@ export function buildServer(cell: Cell): FastifyInstance {
   app.get<R>("/v1/tenants/:tenant/books/:book/accounts/:account/lines", async (req) => {
     const { account } = req.params as unknown as { account: string };
     return cell.reporting.drill(who(req).tenant, req.params.book, account, req.query.from ?? null, req.query.to ?? null);
+  });
+  app.get<P>("/v1/tenants/:tenant/books", async (req) => cell.reporting.books(who(req).tenant));
+  app.get<P>("/v1/tenants/:tenant/books/:book/accounts", async (req) => cell.reporting.accounts(who(req).tenant, req.params.book));
+  app.get<R>("/v1/tenants/:tenant/books/:book/journals", async (req) => {
+    const limit = Number((req.query as { limit?: string }).limit ?? 20);
+    return cell.reporting.recentJournals(who(req).tenant, req.params.book, Number.isFinite(limit) ? limit : 20);
   });
   app.get<P>("/v1/tenants/:tenant/books/:book/verify", async (req) => {
     const broken = await cell.gl.verify(who(req).tenant, req.params.book);

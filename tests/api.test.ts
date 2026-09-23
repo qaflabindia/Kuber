@@ -60,6 +60,16 @@ describe("core API", () => {
     expect(v.intact).toBe(true);
   });
 
+  it("lists books, the chart with balances, and recent journals", async () => {
+    const books = (await app.inject({ method: "GET", url: "/v1/tenants/acme/books", headers: H })).json();
+    expect(books.map((b: { book_id: string }) => b.book_id)).toContain("gl");
+    const accs = (await app.inject({ method: "GET", url: "/v1/tenants/acme/books/gl/accounts", headers: H })).json();
+    expect(accs.find((a: { account_id: string }) => a.account_id === "BANK").balance).not.toBe("0");
+    const js = (await app.inject({ method: "GET", url: "/v1/tenants/acme/books/gl/journals?limit=5", headers: H })).json();
+    expect(js.length).toBeGreaterThan(0);
+    expect(js[0].lines.length).toBeGreaterThanOrEqual(2);
+  });
+
   it("explains a chat line it cannot read", async () => {
     const r = await app.inject({ method: "POST", url: "/v1/tenants/acme/books/gl/chat", headers: H, payload: { text: "how am I doing?" } });
     expect(r.statusCode).toBe(422);

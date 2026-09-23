@@ -1,0 +1,119 @@
+/*
+ * Kuber design tokens: "private bank".
+ * Deep ink ground, ivory type, warm brass for the one thing that matters on each screen.
+ * Numbers use tabular figures everywhere so columns of rupees line up.
+ */
+@import "@fontsource-variable/newsreader/opsz.css";
+@import "@fontsource-variable/newsreader/opsz-italic.css";
+@import "@fontsource-variable/hanken-grotesk/index.css";
+
+:root {
+  color-scheme: dark;
+  --ink-0: #0b0e13;      /* ground */
+  --ink-1: #10151d;      /* surface */
+  --ink-2: #161c26;      /* raised */
+  --ink-3: #1d2430;      /* hover */
+  --line: #252d3a;
+  --line-soft: #1b222d;
+  --text: #ece6da;       /* ivory */
+  --text-2: #b0b4bd;
+  --text-3: #7c8390;
+  --brass: #c9a86a;
+  --brass-2: #e3c98f;
+  --brass-ink: #1a1408;
+  --brass-wash: rgba(201, 168, 106, 0.1);
+  --sage: #8dbba4;       /* money in, healthy */
+  --sage-wash: rgba(141, 187, 164, 0.12);
+  --clay: #df9a80;       /* needs attention */
+  --clay-wash: rgba(223, 154, 128, 0.12);
+  --focus: #e3c98f;
+
+  --serif: "Newsreader Variable", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+  --sans: "Hanken Grotesk Variable", -apple-system, "Segoe UI", system-ui, sans-serif;
+
+  --r-sm: 6px; --r-md: 10px; --r-lg: 16px;
+  --shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 18px 40px -24px rgba(0, 0, 0, 0.7);
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--ink-0);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.5;
+  font-feature-settings: "tnum" 1, "cv11" 1;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: inherit; text-decoration: none; }
+::selection { background: rgba(201, 168, 106, 0.35); }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+
+h1, h2, h3 { font-family: var(--serif); font-weight: 400; letter-spacing: -0.01em; margin: 0; text-wrap: balance; }
+h1 { font-size: 40px; line-height: 1.1; font-variation-settings: "opsz" 72; }
+h2 { font-size: 24px; line-height: 1.2; font-variation-settings: "opsz" 36; }
+h3 { font-size: 18px; font-variation-settings: "opsz" 24; }
+
+.eyebrow { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-3); font-weight: 600; }
+.num { font-variant-numeric: tabular-nums lining-nums; }
+.muted { color: var(--text-2); }
+.faint { color: var(--text-3); }
+.in { color: var(--sage); }
+.attention { color: var(--clay); }
+
+/* Surfaces */
+.panel { background: var(--ink-1); border: 1px solid var(--line-soft); border-radius: var(--r-lg); box-shadow: var(--shadow); }
+.panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 20px 24px 12px; }
+.panel-body { padding: 0 24px 20px; }
+.rule { height: 1px; background: var(--line-soft); border: 0; margin: 0; }
+
+/* Buttons */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  height: 36px; padding: 0 16px; border-radius: 999px; border: 1px solid var(--line);
+  background: transparent; color: var(--text); font: 600 13.5px/1 var(--sans); letter-spacing: 0.01em;
+  cursor: pointer; transition: background 0.15s var(--ease), border-color 0.15s var(--ease), transform 0.1s var(--ease);
+}
+.btn:hover { background: var(--ink-3); border-color: #34404f; }
+.btn:active { transform: translateY(1px); }
+.btn.primary { background: var(--brass); border-color: var(--brass); color: var(--brass-ink); }
+.btn.primary:hover { background: var(--brass-2); border-color: var(--brass-2); }
+.btn.quiet { border-color: transparent; color: var(--text-2); }
+.btn.quiet:hover { color: var(--text); background: var(--ink-2); }
+.btn.sm { height: 30px; padding: 0 12px; font-size: 12.5px; }
+.btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+
+/* Fields */
+.field { display: grid; gap: 6px; }
+.field label { font-size: 12px; color: var(--text-2); font-weight: 600; letter-spacing: 0.02em; }
+input, select, textarea {
+  font: inherit; color: var(--text); background: var(--ink-0); border: 1px solid var(--line);
+  border-radius: var(--r-md); padding: 10px 12px; min-height: 40px; width: 100%;
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--brass); box-shadow: 0 0 0 3px var(--brass-wash); }
+select { appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--text-3) 50%), linear-gradient(135deg, var(--text-3) 50%, transparent 50%);
+  background-position: calc(100% - 18px) 55%, calc(100% - 13px) 55%; background-size: 5px 5px; background-repeat: no-repeat; padding-right: 34px; }
+
+/* Pills */
+.pill { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px; border-radius: 999px;
+  font-size: 11.5px; font-weight: 600; letter-spacing: 0.02em; border: 1px solid var(--line); color: var(--text-2); white-space: nowrap; }
+.pill.brass { border-color: rgba(201, 168, 106, 0.4); color: var(--brass-2); background: var(--brass-wash); }
+.pill.sage { border-color: rgba(141, 187, 164, 0.35); color: var(--sage); background: var(--sage-wash); }
+.pill.clay { border-color: rgba(223, 154, 128, 0.35); color: var(--clay); background: var(--clay-wash); }
+.dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+/* Tables */
+.table { width: 100%; border-collapse: collapse; }
+.table th { text-align: left; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-3); font-weight: 600; padding: 10px 12px; border-bottom: 1px solid var(--line-soft); }
+.table td { padding: 12px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
+.table tr:last-child td { border-bottom: 0; }
+.table .r { text-align: right; }
+.table tbody tr { transition: background 0.12s var(--ease); }
+.table tbody tr.link:hover { background: var(--ink-2); cursor: pointer; }
+
+.kbd { font: 600 11px/1 var(--sans); padding: 3px 6px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; color: var(--text-2); }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }

@@ -43,7 +43,7 @@ CREATE POLICY tenant_isolation ON reporting.daily
 `,
 }];
 
-export interface Row { label: string; amount: bigint }
+export interface Row { label: string; amount: bigint; accountId?: string; section?: string }
 export interface Statement { title: string; rows: Row[]; totals: Record<string, bigint> }
 
 export function renderText(s: Statement): string {
@@ -112,7 +112,7 @@ export class Reporting {
     const rows: Row[] = [];
     for (const a of b) {
       if (a.bal === 0n) continue;
-      rows.push({ label: `${a.account_id}  ${a.name}  (${a.bal > 0n ? "Dr" : "Cr"})`, amount: a.bal > 0n ? a.bal : -a.bal });
+      rows.push({ label: `${a.account_id}  ${a.name}  (${a.bal > 0n ? "Dr" : "Cr"})`, amount: a.bal > 0n ? a.bal : -a.bal, accountId: a.account_id, section: a.bal > 0n ? "Dr" : "Cr" });
       if (a.bal > 0n) dr += a.bal; else cr -= a.bal;
     }
     return { title: `Trial balance as of ${asOf ?? "today"}`, rows, totals: { "Total debits": dr, "Total credits": cr, "Difference (must be 0)": dr - cr } };
@@ -124,7 +124,7 @@ export class Reporting {
     const exp = b.filter((a) => a.nature === "expense" && a.bal !== 0n);
     const ti = inc.reduce((s, a) => s - a.bal, 0n), te = exp.reduce((s, a) => s + a.bal, 0n);
     return { title: `Profit and loss ${from ?? "start"} to ${to ?? "today"}`,
-      rows: [...inc.map((a) => ({ label: `Income: ${a.name}`, amount: -a.bal })), ...exp.map((a) => ({ label: `Expense: ${a.name}`, amount: a.bal }))],
+      rows: [...inc.map((a) => ({ label: `Income: ${a.name}`, amount: -a.bal, accountId: a.account_id, section: "income" })), ...exp.map((a) => ({ label: `Expense: ${a.name}`, amount: a.bal, accountId: a.account_id, section: "expense" }))],
       totals: { "Total income": ti, "Total expenses": te, "Surplus / (deficit)": ti - te } };
   }
 
@@ -136,8 +136,8 @@ export class Reporting {
     const ta = assets.reduce((s, a) => s + a.bal, 0n), tl = liabs.reduce((s, a) => s - a.bal, 0n);
     const te = eq.reduce((s, a) => s - a.bal, 0n) + surplus;
     return { title: `Balance sheet as of ${asOf ?? "today"}`,
-      rows: [...assets.map((a) => ({ label: `Asset: ${a.name}`, amount: a.bal })), ...liabs.map((a) => ({ label: `Liability: ${a.name}`, amount: -a.bal })),
-        ...eq.map((a) => ({ label: `Equity: ${a.name}`, amount: -a.bal })), { label: "Equity: Surplus to date", amount: surplus }],
+      rows: [...assets.map((a) => ({ label: `Asset: ${a.name}`, amount: a.bal, accountId: a.account_id, section: "asset" })), ...liabs.map((a) => ({ label: `Liability: ${a.name}`, amount: -a.bal, accountId: a.account_id, section: "liability" })),
+        ...eq.map((a) => ({ label: `Equity: ${a.name}`, amount: -a.bal, accountId: a.account_id, section: "equity" })), { label: "Equity: Surplus to date", amount: surplus, section: "equity" }],
       totals: { "Total assets": ta, "Total liabilities": tl, "Total equity": te, "Assets - liabilities - equity (must be 0)": ta - tl - te } };
   }
 
@@ -155,6 +155,32 @@ export class Reporting {
         { label: `Assets on ${d2}`, amount: y.a }, { label: `Liabilities on ${d2}`, amount: y.l }, { label: `Capital on ${d2}`, amount: y.c },
         { label: "Add: drawings", amount: drawings }, { label: "Less: capital introduced", amount: introduced }],
       totals: { "Profit / (loss) for the period": y.c - x.c + drawings - introduced } };
+  }
+
+  /** Books this tenant has, with the entity type inferred from the chart. */
+  async books(tenantId: string) {
+    return this.store.tenantTx(tenantId, (tx) => tx`
+      SELECT book_id, count(*)::int AS accounts FROM reporting.accounts WHERE tenant_id = ${tenantId} GROUP BY book_id ORDER BY book_id`);
+  }
+
+  /** The chart of accounts with current balances (natural sign applied by the caller). */
+  async accounts(tenantId: string, bookId: string) {
+    return this.store.tenantTx(tenantId, (tx) => tx`
+      SELECT a.account_id, a.name, a.nature, a.parent_id, a.taxonomy_tag, COALESCE(SUM(d.net), 0)::text AS balance
+      FROM reporting.accounts a
+      LEFT JOIN reporting.daily d ON d.tenant_id = a.tenant_id AND d.book_id = a.book_id AND d.account_id = a.account_id
+      WHERE a.tenant_id = ${tenantId} AND a.book_id = ${bookId}
+      GROUP BY a.account_id, a.name, a.nature, a.parent_id, a.taxonomy_tag ORDER BY a.nature, a.account_id`);
+  }
+
+  /** Most recent journals with their lines, newest first. */
+  async recentJournals(tenantId: string, bookId: string, limit = 20) {
+    return this.store.tenantTx(tenantId, (tx) => tx`
+      SELECT journal_id, max(seq) AS seq, max(txn_date)::text AS txn_date, max(narration) AS narration,
+             bool_or(provisional) AS provisional, max(reverses) AS reverses, max(principal) AS principal,
+             json_agg(json_build_object('accountId', account_id, 'amount', amount::text, 'partyId', party_id) ORDER BY line_no) AS lines
+      FROM reporting.lines WHERE tenant_id = ${tenantId} AND book_id = ${bookId}
+      GROUP BY journal_id ORDER BY max(seq) DESC LIMIT ${Math.min(Math.max(limit, 1), 200)}`);
   }
 
   /** Drill-through: the journal lines behind an account balance. */
