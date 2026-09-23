@@ -11,7 +11,7 @@
  * gated "human" and always wait.
  */
 import type { Sql } from "postgres";
-import { canonical, sha256, uuid, type Line } from "@kuber/contracts";
+import { canonical, sha256, uuid, type EventData, type Line } from "@kuber/contracts";
 import { tenantRlsFor, type EventStore, type Migration } from "@kuber/eventstore";
 import { DomainError, type BookState } from "@kuber/gl";
 import { isToken, type TenantKeys } from "@kuber/crypto";
@@ -134,14 +134,20 @@ export class Operations {
       await this.store.tenantTx(tenant, (tx) => tx`UPDATE ops.plans SET status = 'stale' WHERE tenant_id = ${tenant} AND plan_id = ${planId} AND status = 'proposed'`);
       throw new OpsError("stale", `the books changed since this was simulated (journal ${row.basis_seq} → ${state.seq}); simulate again`);
     }
+    // The approval is a fact before anything runs: who committed which hash. Every action carries
+    // the plan id as its command id, so the journals it posts link back here (evidence, 14.7).
+    const p = row.plan;
+    await this.store.append("ops", tenant, { streamId: `${tenant}/plan/${planId}`, expected: "any", events: [{ type: "PlanApproved", data: {
+      planId, bookId: row.book_id, op: p.op, hash: row.hash, basisSeq: row.basis_seq, gate: p.gate, needsPerson: p.needsPerson,
+      actions: row.actions.length, preparedBy: p.createdBy, policy: p.policy as EventData<"PlanApproved">["policy"] } }] }, { principal, commandId: planId, policyIds: p.policy?.ids });
     const done: string[] = [];
     try {
       for (const a of row.actions) {
         if (a.type === "gl") {
-          await this.svc.gl.execute(tenant, row.book_id, a.command, { principal });
+          await this.svc.gl.execute(tenant, row.book_id, a.command, { principal, commandId: planId });
           done.push(a.command.kind === "PostJournal" ? `posted ${a.command.journalId}` : a.command.kind === "LockPeriod" ? `locked ${a.command.level} to ${a.command.periodEnd}` : `added ${a.command.account.accountId}`);
         } else {
-          await this.svc.agent.approveDraft(tenant, a.draftId, principal, a.accountId);
+          await this.svc.agent.approveDraft(tenant, a.draftId, principal, a.accountId, planId);
           done.push(`approved ${a.draftId}`);
         }
       }

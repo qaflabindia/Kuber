@@ -15,6 +15,8 @@ through events; none reads another's tables.
 | `agent` | Parties, rules, drafts, ratifications, autonomy overrides | `TransactionExtracted`, GL events | `PartyResolved`, `ProvisionalConfirmed`, `TransactionClassified`, `PolicyDecisionMade`, `PostingRequested`, `DraftQueued`, `DraftApproved`, `RatificationRequested`, `CorrectionRequested`, `RuleLearned`, `AutonomyLimited`, … |
 | `policy` | The `.md` policy library (read-only, deterministic) | — | — |
 | `reporting` | Journal lines, daily balances, chain checkpoints | GL events | — |
+| `ops` | Plans (simulate, then commit exactly that) | — | `PlanApproved` (before a plan's actions run; the actions carry the plan id as `commandId`) |
+| `evidence` | One evidence record per committed action, and a lookup by every id and hash it cites | `JournalPosted`, `PeriodLocked` (reads the plan, transaction, signal and correction streams they came from) | `EvidenceRecorded` |
 
 Supporting packages: `contracts` (Zod schemas for every event, money as bigint paise),
 `eventstore` (append with optimistic concurrency, transactional outbox, inbox, RLS, relay),
@@ -85,6 +87,7 @@ Surfaces:
 | Retries never double-post | deterministic journal IDs from request IDs; idempotent `PostJournal` | domain + cell tests |
 | Tenant isolation | row-level security on every table; tenant requests and event handlers connect as `kuber_app`, which sees only the tenant in `kuber.tenant`; only `kuber_system` (a member of `kuber_system_scope`) sees every tenant, and it is used by the outbox relay and system reads alone; denied cross-tenant writes are logged as `rls_denied`; stream IDs prefixed by tenant | RLS test, `tests/isolation.test.ts` |
 | Module boundaries | each event type has one owning module; the store refuses others | ownership test |
+| Every committed action has evidence (design 14.7) | each journal and period lock gets one `EvidenceRecorded` event with source, decision, execution, result, approval and exceptions, sealed and chained; `recordHash` over the canonical record; retrievable by signal, statement hash, transaction, draft, plan id or hash, journal id or hash, event id or record hash | `tests/evidence.test.ts` |
 | Agent autonomy stays within policy | `PolicyEngine` (strictest wins, runtime limits only lower autonomy), overrides after corrections | policy tests, correction test |
 
 ## Run it
@@ -201,7 +204,7 @@ This folder is the source of truth; there is no other working copy.
 ## Tests
 
 ```bash
-pnpm test:docker                                                                          # 107 tests, over TLS with the generated password
+pnpm test:docker                                                                          # 116 tests, over TLS with the generated password
 pnpm test:llm                                                                             # live Anthropic classifier; needs ANTHROPIC_API_KEY and KUBER_LLM_CLASSIFY_MODEL
 KUBER_INTEGRATION=1 NATS_URL=nats://localhost:4222 pnpm test:integration                 # real JetStream
 pnpm typecheck
@@ -227,6 +230,7 @@ sign-in; signed high-risk commands are verified there (design 16.4).
 | `GET  /v1/tenants/:t/drafts` · `POST …/drafts/:id/approve` · `POST …/drafts/:id/reject` | Review queue |
 | `GET  /v1/tenants/:t/ratifications` · `POST …/journals/:id/ratify` · `POST …/journals/:id/correct` | Weekly review |
 | `POST /v1/tenants/:t/rules` | Explicit classification rule |
+| `GET  /v1/tenants/:t/evidence?q=<id or hash>` · `GET …/evidence/:id` | Evidence records citing an id or hash, each with `verified.recordHash` and `verified.citations` |
 | `GET  …/books/:b/reports/{trial-balance,profit-and-loss,balance-sheet,statement-of-affairs}` | Statements (amounts in paise) |
 | `GET  …/books/:b/accounts/:a/lines` | Drill-through to journal lines |
 | `GET  …/books/:b/verify` | Recompute the hash chain |
@@ -248,6 +252,9 @@ Load tests from section 16.5 must run per cell before launch.
 
 ## Known limits and next steps
 
+- Evidence covers committed journals and period locks. Not yet: a plan that fails part-way (its `PlanApproved` is recorded, the failure only in `ops.plans`), later ratification of an auto-posted journal (its own event, not appended to the record), MCP tool-call traces, and control tests over `control_refs`.
+- Evidence is built as events arrive. A database with journals from before `evidence-001` needs a backfill replay (`readAll` through the handler) before its history has records.
+- `approval.signature` is null until passkeys and signed commands (phase 1).
 - `kuber.tenant` is still set by the application for each request, so tenant scoping relies on the core choosing the right tenant; the database stops any role but `kuber_system` from seeing more than one.
 - Book state is cached in memory and caught up from the store; persistent snapshots (`es.snapshots`) are the next step for very large books.
 - JetStream consumers use `max_ack_pending = 1` for ordering; scale-out needs partitioned subjects (for example by tenant hash) per consumer.

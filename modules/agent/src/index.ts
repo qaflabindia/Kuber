@@ -172,7 +172,8 @@ export class Agent {
   }
 
   // ------------------------------------------------------------------ commands from people
-  async approveDraft(tenantId: string, draftId: string, principal: string, accountId?: string) {
+  /** `commandId` is the ops plan id when the approval comes from a committed plan. */
+  async approveDraft(tenantId: string, draftId: string, principal: string, accountId?: string, commandId?: string) {
     return this.store.tenantTx(tenantId, async (tx) => {
       const keys = await this.store.keys(tenantId);
       const [row] = await tx<{ txn_id: string; book_id: string; status: string; proposal: unknown }[]>`
@@ -197,7 +198,7 @@ export class Agent {
         if (d.proposal.partyId) await tx`UPDATE agent.parties SET confirmed = true WHERE tenant_id = ${tenantId} AND party_id = ${d.proposal.partyId}`;
       }
       await tx`UPDATE agent.drafts SET status = 'posted', resolved_by = ${principal}, resolved_at = now() WHERE tenant_id = ${tenantId} AND draft_id = ${draftId}`;
-      await this.store.append("agent", tenantId, { streamId: `${tenantId}/txn/${d.txn_id}`, expected: "any", events }, { principal }, tx);
+      await this.store.append("agent", tenantId, { streamId: `${tenantId}/txn/${d.txn_id}`, expected: "any", events }, { principal, commandId }, tx);
       return { requestId, journalId: journalIdForRequest(tenantId, requestId) };
     });
   }

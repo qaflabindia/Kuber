@@ -22,7 +22,7 @@ import { CryptoError, type Keyring, type TenantKeys } from "@kuber/crypto";
 import { GENESIS_LINK, isSealed, linkOf, openEventData, sealEvent, type LegacyPolicy } from "./sealing.ts";
 
 export type Expected = number | "no_stream" | "any";
-export type ModuleName = "gl" | "channels" | "agent";
+export type ModuleName = import("@kuber/contracts").Module;
 
 export interface NewEvent<T extends EventType = EventType> { type: T; data: EventData<T> }
 export interface AppendRequest { streamId: string; expected: Expected; events: NewEvent[] }

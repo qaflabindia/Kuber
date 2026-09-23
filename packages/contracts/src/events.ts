@@ -115,16 +115,44 @@ export const AGENT = {
   AutonomyLimited: z.object({ key: z.string(), maxLevel: AutonomyLevel, until: IsoDate, reason: z.string() }),
 } as const;
 
-export const ALL_EVENTS = { ...GL, ...CHANNELS, ...AGENT } as const;
+// ------------------------------------------------------------------ Ops events
+export const OPS = {
+  /** A principal committed exactly this plan hash; recorded before its actions run (section 13.7). */
+  PlanApproved: z.object({
+    planId: Id, bookId: Id, op: z.string(), hash: z.string().length(64), basisSeq: z.number().int().nonnegative(),
+    gate: z.enum(["policy", "human"]), needsPerson: z.boolean(), actions: z.number().int().nonnegative(),
+    preparedBy: Principal,
+    policy: z.object({ ids: z.array(z.string()), level: AutonomyLevel, approver: z.string(), reasons: z.array(z.string()) }).nullable(),
+  }),
+} as const;
+
+// ------------------------------------------------------------------ Evidence events
+export const EVIDENCE = {
+  /**
+   * One evidence record per committed action (section 14.7), assembled from the events it cites.
+   * `recordHash` is SHA-256 over the canonical record; the event itself is sealed and chained.
+   */
+  EvidenceRecorded: z.object({
+    evidenceId: Id, bookId: Id,
+    subject: z.object({ kind: z.enum(["journal", "period_lock"]), id: z.string() }),
+    recordHash: z.string().length(64),
+    record: z.record(z.string(), z.unknown()),
+  }),
+} as const;
+
+export const ALL_EVENTS = { ...GL, ...CHANNELS, ...AGENT, ...OPS, ...EVIDENCE } as const;
 export type EventType = keyof typeof ALL_EVENTS;
 export type EventData<T extends EventType> = z.infer<(typeof ALL_EVENTS)[T]>;
 
 /** Which module owns (may append) each event type. Enforced by the event store. */
-export const OWNER: Record<EventType, "gl" | "channels" | "agent"> = Object.fromEntries([
+export type Module = "gl" | "channels" | "agent" | "ops" | "evidence";
+export const OWNER: Record<EventType, Module> = Object.fromEntries([
   ...Object.keys(GL).map((k) => [k, "gl"]),
   ...Object.keys(CHANNELS).map((k) => [k, "channels"]),
   ...Object.keys(AGENT).map((k) => [k, "agent"]),
-]) as Record<EventType, "gl" | "channels" | "agent">;
+  ...Object.keys(OPS).map((k) => [k, "ops"]),
+  ...Object.keys(EVIDENCE).map((k) => [k, "evidence"]),
+]) as Record<EventType, Module>;
 
 export const SCHEMA_VERSION = 1;
 

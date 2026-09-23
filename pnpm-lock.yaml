@@ -26,6 +26,9 @@ importers:
       '@kuber/eventstore':
         specifier: workspace:*
         version: link:packages/eventstore
+      '@kuber/evidence':
+        specifier: workspace:*
+        version: link:modules/evidence
       '@kuber/gl':
         specifier: workspace:*
         version: link:modules/gl
@@ -96,6 +99,9 @@ importers:
       '@kuber/eventstore':
         specifier: workspace:*
         version: link:../../packages/eventstore
+      '@kuber/evidence':
+        specifier: workspace:*
+        version: link:../../modules/evidence
       '@kuber/gl':
         specifier: workspace:*
         version: link:../../modules/gl
@@ -178,6 +184,18 @@ importers:
       '@kuber/eventstore':
         specifier: workspace:*
         version: link:../../packages/eventstore
+
+  modules/evidence:
+    dependencies:
+      '@kuber/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@kuber/eventstore':
+        specifier: workspace:*
+        version: link:../../packages/eventstore
+      postgres:
+        specifier: ^3.4.7
+        version: 3.4.9
 
   modules/gl:
     dependencies:

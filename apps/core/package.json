@@ -13,6 +13,7 @@
     "@kuber/channels": "workspace:*",
     "@kuber/contracts": "workspace:*",
     "@kuber/eventstore": "workspace:*",
+    "@kuber/evidence": "workspace:*",
     "@kuber/gl": "workspace:*",
     "@kuber/ops": "workspace:*",
     "@kuber/policy": "workspace:*",

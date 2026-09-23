@@ -137,6 +137,17 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     await cell.agent.rejectDraft(tenant, req.params.id, principal, b.reason);
     return reply.code(204).send();
   });
+  // Evidence (design 14.7): look up by any id or hash a record cites, or fetch one record.
+  app.get<{ Params: { tenant: string }; Querystring: { q?: string } }>("/v1/tenants/:tenant/evidence", async (req, reply) => {
+    const { tenant } = who(req);
+    const q = z.string().min(1).max(200).parse(req.query.q);
+    return reply.send(await cell.evidence.find(tenant, q));
+  });
+  app.get<T>("/v1/tenants/:tenant/evidence/:id", async (req, reply) => {
+    const { tenant } = who(req);
+    const e = await cell.evidence.get(tenant, req.params.id);
+    return e ? reply.send(e) : reply.code(404).send({ error: "not_found", message: `no evidence ${req.params.id}` });
+  });
   app.get<P>("/v1/tenants/:tenant/ratifications", async (req) => { const { tenant } = who(req); return cell.agent.openRatifications(tenant); });
   app.post<T>("/v1/tenants/:tenant/journals/:id/ratify", async (req, reply) => {
     const { tenant, principal } = who(req);

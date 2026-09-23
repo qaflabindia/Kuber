@@ -83,7 +83,7 @@ export class GeneralLedger {
     await once(this.store, "gl", env, async () => {
       const tenant = env.meta.tenantId;
       const meta: MetaInput = { principal: env.meta.principal, correlationId: env.meta.correlationId, causationId: env.eventId,
-        policyIds: env.meta.policyIds };
+        policyIds: env.meta.policyIds, commandId: env.meta.commandId };
       let bookId = "";
       let requestId = "";
       try {

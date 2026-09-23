@@ -37,6 +37,7 @@
     "@kuber/contracts": "workspace:*",
     "@kuber/core": "workspace:*",
     "@kuber/eventstore": "workspace:*",
+    "@kuber/evidence": "workspace:*",
     "@kuber/gl": "workspace:*",
     "@kuber/ops": "workspace:*",
     "@kuber/policy": "workspace:*",
