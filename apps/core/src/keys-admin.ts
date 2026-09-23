@@ -11,6 +11,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { isToken, type Keyring, type TenantKeys } from "@kuber/crypto";
 import { GENESIS_LINK, eventContext, isSealed, linkOf, sealEvent, type EventStore } from "@kuber/eventstore";
 import { narrationCtx } from "@kuber/reporting";
+import { accountNameCtx } from "@kuber/agent";
 
 interface SealedColumn {
   table: string; column: string; kind: "text" | "json"; keyCols: string[];
@@ -22,6 +23,7 @@ export const SEALED_COLUMNS: SealedColumn[] = [
   { table: "agent.parties", column: "name", kind: "text", keyCols: ["party_id"], ctx: (r) => `agent.parties.name|${r.party_id}` },
   { table: "agent.ratifications", column: "narration", kind: "text", keyCols: ["request_id"], ctx: (r) => `agent.ratifications.narration|${r.request_id}` },
   { table: "agent.drafts", column: "proposal", kind: "json", keyCols: ["draft_id"], ctx: (r) => `agent.drafts.proposal|${r.draft_id}` },
+  { table: "agent.accounts", column: "name", kind: "text", keyCols: ["book_id", "account_id"], ctx: (r) => accountNameCtx(r.book_id!, r.account_id!) },
   { table: "agent.rules", column: "pattern", kind: "text", keyCols: ["rule_id", "pattern_idx"], ctx: (r) => `agent.rules.pattern|${r.pattern_idx}` },
   { table: "reporting.lines", column: "narration", kind: "text", keyCols: ["journal_id", "line_no"], ctx: (r) => narrationCtx(r.journal_id!) },
   { table: "ops.plans", column: "plan", kind: "json", keyCols: ["plan_id"], ctx: (r) => `ops.plans.plan|${r.plan_id}` },
@@ -104,7 +106,7 @@ export class KeyAdmin {
           const tok = tokenOf(c.kind, r[c.column]);
           let plain: string | null = null;
           const extra: Record<string, string> = {};
-          if (mode === "legacy" && !tok) {
+          if (mode === "legacy" && !tok && r[c.column] !== "") {   // '' is "not recorded", not data
             plain = c.kind === "text" ? String(r[c.column]) : JSON.stringify(r[c.column]);
             if (c.table === "agent.rules") extra.pattern_idx = keys.index("rule", plain);   // legacy rules get their blind index
           } else if (mode === "rotate" && tok && keys.versionOf(tok) !== keys.activeVersion) {
@@ -204,7 +206,7 @@ export class KeyAdmin {
       const [e] = await t<{ n: number }[]>`SELECT count(*)::int AS n FROM es.events WHERE NOT (data ? '$c')`;
       if (e!.n) plaintext["es.events.data"] = e!.n;
       for (const c of SEALED_COLUMNS) {
-        const q = c.kind === "text" ? `SELECT count(*)::int AS n FROM ${c.table} WHERE ${c.column} NOT LIKE 'kb1.%'`
+        const q = c.kind === "text" ? `SELECT count(*)::int AS n FROM ${c.table} WHERE ${c.column} NOT LIKE 'kb1.%' AND ${c.column} <> ''`
           : `SELECT count(*)::int AS n FROM ${c.table} WHERE NOT (${c.column} ? '$c')`;
         const [r] = await t.unsafe(q) as { n: number }[];
         if (r!.n) plaintext[`${c.table}.${c.column}`] = r!.n;

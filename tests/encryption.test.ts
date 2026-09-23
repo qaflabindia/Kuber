@@ -24,7 +24,8 @@ describe("field encryption", () => {
     fc.assert(fc.property(fc.string(), fc.string({ minLength: 1 }), (pt, ctx) => {
       const tok = sealWith(key, 1, pt, ctx);
       expect(tok.startsWith("kb1.1.")).toBe(true);
-      expect(tok).not.toContain(Buffer.from(pt).toString("base64url") || "\u0000");
+      // Short encodings turn up in random ciphertext by chance; only a long one would mean a leak.
+      if (pt.length >= 8) expect(tok).not.toContain(Buffer.from(pt).toString("base64url"));
       expect(openWith(key, tok, ctx).toString("utf8")).toBe(pt);
       expect(() => openWith(key, tok, ctx + "x")).toThrow(CryptoError);
     }), { numRuns: 200 });

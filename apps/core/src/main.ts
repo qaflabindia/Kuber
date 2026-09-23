@@ -7,6 +7,7 @@ import { Copilot } from "./copilot/index.ts";
 import { ExternalTools, parseServers } from "./copilot/external.ts";
 import { providerFromEnv } from "./copilot/provider.ts";
 import { parseGrants } from "./mcp.ts";
+import { classifierFromEnv } from "./llm-classifier.ts";
 
 const env = (k: string, d?: string) => {
   const v = process.env[k] ?? d;
@@ -31,6 +32,7 @@ if (requireTls) {
   if (problems.length) { console.error(`KUBER_REQUIRE_TLS: refusing to start:\n  ${problems.join("\n  ")}`); process.exit(1); }
 }
 
+const classifier = classifierFromEnv();
 const cell = await Cell.start({
   databaseUrl: env("DATABASE_URL"),
   migrationUrl: process.env.MIGRATION_URL,
@@ -42,6 +44,7 @@ const cell = await Cell.start({
   kms: LocalFileKms.load(env("KUBER_MASTER_KEY_FILE"), { strictPermissions: process.env.KUBER_KEY_FILE_STRICT !== "false" }),
   legacy: process.env.KUBER_LEGACY_PLAINTEXT === "allow" ? "allow" : "reject",
   poolSize: Number(env("DB_POOL", "20")),
+  classifier,
 });
 const relay = cell.relay.run();
 const clock = () => new Date().toISOString().slice(0, 10);
@@ -49,6 +52,7 @@ const external = new ExternalTools(parseServers(process.env.KUBER_MCP_SERVERS));
 const copilot = new Copilot(cell, providerFromEnv(), external, clock);
 const mcpGrants = parseGrants(process.env.KUBER_MCP_TOKENS);
 const app = buildServer(cell, { copilot, mcpGrants, clock, https: httpsCfg });
+console.log(`classifier: ${classifier ? classifier.name : "rules, history and keywords (set KUBER_LLM_CLASSIFY=on for the LLM step)"}`);
 console.log(`copilot: ${copilot.engine}; MCP server: ${mcpGrants.size ? `/mcp (${mcpGrants.size} token(s))` : "off (set KUBER_MCP_TOKENS)"}`);
 await app.listen({ port: Number(env("PORT", "8080")), host: "0.0.0.0" });
 console.log(`kuber core: cell ${cell.cellId} listening (${httpsCfg ? "https" : "http"}; data encrypted with ${cell.keyring.kms.name} KMS)`);

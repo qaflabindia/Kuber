@@ -43,4 +43,9 @@ CREATE TABLE agent.overrides (
   // blind index of the pattern instead of the pattern itself.
   sql: `ALTER TABLE agent.rules ADD COLUMN pattern_idx TEXT;
 CREATE INDEX rules_pattern_idx ON agent.rules (tenant_id, pattern_idx);`,
+}, {
+  id: "agent-003-account-names",
+  // Sealed account name, shown to the LLM classifier. Rows projected before this migration keep ''
+  // and the classifier falls back to the account id.
+  sql: `ALTER TABLE agent.accounts ADD COLUMN name TEXT NOT NULL DEFAULT '';`,
 }];

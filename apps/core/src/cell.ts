@@ -11,7 +11,7 @@ import { MemoryBus, NatsBus, type Bus } from "@kuber/bus";
 import { GeneralLedger } from "@kuber/gl";
 import { PolicyEngine } from "@kuber/policy";
 import { Channels } from "@kuber/channels";
-import { AGENT_MIGRATIONS, Agent } from "@kuber/agent";
+import { AGENT_MIGRATIONS, Agent, type LlmClassifier } from "@kuber/agent";
 import { REPORTING_MIGRATIONS, Reporting } from "@kuber/reporting";
 import { OPS_MIGRATIONS, Operations } from "@kuber/ops";
 
@@ -31,6 +31,8 @@ export interface CellOptions {
   legacy?: LegacyPolicy;
   clock?: () => string;
   poolSize?: number;
+  /** Optional LLM step in classification; without it unmatched transactions go to suspense. */
+  classifier?: LlmClassifier;
 }
 
 /** Apply every module's migrations as the owner, then grant the application role its privileges. */
@@ -63,7 +65,7 @@ export class Cell {
     const policies = PolicyEngine.fromDir(o.policyDir);
     const gl = new GeneralLedger(store);
     const channels = new Channels(store);
-    const agent = new Agent(sql, store, policies, o.clock);
+    const agent = new Agent(sql, store, policies, o.clock, o.classifier);
     const reporting = new Reporting(sql, store);
     const ops = new Operations(sql, store, { gl, reporting, agent, policies }, o.clock);
 

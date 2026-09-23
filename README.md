@@ -64,6 +64,13 @@ Surfaces:
   - Without them, a deterministic intent router handles the common commands.
   - The copilot runs as `agent:copilot` and has no commit tool: every change it proposes waits on the canvas.
 - **MCP server** (`POST /mcp`, Streamable HTTP, stateless). It is enabled by `KUBER_MCP_TOKENS`, which maps bearer tokens (at least 24 characters) to one tenant, one book and an `agent:` principal. The tools are `kuber_<operation>`, `kuber_accounts`, `kuber_plans` and `kuber_commit`. For Claude Desktop, use a remote connector or `npx mcp-remote http://localhost:8080/mcp --header "Authorization: Bearer <token>"`.
+- **LLM classification** (off by default). With `KUBER_LLM_CLASSIFY=on`, `ANTHROPIC_API_KEY` and a model in
+  `KUBER_LLM_CLASSIFY_MODEL` (or `KUBER_LLM_MODEL`), transactions that no rule, history or merchant keyword
+  matches are sent to the model instead of going straight to suspense.
+  - Only the narration, counterparty text and account names leave the process; runs of four or more digits are masked and amounts are not sent.
+  - The answer must be one of the book's own accounts, or it is discarded. Its confidence is capped at 0.9, below POL-502's 0.97, so it is always a draft for review, never an automatic posting.
+  - Approving the draft learns a rule, so that counterparty does not reach the model again. Model and prompt version are recorded with each classification.
+  - Any model error or refusal sends the transaction to suspense; the pipeline does not wait.
 - **MCP client.** `KUBER_MCP_SERVERS` lists external MCP servers (bank feeds, GST, mail) whose allow-listed or read-only tools the copilot may call. Their output is labelled untrusted data.
 
 ## Guarantees and how they are enforced
@@ -184,7 +191,8 @@ This folder is the source of truth; there is no other working copy.
 ## Tests
 
 ```bash
-TEST_DATABASE_ADMIN_URL=postgres://kuber:kuber@localhost:5432/postgres pnpm test          # 46 tests
+pnpm test:docker                                                                          # 99 tests, over TLS with the generated password
+pnpm test:llm                                                                             # live Anthropic classifier; needs ANTHROPIC_API_KEY and KUBER_LLM_CLASSIFY_MODEL
 KUBER_INTEGRATION=1 NATS_URL=nats://localhost:4222 pnpm test:integration                 # real JetStream
 pnpm typecheck
 ```
@@ -234,7 +242,9 @@ Load tests from section 16.5 must run per cell before launch.
 - Book state is cached in memory and caught up from the store; persistent snapshots (`es.snapshots`) are the next step for very large books.
 - JetStream consumers use `max_ack_pending = 1` for ordering; scale-out needs partitioned subjects (for example by tenant hash) per consumer.
 - Messages exceeding `max_deliver` need a dead-letter stream and alert.
-- Party resolution is exact-alias only; fuzzy matching and the LLM classifier slot are not built.
+- Party resolution is exact-alias only; fuzzy matching is not built.
+- The LLM classifier runs inside the agent's database transaction (15-second timeout, one retry). Fine with one ordered consumer; move the call ahead of the transaction before consumers scale out.
+- There is no labelled evaluation set yet (design 13.5), so a model or prompt change cannot be measured before release.
 - Plans are computed from the book state at one version and refused if it moves; a posting between the commit check and the last action of a multi-step plan (for example a year-end close) is narrowed by soft-locking first, not eliminated.
 - `carry_forward` verifies and signs off; the ledger is continuous, so balances are not re-posted and pending drafts dated in a closed year must be decided before the close.
 - The rules router covers common phrasings only; open-ended requests need the model.

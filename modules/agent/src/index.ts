@@ -18,10 +18,11 @@ import {
 import { once, type EventStore, type MetaInput, type NewEvent } from "@kuber/eventstore";
 import { isToken, type TenantKeys } from "@kuber/crypto";
 import type { Level, PolicyEngine } from "@kuber/policy";
-import { SUSPENSE, classify } from "./classify.ts";
+import { SUSPENSE, accountNameCtx, classify, type LlmClassifier } from "./classify.ts";
 
 export { AGENT_MIGRATIONS } from "./migrations.ts";
-export { MERCHANTS, SUSPENSE } from "./classify.ts";
+export { LLM_MAX_CONFIDENCE, MERCHANTS, SUSPENSE, accountNameCtx } from "./classify.ts";
+export type { ClassifierAccount, ClassifierInput, LlmClassifier, LlmSuggestion } from "./classify.ts";
 
 export const AGENT_PRINCIPAL = "agent:kuber";
 const INGEST_EVENT = "EVT-TXN-INGESTED";
@@ -34,7 +35,8 @@ export class AgentError extends Error { constructor(public code: string, msg: st
 
 export class Agent {
   constructor(private sql: Sql, private store: EventStore, private policies: PolicyEngine,
-              private clock: () => string = () => new Date().toISOString().slice(0, 10)) {}
+              private clock: () => string = () => new Date().toISOString().slice(0, 10),
+              private llm?: LlmClassifier) {}
 
   // ------------------------------------------------------------------ event handling
   handler = async (env: Envelope): Promise<void> => {
@@ -53,8 +55,10 @@ export class Agent {
       ? (env.data as EventData<"BookOpened">).accounts
       : [(env.data as EventData<"AccountAdded">).account];
     const bookId = (env.data as { bookId: string }).bookId;
+    const keys = await this.store.keys(t);
     for (const a of accs) {
-      await tx`INSERT INTO agent.accounts VALUES (${t}, ${bookId}, ${a.accountId}, ${a.nature}, ${a.isCashLike})
+      await tx`INSERT INTO agent.accounts (tenant_id, book_id, account_id, nature, is_cash_like, name)
+               VALUES (${t}, ${bookId}, ${a.accountId}, ${a.nature}, ${a.isCashLike}, ${keys.seal(a.name, accountNameCtx(bookId, a.accountId))})
                ON CONFLICT DO NOTHING`;
     }
   }
@@ -120,7 +124,7 @@ export class Agent {
     // 3. classify
     const accounts = await this.accountSet(tx, t, d.bookId);
     if (!accounts.has(txn.instrument)) throw new AgentError("unknown_instrument", `book ${d.bookId} has no account ${txn.instrument}`);
-    const c = await classify(tx, t, d.bookId, accounts, { direction: txn.direction, narration: txn.narration, partyId, partyName, purpose: txn.purposeHint }, keys);
+    const c = await classify(tx, t, d.bookId, accounts, { direction: txn.direction, narration: txn.narration, partyId, partyName, purpose: txn.purposeHint }, keys, this.llm);
     events.push({ type: "TransactionClassified", data: { txnId: d.txnId, accountId: c.accountId, confidence: c.confidence, source: c.source } });
 
     const provisional = d.trust === "provisional" || (d.trust === "user" && txn.instrument !== "CASH");

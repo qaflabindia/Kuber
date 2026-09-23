@@ -79,6 +79,8 @@ services:
       # Copilot model (optional). Without both, the canvas uses Kuber's deterministic router.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       KUBER_LLM_MODEL: ${KUBER_LLM_MODEL:-}
+      KUBER_LLM_CLASSIFY: ${KUBER_LLM_CLASSIFY:-off}
+      KUBER_LLM_CLASSIFY_MODEL: ${KUBER_LLM_CLASSIFY_MODEL:-}
       # MCP server for external agents (optional): {"<token>": {"tenant": "...", "book": "main", "principal": "agent:<name>"}}
       KUBER_MCP_TOKENS: ${KUBER_MCP_TOKENS:-}
       # External MCP servers the copilot may read from (optional): [{"name": "...", "url": "...", "allow": [...]}]
