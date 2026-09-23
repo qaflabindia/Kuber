@@ -8,7 +8,7 @@ services:
       POSTGRES_USER: kuber
       POSTGRES_PASSWORD: kuber
       POSTGRES_DB: kuber
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]   # loopback only: never expose the database beyond this machine
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./deploy/postgres-init.sql:/docker-entrypoint-initdb.d/01-app-role.sql:ro
@@ -16,11 +16,11 @@ services:
   nats:
     image: nats:2.11
     command: ["-js", "-sd", "/data", "-m", "8222"]
-    ports: ["4222:4222", "8222:8222"]
+    ports: ["127.0.0.1:4222:4222", "127.0.0.1:8222:8222"]
     volumes: [natsdata:/data]
   valkey:
     image: valkey/valkey:8
-    ports: ["6379:6379"]
+    ports: ["127.0.0.1:6379:6379"]
   core:
     build: .
     environment:
@@ -30,7 +30,7 @@ services:
       NATS_URL: nats://nats:4222
       CELL_ID: local-1
       PORT: "8080"
-    ports: ["8080:8080"]
+    ports: ["127.0.0.1:8080:8080"]
     depends_on:
       postgres: { condition: service_healthy }
       nats: { condition: service_started }
