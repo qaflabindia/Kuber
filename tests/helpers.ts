@@ -75,16 +75,21 @@ export async function enrol(cell: Cell, tenant: string, principals: string[], bo
 export interface SignedRequest {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; url: string; tenant: string | null; principal: string | null;
   payload?: unknown; contentType?: string; headers?: Record<string, string>;
+  /** Web session id; a fresh random one for requests with a principal unless given (null: none). */
+  session?: string | null;
   /** The BFF's step-up claim: when the person last confirmed with their passkey (epoch ms). */
   stepUpAt?: number;
 }
+/** A random web session id, as the BFF issues at sign-in. */
+export const newSession = () => randomBytes(24).toString("base64url");
 /** app.inject, signed the way the BFF signs requests to the core. */
 export function signedInject(app: FastifyInstance, secret = CORE_AUTH_SECRET) {
   const key = authKey(secret);
   return (r: SignedRequest) => {
     const body = r.payload === undefined ? undefined : typeof r.payload === "string" ? r.payload : JSON.stringify(r.payload);
     const headers: Record<string, string> = {
-      [AUTH_HEADER]: signRequest(key, { method: r.method, path: r.url, body, tenant: r.tenant, principal: r.principal, stepUpAt: r.stepUpAt }),
+      [AUTH_HEADER]: signRequest(key, { method: r.method, path: r.url, body, tenant: r.tenant, principal: r.principal,
+        session: r.session !== undefined ? r.session : r.principal ? newSession() : null, stepUpAt: r.stepUpAt }),
       ...(body !== undefined ? { "content-type": r.contentType ?? "application/json" } : {}), ...r.headers,
     };
     return app.inject({ method: r.method, url: r.url, headers, ...(body !== undefined ? { payload: body } : {}) } as InjectOptions);
@@ -101,6 +106,7 @@ export function signed(r: { method: string; url: string; headers?: Record<string
   const body = r.payload === undefined ? undefined : typeof r.payload === "string" ? r.payload : JSON.stringify(r.payload);
   const out: Record<string, string> = Object.fromEntries(Object.entries(headers).filter((e): e is [string, string] => e[1] !== undefined));
   if (body !== undefined && !Object.keys(out).some((k) => k.toLowerCase() === "content-type")) out["content-type"] = "application/json";
-  out[AUTH_HEADER] = signRequest(authKey(secret), { method: r.method, path: r.url, body, tenant: tenant ?? null, principal: principal ?? null });
+  out[AUTH_HEADER] = signRequest(authKey(secret), { method: r.method, path: r.url, body, tenant: tenant ?? null, principal: principal ?? null,
+    session: principal ? newSession() : null });
   return { method: r.method, url: r.url, headers: out, ...(body !== undefined ? { payload: body } : {}) } as InjectOptions;
 }

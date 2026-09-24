@@ -8,6 +8,7 @@ import { ExternalTools, parseServers } from "./copilot/external.ts";
 import { providerFromEnv } from "./copilot/provider.ts";
 import { parseGrants } from "./mcp.ts";
 import { classifierFromEnv } from "./llm-classifier.ts";
+import { replayStoreFromEnv } from "@kuber/auth/valkey";
 
 const env = (k: string, d?: string) => {
   const v = process.env[k] ?? d;
@@ -28,6 +29,7 @@ if (requireTls) {
     !/[?&]sslmode=verify-full\b/.test(process.env.MIGRATION_URL ?? "?sslmode=verify-full") && "MIGRATION_URL must use sslmode=verify-full",
     !/[?&]sslmode=verify-full\b/.test(process.env.SYSTEM_DATABASE_URL ?? "?sslmode=verify-full") && "SYSTEM_DATABASE_URL must use sslmode=verify-full",
     !env("NATS_URL", "").startsWith("tls://") && "NATS_URL must be tls://",
+    !!process.env.VALKEY_URL && !/^(rediss|valkeys):\/\//.test(process.env.VALKEY_URL) && "VALKEY_URL must be rediss:// (TLS)",
     !httpsCfg && "TLS_CERT_FILE and TLS_KEY_FILE are required to serve HTTPS",
   ].filter(Boolean);
   if (problems.length) { console.error(`KUBER_REQUIRE_TLS: refusing to start:\n  ${problems.join("\n  ")}`); process.exit(1); }
@@ -73,8 +75,11 @@ const clock = () => new Date().toISOString().slice(0, 10);
 const external = new ExternalTools(parseServers(process.env.KUBER_MCP_SERVERS));
 const copilot = new Copilot(cell, providerFromEnv(), external, clock);
 const mcpGrants = parseGrants(process.env.KUBER_MCP_TOKENS);
-const app = buildServer(cell, { copilot, mcpGrants, clock, https: httpsCfg, auth: { secret: coreAuthSecret } });
+// Replay protection shared by every core instance (Valkey) when VALKEY_URL is set; otherwise in-process.
+const replay = replayStoreFromEnv();
+const app = buildServer(cell, { copilot, mcpGrants, clock, https: httpsCfg, auth: { secret: coreAuthSecret, replay } });
 console.log(`classifier: ${classifier ? classifier.name : "rules, history and keywords (set KUBER_LLM_CLASSIFY=on for the LLM step)"}`);
+console.log(`replay protection: ${replay.kind === "valkey" ? "shared (Valkey)" : "in-process (single instance)"}`);
 console.log(`sign-in: passkeys (relying party ${rpId}, origins ${origins.join(", ")})${devSignIn ? "; DEVELOPMENT SIGN-IN ENABLED (KUBER_DEV_SIGNIN=true): anyone can claim an empty workspace by name" : ""}`);
 console.log(`copilot: ${copilot.engine}; MCP server: ${mcpGrants.size ? `/mcp (${mcpGrants.size} token(s))` : "off (set KUBER_MCP_TOKENS)"}`);
 await app.listen({ port: Number(env("PORT", "8080")), host: "0.0.0.0" });
@@ -89,6 +94,7 @@ const shutdown = async () => {
   cell.relay.stop();
   await relay;
   await cell.close();
+  await replay.close?.();
   process.exit(0);
 };
 process.on("SIGTERM", shutdown);

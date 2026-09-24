@@ -213,9 +213,9 @@ export function validateJournal(s: BookState, txnDate: string, lines: Line[], pr
   }
 }
 
-/** Recompute the chain from events. Returns the first broken journal, or null if intact. */
-export function verifyChain(events: Envelope[]): string | null {
-  let prev = GENESIS_HASH;
+/** Recompute the chain from events (continuing from hash `from`). Returns the first broken journal, or null if intact. */
+export function verifyChain(events: Envelope[], from: string = GENESIS_HASH): string | null {
+  let prev = from;
   for (const e of events) {
     if (e.type !== "JournalPosted") continue;
     const d = e.data as EventData<"JournalPosted">;

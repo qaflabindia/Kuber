@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { LLM_MAX_CONFIDENCE, type ClassifierAccount, type ClassifierInput, type LlmClassifier, type LlmSuggestion } from "@kuber/agent";
 import { KeyAdmin, type Cell } from "@kuber/core";
 import { AnthropicClassifier, maskDigits } from "../apps/core/src/llm-classifier.ts";
-import { startCell } from "./helpers.ts";
+import { enrol, startCell } from "./helpers.ts";
 import postgres from "postgres";
 
 const T = "fern", B = "main", OWNER = "owner:fern";
@@ -35,6 +35,7 @@ beforeAll(async () => {
   let db: { ownerUrl: string };
   ({ cell, stop, db } = await startCell(clock, { classifier: llm }));
   ownerUrl = db.ownerUrl;
+  await enrol(cell, T, [OWNER]);                    // the agent and channels check membership in-process too
   await cell.gl.openBook(T, B, "fern", "freelancer", OWNER);
   await cell.settle();
 });

@@ -12,14 +12,24 @@
  *   ops certify <tenant> <book> <trial-balance|profit-and-loss|balance-sheet> [--from d] [--to d] [--as-of d] [--timeout ms]
  *   ops snapshots <tenant> [book]                 list certified report snapshots
  *   ops reproduce <tenant> <snapshotId>           recompute a certified report at its ledger position and compare
+ *   ops bus-consumers [--prune] [--force]         durable consumers on the cell's NATS stream: expected ones for
+ *                                                 KUBER_BUS_PARTITIONS, pending counts, stale ones (un-suffixed
+ *                                                 <module>, lanes beyond the partition count); --prune deletes stale
+ *                                                 ones whose pending messages are processed (es.inbox), --force all stale
+ *   ops backfill-confirmations [--tenant t]       emit ProvisionalConfirmed for confirmations the GL never heard of
+ *                                                 (databases from before propagation); idempotent
+ *   ops verify [--full] [--tenant t]              link chains and digests from each stream's verified checkpoint
+ *                                                 (--full: from the first event); moves checkpoints of clean streams
  *
  * It starts a cell with the in-memory bus and no relay: handlers run here, events they append are
  * published by the running core's relay. Environment as for the core: DATABASE_URL, MIGRATION_URL
  * (owner; required: rebuild deletes projection rows), SYSTEM_DATABASE_URL, KUBER_MASTER_KEY_FILE,
- * POLICY_DIR, CELL_ID, KUBER_BUS_RETENTION_DAYS.
+ * POLICY_DIR, CELL_ID, KUBER_BUS_RETENTION_DAYS; bus-consumers also NATS_URL, NATS_TLS_CA, NATS_TOKEN,
+ * KUBER_BUS_PARTITIONS.
  */
 import postgres from "postgres";
 import { LocalFileKms } from "@kuber/crypto";
+import { NatsConsumerAdmin, busPartitions, streamNameFor } from "@kuber/bus";
 import { renderText, type CertifiableKind } from "@kuber/reporting";
 import { Cell } from "./cell.ts";
 import { OpsAdmin } from "./ops-admin.ts";
@@ -94,8 +104,31 @@ try {
       process.exitCode = r.matches ? 0 : 1;
       break;
     }
+    case "backfill-confirmations": {
+      const r = await ops.backfillConfirmations(flag("--tenant"));
+      print(r);
+      console.log(`emitted ${r.reduce((n, x) => n + x.emitted, 0)} confirmation(s) for ${r.length} tenant(s); the core's relay publishes them to the GL`);
+      break;
+    }
+    case "bus-consumers": {
+      const nats = await NatsConsumerAdmin.connect(need("NATS_URL"), streamNameFor(process.env.CELL_ID ?? "local"),
+        { caFile: process.env.NATS_TLS_CA, token: process.env.NATS_TOKEN });
+      try {
+        const r = await ops.busConsumers(nats, { partitions: busPartitions(), prune: args.includes("--prune"), force: args.includes("--force") });
+        print({ stream: nats.stream, ...r });
+        // without --prune: exit 1 when something stale is left, so a deploy check can notice
+        if (!args.includes("--prune") && r.consumers.some((c) => c.kind === "legacy" || c.kind === "retired_lane")) process.exitCode = 1;
+        if (args.includes("--prune") && r.consumers.some((c) => (c.kind === "legacy" || c.kind === "retired_lane") && !c.deleted)) process.exitCode = 1;
+      } finally { await nats.close(); }
+      break;
+    }
+    case "verify": {
+      const v = await ops.verify({ full: args.includes("--full"), tenantId: flag("--tenant") });
+      print(v); process.exitCode = v.problems.length ? 1 : 0;
+      break;
+    }
     default:
-      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce");
+      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify, bus-consumers, backfill-confirmations");
       process.exitCode = 2;
   }
 } finally {

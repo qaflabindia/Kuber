@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { journalIdForRequest, uuid } from "@kuber/contracts";
 import type { Cell } from "@kuber/core";
-import { ROOT, startCell } from "./helpers.ts";
+import { ROOT, enrol, startCell } from "./helpers.ts";
 
 const T = "laksh", B = "main", OWNER = "owner:laksh";
 const clock = { value: "2026-10-25" };
@@ -16,6 +16,7 @@ const csv = (f: string) => readFileSync(join(ROOT, "samples", f), "utf8");
 
 beforeAll(async () => {
   ({ cell, stop } = await startCell(clock));
+  await enrol(cell, T, [OWNER]);                    // the agent and channels check membership in-process too
   await cell.gl.openBook(T, B, "laksh", "freelancer", OWNER);
   for (const [acc, amt] of [["BANK", 12500000n], ["LOANS", -240000000n]] as const) {
     await cell.gl.execute(T, B, { kind: "PostJournal", journalId: uuid(), txnDate: "2026-09-30", narration: `Opening ${acc}`, voucherType: "opening",

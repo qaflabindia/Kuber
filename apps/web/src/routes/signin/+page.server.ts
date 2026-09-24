@@ -1,7 +1,8 @@
 import { fail, redirect } from "@sveltejs/kit";
-import { ApiError, identity } from "$lib/server/api";
-import { COOKIE, devSignInEnabled, slug } from "$lib/server/session";
+import { ApiError, api, identity } from "$lib/server/api";
+import { COOKIE, devSignInEnabled, newSessionId, slug } from "$lib/server/session";
 import { startSession } from "$lib/server/signin";
+import { forgetStepUp } from "$lib/server/stepup";
 import type { Actions, PageServerLoad } from "./$types";
 
 export const load: PageServerLoad = async ({ locals }) => {
@@ -23,15 +24,20 @@ export const actions: Actions = {
     if (!workspace) return fail(400, { message: "Choose a workspace name.", name, workspace });
     let to: string;
     try {
-      to = await startSession(cookies, await identity(workspace).devSignIn(name), url.searchParams.get("next"));
+      const sid = newSessionId();
+      to = await startSession(cookies, await identity(workspace, sid).devSignIn(name), url.searchParams.get("next"), sid);
     } catch (e) {
       if (e instanceof ApiError) return fail(e.status, { message: e.message, name, workspace });
       return fail(502, { message: "Kuber's ledger service isn't reachable. Is the core running on port 8080?", name, workspace });
     }
     throw redirect(303, to);
   },
-  signout: async ({ cookies }) => {
+  signout: async ({ cookies, locals }) => {
+    // Revoke the session in the core first, so the cookie is worthless even if it was copied.
+    // Sign-out still completes locally when the core cannot be reached.
+    if (locals.session) await api(locals.session).signOut().catch(() => undefined);
     cookies.delete(COOKIE, { path: "/" });
+    forgetStepUp(cookies);
     throw redirect(303, "/signin");
   },
 };

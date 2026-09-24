@@ -89,7 +89,7 @@ export class DeadLetterStore {
         ${status === "all" ? t`` : t`AND status = ${status}`}
         ${f.consumer ? t`AND consumer = ${f.consumer}` : t``}
         ${f.tenantId ? t`AND tenant_id = ${f.tenantId}` : t``}
-      ORDER BY global_position, id`);
+      ORDER BY es.dead_letters.global_position, es.dead_letters.id`);
   }
 
   /**

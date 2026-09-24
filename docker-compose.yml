@@ -76,6 +76,10 @@ services:
       NATS_URL: tls://nats:4222
       NATS_TLS_CA: /certs/ca.crt
       NATS_TOKEN: ${NATS_TOKEN:?missing}
+      # Replay protection shared by every core instance: accepted request nonces live in Valkey (TLS,
+      # verified against the local CA via NODE_EXTRA_CA_CERTS). Unset = in-process, one instance only.
+      VALKEY_URL: rediss://valkey:6379
+      VALKEY_PASSWORD: ${VALKEY_PASSWORD:?missing}
       NODE_EXTRA_CA_CERTS: /certs/ca.crt
       TLS_CERT_FILE: /certs/server.crt
       TLS_KEY_FILE: /run/kuber/server.key          # copied in by deploy/core-entrypoint.sh
@@ -108,6 +112,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       nats: { condition: service_started }
+      valkey: { condition: service_started }
     restart: unless-stopped
 
   web:

@@ -10,7 +10,15 @@
 import type { Sql } from "postgres";
 import type { EventData } from "@kuber/contracts";
 import { fingerprintProjection, rebuildProjection, unprocessedEvents, type DeadLetter, type Projection, type RebuildResult } from "@kuber/eventstore";
+import { classifyConsumers, expectedConsumers, planPrune, type ConsumerState } from "@kuber/bus";
 import type { Cell } from "./cell.ts";
+
+/** What `busConsumers` needs from the broker (NatsConsumerAdmin; a fake in unit tests). */
+export interface BusConsumerAdmin {
+  list(): Promise<ConsumerState[]>;
+  pendingEventIds(c: ConsumerState): Promise<string[] | null>;
+  delete(name: string): Promise<unknown>;
+}
 import { pruneOutbox } from "./keys-admin.ts";
 
 /**
@@ -153,6 +161,69 @@ export class OpsAdmin {
     const gaps = (await unprocessedEvents(this.cell.store, p.consumer, CONSUMER_INPUTS[p.consumer]!, 0)).filter((g) => g.tenant_id === tenant);
     for (const g of gaps) problems.push(`${g.n} ${g.type} event(s) not processed by ${p.consumer} (oldest at position ${g.oldest})`);
     return { projection: name, tenant, ok: problems.length === 0, problems, fingerprint: await fingerprintProjection(this.owner, p, tenant) };
+  }
+
+  // ------------------------------------------------------------------ backfills
+  /**
+   * Confirmations recorded only by the agent before they were propagated to the GL: emit
+   * ProvisionalConfirmed once per such journal (idempotent), for one tenant or every tenant.
+   * The events reach the GL through the running core's relay.
+   */
+  async backfillConfirmations(tenant?: string): Promise<{ tenant: string; emitted: number }[]> {
+    const out = [];
+    for (const t of tenant ? [tenant] : await this.tenants()) out.push({ tenant: t, ...(await this.cell.agent.backfillConfirmations(t)) });
+    return out;
+  }
+
+  // ------------------------------------------------------------------ bus consumers
+  /**
+   * Durable consumers on the cell's stream: which are expected for `partitions` lanes, their
+   * pending counts and, for stale ones (the unpartitioned `<module>`, lanes >= P), whether their
+   * pending messages are already processed per es.inbox (or recorded as dead letters). With
+   * `prune`, deletes the stale consumers whose pending messages are all processed, or every stale
+   * one with `force`. Expected consumers and consumers of unknown modules are never deleted.
+   */
+  async busConsumers(bus: BusConsumerAdmin, opts: { partitions: number; prune?: boolean; force?: boolean }) {
+    const modules = Object.keys(CONSUMER_INPUTS);
+    const consumers = classifyConsumers(await bus.list(), modules, opts.partitions);
+    const unprocessed: Record<string, number | undefined> = {};
+    for (const c of consumers) {
+      if ((c.kind !== "legacy" && c.kind !== "retired_lane") || c.pending + c.ackPending === 0) continue;
+      const ids = await bus.pendingEventIds(c);
+      unprocessed[c.name] = ids === null ? undefined : await this.unprocessedBy(c.module!, ids);
+    }
+    const plan = planPrune(consumers, unprocessed, opts.force);
+    const present = new Set(consumers.map((c) => c.name));
+    const out = [];
+    for (const c of consumers) {
+      const d = plan.find((p) => p.name === c.name)!;
+      let deleted = false;
+      if (opts.prune && d.delete) { await bus.delete(c.name); deleted = true; }
+      out.push({ name: c.name, kind: c.kind, module: c.module, lane: c.lane, pending: c.pending, ackPending: c.ackPending,
+        ...(c.name in unprocessed ? { unprocessed: unprocessed[c.name] ?? null } : {}), prune: d.delete, reason: d.reason, ...(opts.prune ? { deleted } : {}) });
+    }
+    return { partitions: opts.partitions, consumers: out, missing: expectedConsumers(modules, opts.partitions).filter((n) => !present.has(n)) };
+  }
+
+  /** How many of these events `consumer` has neither processed (es.inbox) nor recorded as a dead letter (shredded tenants excluded). */
+  async unprocessedBy(consumer: string, eventIds: string[]): Promise<number> {
+    if (!eventIds.length) return 0;
+    const [r] = await this.owner<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM unnest(${eventIds}::uuid[]) AS x(id)
+      WHERE NOT EXISTS (SELECT 1 FROM es.inbox i WHERE i.consumer = ${consumer} AND i.event_id = x.id)
+        AND NOT EXISTS (SELECT 1 FROM es.dead_letters d WHERE d.consumer = ${consumer} AND d.event_id = x.id)
+        AND NOT EXISTS (SELECT 1 FROM es.events e JOIN keys.shredded s USING (tenant_id) WHERE e.event_id = x.id)`;
+    return r!.n;
+  }
+
+  // ------------------------------------------------------------------ storage verification
+  /**
+   * Link chains and digests of every stream (or one tenant's): from each stream's verified
+   * checkpoint, or from the first event with `full`. Checkpoints of clean streams move forward
+   * (written on the cell's system connection).
+   */
+  verify(opts: { full?: boolean; tenantId?: string } = {}) {
+    return this.cell.store.verifyStorage({ deep: true, tenantId: opts.tenantId, incremental: !opts.full, record: true });
   }
 
   // ------------------------------------------------------------------ status

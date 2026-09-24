@@ -11,13 +11,19 @@
  * follows the GL's answer: queued|awaiting_approval -> approved (posting requested) -> posted on
  * JournalPosted, or rejected_by_gl on PostingRejected, which puts it back in review with the reason.
  * Its own tables are updated in the same transaction as the events it appends.
+ *
+ * Authorization (F02, in depth): every command from a person (approve, reject, resolve a match,
+ * ratify, correct, add a rule) checks its principal through the ModuleGuard (the identity module)
+ * in its own transaction, whichever surface called it. A draft approval that is an action of an
+ * ops plan is authorized by that plan's approval (PlanApproved by the same principal, same book,
+ * same transaction), which the ops guard has already checked.
  */
 import type { Sql, TransactionSql } from "postgres";
 import {
   addDays, journalIdForRequest, stableId, uuid,
   type Decision, type Envelope, type EventData, type Line, type RawTxn,
 } from "@kuber/contracts";
-import { once, type EventStore, type MetaInput, type NewEvent, type Projection } from "@kuber/eventstore";
+import { DENY_ALL_GUARD, once, type EventStore, type MetaInput, type ModuleGuard, type NewEvent, type Projection } from "@kuber/eventstore";
 import { isToken, type TenantKeys } from "@kuber/crypto";
 import type { Level, PolicyEngine } from "@kuber/policy";
 import { SUSPENSE, accountNameCtx, classify, type LlmClassifier } from "./classify.ts";
@@ -40,7 +46,21 @@ export class AgentError extends Error { constructor(public code: string, msg: st
 export class Agent {
   constructor(private sql: Sql, private store: EventStore, private policies: PolicyEngine,
               private clock: () => string = () => new Date().toISOString().slice(0, 10),
-              private llm?: LlmClassifier) {}
+              private llm?: LlmClassifier, private guard: ModuleGuard = DENY_ALL_GUARD) {}
+
+  /**
+   * May `principal` decide a draft or match review of `book`? A person needs draft.decide in that
+   * book. `planId`: the decision is an action of that ops plan, which is authorized when this
+   * principal's PlanApproved for the same book is in this transaction's view of the plan stream.
+   */
+  private async mayDecide(tx: TransactionSql, tenantId: string, principal: string, book: string, planId?: string) {
+    if (planId) {
+      const approved = (await this.store.readStream(tenantId, `${tenantId}/plan/${planId}`, 0, tx))
+        .some((e) => e.type === "PlanApproved" && e.meta.principal === principal && (e.data as { bookId: string }).bookId === book);
+      if (approved) return;
+    }
+    await this.guard.permit(tenantId, principal, "draft.decide", { book }, tx);
+  }
 
   // ------------------------------------------------------------------ event handling
   handler = async (env: Envelope): Promise<void> => {
@@ -256,6 +276,7 @@ export class Agent {
       const [row] = await tx<{ txn_id: string; book_id: string; status: string; proposal: unknown }[]>`
         SELECT txn_id, book_id, status, proposal FROM agent.drafts WHERE tenant_id = ${tenantId} AND draft_id = ${draftId} FOR UPDATE`;
       if (!row) throw new AgentError("not_found", `no draft ${draftId}`);
+      await this.mayDecide(tx, tenantId, principal, row.book_id, commandId);
       const d = { ...row, proposal: openProposal(keys, draftId, row.proposal) };
       if (!REVIEWABLE.includes(d.status)) throw new AgentError("not_open", `draft ${draftId} is ${d.status}`);
       const final = accountId ?? d.proposal.accountId;
@@ -280,6 +301,9 @@ export class Agent {
 
   async rejectDraft(tenantId: string, draftId: string, principal: string, reason: string) {
     return this.store.tenantTx(tenantId, async (tx) => {
+      const [b] = await tx<{ book_id: string }[]>`SELECT book_id FROM agent.drafts WHERE tenant_id = ${tenantId} AND draft_id = ${draftId}`;
+      if (!b) throw new AgentError("not_open", `draft ${draftId} is not open`);
+      await this.mayDecide(tx, tenantId, principal, b.book_id);
       const [d] = await tx<{ txn_id: string }[]>`
         UPDATE agent.drafts SET status = 'rejected', resolved_by = ${principal}, resolved_at = now()
         WHERE tenant_id = ${tenantId} AND draft_id = ${draftId} AND status IN ${tx(REVIEWABLE)} RETURNING txn_id`;
@@ -289,13 +313,40 @@ export class Agent {
     });
   }
 
-  /** Statement lines waiting for a person to say whether they are a provisional entry already in the books. */
-  async openMatchReviews(tenantId: string) {
+  /** Statement lines waiting for a person to say whether they are a provisional entry already in the books (every page). */
+  async openMatchReviews(tenantId: string, opts: { bookIds?: string[] } = {}) {
+    const out: MatchReviewRow[] = [];
+    let after: string | undefined;
+    for (;;) {
+      const p = await this.matchReviewsPage(tenantId, { ...opts, limit: MAX_PAGE, after });
+      out.push(...p.items);
+      if (!p.next) return out;
+      after = p.next;
+    }
+  }
+
+  /**
+   * Open match reviews in queue order (created_at, review_id), one keyset page after `after`, like
+   * `queuePage`. `bookIds` narrows to those books in the index (a book-scoped member's books).
+   */
+  async matchReviewsPage(tenantId: string, opts: { bookIds?: string[]; limit?: number; after?: string } = {}): Promise<{ items: MatchReviewRow[]; next: string | null }> {
+    const limit = pageSize(opts.limit);
+    const cur = decodeCursor(opts.after);
+    if (opts.bookIds && !opts.bookIds.length) return { items: [], next: null };
     const keys = await this.store.keys(tenantId);
-    const rows = await this.store.tenantTx(tenantId, (tx) => tx<{ review_id: string; txn_id: string; book_id: string; candidates: string[]; detail: string; created_at: Date }[]>`
-      SELECT review_id, txn_id, book_id, candidates, detail, created_at FROM agent.match_reviews
-      WHERE tenant_id = ${tenantId} AND status = 'open' ORDER BY created_at, review_id`);
-    return rows.map((r) => ({ ...r, detail: keys.openJson<MatchReviewDetail>(r.detail, matchReviewCtx(r.review_id)) }));
+    const rows = await this.store.tenantTx(tenantId, (tx) => tx<(Omit<MatchReviewRow, "detail"> & { detail: string; cur_ts: string })[]>`
+      SELECT review_id, txn_id, book_id, candidates, detail, created_at, created_at::text AS cur_ts FROM agent.match_reviews
+      WHERE tenant_id = ${tenantId} AND status = 'open'
+        ${opts.bookIds ? tx`AND book_id IN ${tx(opts.bookIds)}` : tx``}
+        ${cur ? tx`AND (created_at, review_id) > (${cur[0]}::text::timestamptz, ${cur[1]})` : tx``}
+      ORDER BY created_at, review_id LIMIT ${limit + 1}`);
+    const more = rows.length > limit;
+    const page = rows.slice(0, limit);
+    const last = page.at(-1);
+    return {
+      items: page.map(({ cur_ts: _c, ...r }) => ({ ...r, detail: keys.openJson<MatchReviewDetail>(r.detail, matchReviewCtx(r.review_id)) })),
+      next: more && last ? encodeCursor([last.cur_ts, last.review_id]) : null,
+    };
   }
 
   /**
@@ -308,6 +359,7 @@ export class Agent {
       const [r] = await tx<{ txn_id: string; book_id: string; detail: string }[]>`
         SELECT txn_id, book_id, detail FROM agent.match_reviews WHERE tenant_id = ${tenantId} AND review_id = ${reviewId} AND status = 'open' FOR UPDATE`;
       if (!r) throw new AgentError("not_open", `no open match review ${reviewId}`);
+      await this.mayDecide(tx, tenantId, principal, r.book_id);
       const det = keys.openJson<MatchReviewDetail>(r.detail, matchReviewCtx(reviewId));
       const stream = `${tenantId}/txn/${r.txn_id}`;
       if (journalId) {
@@ -359,6 +411,7 @@ export class Agent {
 
   async ratify(tenantId: string, journalId: string, principal: string) {
     return this.store.tenantTx(tenantId, async (tx) => {
+      await this.guard.permit(tenantId, principal, "journal.ratify", { allBooks: true }, tx);
       const [r] = await tx<{ txn_id: string }[]>`
         UPDATE agent.ratifications SET status = 'ratified', resolved_by = ${principal}, resolved_at = now()
         WHERE tenant_id = ${tenantId} AND journal_id = ${journalId} AND status = 'open' RETURNING txn_id`;
@@ -375,6 +428,7 @@ export class Agent {
    */
   async correct(tenantId: string, journalId: string, toAccount: string, principal: string, opts: { learn?: boolean } = {}) {
     return this.store.tenantTx(tenantId, async (tx) => {
+      await this.guard.permit(tenantId, principal, "journal.ratify", { allBooks: true }, tx);
       const [j] = await tx<{ book_id: string; principal: string; party_id: string | null; counter_account: string | null; reversed: boolean }[]>`
         SELECT book_id, principal, party_id, counter_account, reversed FROM agent.journal_index WHERE tenant_id = ${tenantId} AND journal_id = ${journalId}`;
       if (!j) throw new AgentError("not_found", `no journal ${journalId} (it may not be projected yet)`);
@@ -405,6 +459,7 @@ export class Agent {
 
   async addRule(tenantId: string, pattern: string, accountId: string, principal: string) {
     return this.store.tenantTx(tenantId, async (tx) => {
+      await this.guard.permit(tenantId, principal, "rules.manage", { allBooks: true }, tx);
       const events = await this.learn(tx, tenantId, pattern, accountId, principal, await this.store.keys(tenantId));
       await this.store.append("agent", tenantId, { streamId: `${tenantId}/rules`, expected: "any", events }, { principal }, tx);
     });
@@ -645,6 +700,7 @@ function openProposal(keys: TenantKeys, draftId: string, v: unknown): Proposal {
 type MatchOutcome = { kind: "none" } | { kind: "confirm"; journalId: string; basis: "reference" | "counterparty" }
   | { kind: "review"; candidates: string[]; reason: string };
 interface MatchReviewDetail { txnDate: string; narration: string; amount: string; direction: "in" | "out"; instrument: string; reference: string | null; reason: string }
+export interface MatchReviewRow { review_id: string; txn_id: string; book_id: string; candidates: string[]; detail: MatchReviewDetail; created_at: Date }
 
 export const matchReviewCtx = (reviewId: string) => `agent.match_reviews.detail|${reviewId}`;
 export const provisionalSourceCtx = (txnId: string) => `agent.provisional_sources.detail|${txnId}`;

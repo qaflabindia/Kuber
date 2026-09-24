@@ -16,6 +16,7 @@ import { REPORTING_MIGRATIONS, Reporting } from "@kuber/reporting";
 import { OPS_MIGRATIONS, Operations } from "@kuber/ops";
 import { EVIDENCE_MIGRATIONS, EvidenceService } from "@kuber/evidence";
 import { IDENTITY_MIGRATIONS, Identity, type IdentityOptions } from "@kuber/identity";
+import { sealIdentityColumns } from "./keys-admin.ts";
 
 export interface CellOptions {
   /** Application connection: must be a role without SUPERUSER or BYPASSRLS, or tenant isolation does not apply. */
@@ -106,6 +107,9 @@ export class Cell {
     if (!o.systemDatabaseUrl) console.warn("WARNING: no systemDatabaseUrl; system work (relay, catch-up reads) runs as the database owner");
     const systemSql = postgres(o.systemDatabaseUrl ?? ownerUrl, { max: 3, onnotice: () => undefined });
     const keyring = new Keyring(sql, o.kms);
+    // Data migrations that need keys: seal identity display names stored before they were encrypted.
+    const owner = postgres(ownerUrl, { max: 1, onnotice: () => undefined });
+    try { await sealIdentityColumns(owner, keyring); } finally { await owner.end(); }
     const store = new EventStore(sql, cellId, { keyring, legacy: o.legacy ?? "reject" }, systemSql);
     const partitions = o.busPartitions ?? busPartitions();
     // Exhausted deliveries (on any lane) are recorded in es.dead_letters under the module's name (see `ops dead-letters`).
@@ -115,12 +119,13 @@ export class Cell {
       : await NatsBus.connect(o.bus.natsUrl, cellId, { caFile: o.bus.caFile, retentionDays: o.bus.retentionDays, token: o.bus.token, partitions, maxDeliver: o.bus.maxDeliver, onDeadLetter });
     const relay = new OutboxRelay(systemSql, (subject, env) => bus.publish(subject, env));
     const policies = PolicyEngine.fromDir(o.policyDir);
-    const gl = new GeneralLedger(store);
-    const channels = new Channels(store);
-    const agent = new Agent(sql, store, policies, o.clock, o.classifier);
-    const reporting = new Reporting(sql, store);
     // Memberships, passkeys and the authorization guard every operation passes through (F01/F02).
+    // It also guards the agent's decisions and channel submissions at the module boundary.
     const identity = new Identity(store, policies, { rpId: "localhost", origins: ["http://localhost:3000"], ...o.identity });
+    const gl = new GeneralLedger(store);
+    const channels = new Channels(store, identity);
+    const agent = new Agent(sql, store, policies, o.clock, o.classifier, identity);
+    const reporting = new Reporting(sql, store);
     const ops = new Operations(sql, store, { gl, reporting, agent, policies }, o.clock, identity);
     const evidence = new EvidenceService(store);
 

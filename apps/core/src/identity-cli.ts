@@ -9,21 +9,26 @@
  * can claim them by signing up. Issue the owner an invitation that keeps their principal, e.g.
  *   ./kuber run --rm --entrypoint "npx tsx apps/core/src/identity-cli.ts" tools invite laksh owner:laksh
  * and enter it on the sign-in page under "Create a passkey" → "Invitation code".
+ *
+ * Needs DATABASE_URL and KUBER_MASTER_KEY_FILE: display names are sealed with the tenant's key and
+ * every change is recorded as a sealed event in the tenant's identity stream.
  */
 import postgres from "postgres";
 import { EventStore } from "@kuber/eventstore";
+import { Keyring, LocalFileKms } from "@kuber/crypto";
 import { PolicyEngine } from "@kuber/policy";
 import { Identity, isRole } from "@kuber/identity";
 
 const [cmd, tenant, principal, ...rest] = process.argv.slice(2);
 const flag = (k: string) => { const i = rest.indexOf(`--${k}`); return i >= 0 ? rest[i + 1] : undefined; };
-const url = process.env.DATABASE_URL;
-if (!url || !cmd || !tenant) {
-  console.error("usage: identity-cli invite <tenant> <role:name> [--books a,b] [--hours 72] | members <tenant> | revoke <tenant> <role:name>   (needs DATABASE_URL)");
+const url = process.env.DATABASE_URL, keyFile = process.env.KUBER_MASTER_KEY_FILE;
+if (!url || !keyFile || !cmd || !tenant) {
+  console.error("usage: identity-cli invite <tenant> <role:name> [--books a,b] [--hours 72] | members <tenant> | revoke <tenant> <role:name>   (needs DATABASE_URL and KUBER_MASTER_KEY_FILE)");
   process.exit(2);
 }
 const sql = postgres(url, { max: 1, onnotice: () => undefined });
-const id = new Identity(new EventStore(sql, "cli"), PolicyEngine.fromDir(process.env.POLICY_DIR ?? "./policies"), { rpId: "localhost", origins: [] });
+const keyring = new Keyring(sql, LocalFileKms.load(keyFile, { strictPermissions: process.env.KUBER_KEY_FILE_STRICT !== "false" }));
+const id = new Identity(new EventStore(sql, "cli", { keyring }), PolicyEngine.fromDir(process.env.POLICY_DIR ?? "./policies"), { rpId: "localhost", origins: [] });
 try {
   if (cmd === "members") console.table(await id.members(tenant));
   else if (cmd === "revoke" && principal) { await id.revoke(tenant, "operator:cli", principal); console.log(`revoked ${principal}`); }
