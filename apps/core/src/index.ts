@@ -5,6 +5,6 @@ export { route, amountIn, dateIn } from "./copilot/router.ts";
 export type { LlmProvider, Turn, Message, LlmTool } from "./copilot/provider.ts";
 export { parseGrants } from "./mcp.ts";
 export { kuberTools, planText } from "./tools.ts";
-export { KeyAdmin, SEALED_COLUMNS } from "./keys-admin.ts";
+export { KeyAdmin, SEALED_COLUMNS, sealColumnsOnce, sealIdentityColumns } from "./keys-admin.ts";
 export { PROJECTION_TABLES, RETENTION, pruneOutbox } from "./keys-admin.ts";
 export { OpsAdmin, CONSUMER_INPUTS, type BusConsumerAdmin, type ConsistencyReport } from "./ops-admin.ts";

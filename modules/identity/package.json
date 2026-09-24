@@ -9,6 +9,7 @@
   "dependencies": {
     "@kuber/auth": "workspace:*",
     "@kuber/contracts": "workspace:*",
+    "@kuber/crypto": "workspace:*",
     "@kuber/eventstore": "workspace:*",
     "@kuber/ops": "workspace:*",
     "@kuber/policy": "workspace:*",

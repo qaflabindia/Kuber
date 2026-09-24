@@ -7,6 +7,10 @@
  * on both tiers, a development sign-in). The core re-checks the membership on every request, so
  * revoking a member takes effect immediately, whatever sessions they hold.
  *
+ * Each session has a random id (sid), chosen here before sign-in and signed into every request to
+ * the core. The core binds it to the passkey at sign-in and refuses it once it is revoked: at
+ * sign-out, or when that passkey is revoked. Cookies from before session ids are no longer valid.
+ *
  * A second cookie of the same construction carries a sign-in ceremony in progress (workspace,
  * mode, challenge) for five minutes.
  */
@@ -21,6 +25,7 @@ export interface Session {
   books: string[] | null; // book scope; null = every book
   name: string;          // display name
   book: string | null;   // selected book
+  sid: string;           // session id, revocable in the core
   issuedAt: number;
 }
 
@@ -79,8 +84,10 @@ function unseal<T extends { issuedAt: number }>(cookie: string | undefined, aad:
 export const encode = (s: Session) => seal(s, "kuber_session|v2");
 export function decode(cookie: string | undefined): Session | null {
   const s = unseal<Session>(cookie, "kuber_session|v2", MAX_AGE);
-  return s && typeof s.principal === "string" && typeof s.role === "string" ? s : null;
+  return s && typeof s.principal === "string" && typeof s.role === "string" && typeof s.sid === "string" ? s : null;
 }
+/** A new session id: 256 random bits, URL-safe. */
+export const newSessionId = () => randomBytes(32).toString("base64url");
 export const encodeCeremony = (c: Ceremony) => seal(c, "kuber_passkey|v1");
 export const decodeCeremony = (cookie: string | undefined) => unseal<Ceremony>(cookie, "kuber_passkey|v1", CEREMONY_MAX_AGE);
 

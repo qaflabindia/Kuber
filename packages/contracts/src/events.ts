@@ -180,18 +180,43 @@ export const EVIDENCE = {
   }),
 } as const;
 
-export const ALL_EVENTS = { ...GL, ...CHANNELS, ...AGENT, ...OPS, ...EVIDENCE } as const;
+// ------------------------------------------------------------------ Identity events (audit trail)
+/**
+ * Membership, invitations, passkeys, sessions and separation settings, appended to the tenant's
+ * identity stream (`<tenant>/identity`) in the same transaction as the change they record. The
+ * actor is the event's meta.principal. Payloads are sealed like every event.
+ */
+const Books = z.array(z.string()).nullable();
+export const IDENTITY = {
+  MemberAdded: z.object({ principal: Principal, role: z.string(), books: Books, source: z.string(), displayName: z.string(),
+    reactivated: z.boolean().default(false) }),
+  MemberRemoved: z.object({ principal: Principal }),
+  /** Role or book scope of an active member changed. */
+  MemberRoleChanged: z.object({ principal: Principal, role: z.string(), books: Books, previousRole: z.string(), previousBooks: Books }),
+  /** `invitation` is the SHA-256 of the one-time code (the code itself is never recorded). */
+  InvitationIssued: z.object({ invitation: z.string(), principal: Principal, role: z.string(), books: Books, expiresAt: z.string() }),
+  InvitationRedeemed: z.object({ invitation: z.string(), principal: Principal, credentialId: z.string() }),
+  CredentialRegistered: z.object({ principal: Principal, credentialId: z.string() }),
+  CredentialRevoked: z.object({ principal: Principal, credentialId: z.string() }),
+  SettingsChanged: z.object({ soloOwner: z.boolean(), sodLimitPaise: z.string().nullable(),
+    previous: z.object({ soloOwner: z.boolean(), sodLimitPaise: z.string().nullable() }).nullable() }),
+  /** `session` is the SHA-256 of the session id. */
+  SessionRevoked: z.object({ session: z.string(), principal: Principal.nullable() }),
+} as const;
+
+export const ALL_EVENTS = { ...GL, ...CHANNELS, ...AGENT, ...OPS, ...EVIDENCE, ...IDENTITY } as const;
 export type EventType = keyof typeof ALL_EVENTS;
 export type EventData<T extends EventType> = z.infer<(typeof ALL_EVENTS)[T]>;
 
 /** Which module owns (may append) each event type. Enforced by the event store. */
-export type Module = "gl" | "channels" | "agent" | "ops" | "evidence";
+export type Module = "gl" | "channels" | "agent" | "ops" | "evidence" | "identity";
 export const OWNER: Record<EventType, Module> = Object.fromEntries([
   ...Object.keys(GL).map((k) => [k, "gl"]),
   ...Object.keys(CHANNELS).map((k) => [k, "channels"]),
   ...Object.keys(AGENT).map((k) => [k, "agent"]),
   ...Object.keys(OPS).map((k) => [k, "ops"]),
   ...Object.keys(EVIDENCE).map((k) => [k, "evidence"]),
+  ...Object.keys(IDENTITY).map((k) => [k, "identity"]),
 ]) as Record<EventType, Module>;
 
 export const SCHEMA_VERSION = 1;

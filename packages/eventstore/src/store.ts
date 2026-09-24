@@ -220,7 +220,7 @@ export class EventStore {
   async readAll(fromPosition = "0", limit = 1000): Promise<Envelope[]> {
     return this.systemTx(async (t) => (await t<Row[]>`
       SELECT event_id, global_position::text, stream_id, stream_version, type, schema_version, data, meta, recorded_at
-      FROM es.events WHERE global_position > ${fromPosition} ORDER BY global_position LIMIT ${limit}`)).then((rows) => this.openRows(rows));
+      FROM es.events WHERE global_position > ${fromPosition} ORDER BY es.events.global_position LIMIT ${limit}`)).then((rows) => this.openRows(rows));
   }
 
   /**
@@ -235,7 +235,7 @@ export class EventStore {
         ${q.tenantId ? t`AND tenant_id = ${q.tenantId}` : t``}
         ${q.types ? t`AND type IN ${t(q.types.length ? q.types : [""])}` : t``}
         ${q.positions ? t`AND global_position IN ${t(q.positions.length ? q.positions : ["0"])}` : t``}
-      ORDER BY global_position LIMIT ${q.limit ?? 1000}`;
+      ORDER BY es.events.global_position LIMIT ${q.limit ?? 1000}`;
     return this.openRows(tx ? await run(tx) : await this.systemTx(run));
   }
 

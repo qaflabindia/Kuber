@@ -9,14 +9,19 @@
  * then be an active member of the tenant (identity module), and each route names the action it
  * performs, checked against the member's role and book scope (F02); operations additionally pass
  * the ops guard (maker-checker). Passkey ceremonies run here too: the core holds the credentials.
+ *
+ * Sessions: an assertion that names a principal must carry its web session id (sid); a session
+ * revoked at sign-out (POST /v1/tenants/:tenant/sessions/revoke), or bound at sign-in to a passkey
+ * that has since been revoked, is refused with 401. Nonces are claimed in the ReplayStore given
+ * (shared Valkey with several instances; in-process by default).
  */
 import { Readable } from "node:stream";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
-import { AUTH_HEADER, AuthError, ReplayCache, authKey, verifyRequest, type Claims } from "@kuber/auth";
-import { AccessDenied, IdentityError, inScope, type Action, type Member } from "@kuber/identity";
+import { AUTH_HEADER, AuthError, ReplayCache, ReplayStoreUnavailable, authKey, verifyRequestAsync, type Claims, type ReplayStore } from "@kuber/auth";
+import { AccessDenied, IdentityError, can, inScope, type Action, type Member } from "@kuber/identity";
 import { z, ZodError } from "zod";
 import { Account, IsoDate, Principal, parseAmount, uuid, type Line } from "@kuber/contracts";
-import { CommandConflict, ConcurrencyError } from "@kuber/eventstore";
+import { CommandConflict, ConcurrencyError, GuardDenied } from "@kuber/eventstore";
 import { DomainError, type BookCommand } from "@kuber/gl";
 import { AgentError } from "@kuber/agent";
 import { OpsError } from "@kuber/ops";
@@ -31,7 +36,7 @@ import type { Who } from "./tools.ts";
 export interface ServerOptions {
   copilot?: Copilot; mcpGrants?: Map<string, Who>; clock?: () => string; https?: { key: Buffer; cert: Buffer };
   /** Shared secret with the BFF (CORE_AUTH_SECRET). Without it every /v1 request is refused. */
-  auth?: { secret: string | Buffer; issuers?: string[] };
+  auth?: { secret: string | Buffer; issuers?: string[]; replay?: ReplayStore };
 }
 
 /** A client's idempotency key: opaque, bounded, printable. */
@@ -60,7 +65,7 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
 
   // ---------------------------------------------------------------- authentication (F01)
   const key = opts.auth ? authKey(opts.auth.secret) : null;
-  const replay = new ReplayCache();
+  const replay: ReplayStore = opts.auth?.replay ?? new ReplayCache();
   const rawBodies = new WeakMap<FastifyRequest, Buffer>(), claimsOf = new WeakMap<FastifyRequest, Claims>();
   const signed = (url: string) => url.startsWith("/v1/");
   // Keep the exact body bytes: the assertion covers their hash, not a re-serialization.
@@ -77,14 +82,21 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   app.addHook("preHandler", async (req) => {
     if (!signed(req.url)) return;
     if (!key) throw new AuthError("unauthenticated", "core request authentication is not configured (CORE_AUTH_SECRET)");
-    const c = verifyRequest(key, replay, { header: req.headers[AUTH_HEADER], method: req.method, path: req.url, body: rawBodies.get(req) ?? null, issuers: opts.auth?.issuers });
+    const c = await verifyRequestAsync(key, replay, { header: req.headers[AUTH_HEADER], method: req.method, path: req.url, body: rawBodies.get(req) ?? null, issuers: opts.auth?.issuers });
     const tenant = (req.params as { tenant?: string }).tenant;
     if (tenant === undefined || c.tenant !== tenant) throw new AccessDenied("the assertion is for another workspace");
+    // A signed-in person's request is made for one web session, which must not have been signed out.
+    if (c.principal !== null) {
+      if (!c.sid) throw new AuthError("no_session", "a signed-in request must carry its session id");
+      if (!(await cell.identity.sessionActive(tenant, c.sid, c.principal))) throw new AuthError("session_revoked", "this session has been signed out");
+    }
     claimsOf.set(req, c);
   });
-  const pruner = setInterval(() => replay.prune(), 60_000);
-  pruner.unref();
-  app.addHook("onClose", async () => clearInterval(pruner));
+  if (replay.prune) {
+    const pruner = setInterval(() => replay.prune!(), 60_000);
+    pruner.unref();
+    app.addHook("onClose", async () => clearInterval(pruner));
+  }
 
   /**
    * The authenticated principal, authorized for `action`: an active member whose role allows it,
@@ -102,7 +114,8 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof AuthError) return reply.code(401).send({ error: err.code, message: err.message });
-    if (err instanceof AccessDenied) return reply.code(403).send({ error: "forbidden", message: err.message });
+    if (err instanceof AccessDenied || err instanceof GuardDenied) return reply.code(403).send({ error: "forbidden", message: err.message });
+    if (err instanceof ReplayStoreUnavailable) { console.error(err.message); return reply.code(503).send({ error: err.code, message: "request authentication is temporarily unavailable" }); }
     if (err instanceof IdentityError) return reply.code(err.statusCode).send({ error: err.code, message: err.message });
     if (err instanceof ZodError) return reply.code(400).send({ error: "invalid_request", issues: err.issues });
     if (err instanceof DomainError) return reply.code(422).send({ error: err.code, message: err.message });
@@ -358,6 +371,8 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     if (!c?.tenant) throw new AuthError("unauthenticated", "request is not authenticated");
     return c.tenant;
   };
+  /** The session a sign-in ceremony is about to start (optional): bound to the verified principal and passkey. */
+  const startingSession = (req: FastifyRequest) => claimsOf.get(req)?.sid ?? null;
   const Json = z.record(z.string(), z.unknown());
   app.post<P>("/v1/tenants/:tenant/identity/registration/options", async (req) => {
     const b = z.object({ displayName: z.string().min(2).max(80), enrolment: z.string().min(16).max(128).optional() }).parse(req.body);
@@ -365,16 +380,32 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   });
   app.post<P>("/v1/tenants/:tenant/identity/registration/verify", async (req, reply) => {
     const b = z.object({ displayName: z.string().min(2).max(80), enrolment: z.string().min(16).max(128).optional(), response: Json }).parse(req.body);
-    return reply.code(201).send(await cell.identity.register(ceremony(req), { ...b, response: b.response as never }));
+    return reply.code(201).send(await cell.identity.register(ceremony(req), { ...b, response: b.response as never, session: startingSession(req) }));
   });
   app.post<P>("/v1/tenants/:tenant/identity/authentication/options", async (req) => cell.identity.authenticationOptions(ceremony(req)));
   app.post<P>("/v1/tenants/:tenant/identity/authentication/verify", async (req) => {
     const b = z.object({ response: Json }).parse(req.body);
-    return cell.identity.authenticate(ceremony(req), { response: b.response as never });
+    return cell.identity.authenticate(ceremony(req), { response: b.response as never, session: startingSession(req) });
   });
   app.post<P>("/v1/tenants/:tenant/identity/dev-signin", async (req) => {
     const b = z.object({ name: z.string().min(2).max(80) }).parse(req.body);
-    return cell.identity.devSignIn(ceremony(req), b.name);
+    return cell.identity.devSignIn(ceremony(req), b.name, startingSession(req));
+  });
+  // Sign-out: revoke the session this request was signed for. No membership check: a person whose
+  // membership was revoked can still end their session.
+  app.post<P>("/v1/tenants/:tenant/sessions/revoke", async (req, reply) => {
+    const c = claimsOf.get(req);
+    if (!c?.tenant || !c.principal || !c.sid) throw new AuthError("unauthenticated", "sign-out needs a signed-in session");
+    await cell.identity.revokeSession(c.tenant, c.sid, Principal.parse(c.principal));
+    return reply.code(204).send();
+  });
+  // Passkeys: a member lists and revokes their own; an owner (members.manage) may revoke anyone's.
+  app.get<P>("/v1/tenants/:tenant/me/credentials", async (req) => { const { tenant, principal } = await who(req, "read"); return cell.identity.credentials(tenant, principal); });
+  app.post<{ Params: { tenant: string; id: string } }>("/v1/tenants/:tenant/credentials/:id/revoke", async (req, reply) => {
+    const { tenant, principal, member } = await who(req, "read");
+    const anyMember = can(member.role, "members.manage") && member.books === null;
+    await cell.identity.revokeCredential(tenant, principal, req.params.id, { anyMember });
+    return reply.code(204).send();
   });
   app.get<P>("/v1/tenants/:tenant/me", async (req) => (await who(req, "read")).member);
   app.get<P>("/v1/tenants/:tenant/members", async (req) => { const { tenant } = await who(req, "members.read", { allBooks: true }); return cell.identity.members(tenant); });

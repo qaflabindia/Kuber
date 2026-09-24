@@ -232,6 +232,9 @@ importers:
       '@kuber/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@kuber/crypto':
+        specifier: workspace:*
+        version: link:../../packages/crypto
       '@kuber/eventstore':
         specifier: workspace:*
         version: link:../../packages/eventstore
