@@ -234,6 +234,11 @@ sign-in; signed high-risk commands are verified there (design 16.4).
 | `GET  …/books/:b/reports/{trial-balance,profit-and-loss,balance-sheet,statement-of-affairs}` | Statements (amounts in paise) |
 | `GET  …/books/:b/accounts/:a/lines` | Drill-through to journal lines |
 | `GET  …/books/:b/verify` | Recompute the hash chain |
+| `GET  …/books/:b/attention` | Counts for badges: open drafts, drafts awaiting approval, ratifications, open plans |
+
+Lists of open work and drill-through are keyset pages: `?limit=` (drafts and ratifications at most
+500, plans 200, drill-through 1,000) and `?after=` (plans: `?before=`) with the cursor returned in
+the `x-next-cursor` response header; `GET /drafts` also takes `?book=`.
 | `GET /healthz`, `GET /readyz` | Liveness and readiness |
 
 ## Measured (indicative only)
@@ -249,6 +254,33 @@ consumers running in the same process, 20 concurrent connections, ~4,000 events 
 These are not capacity figures for production; they show the design has headroom against the
 ~1,000 req/s peak in section 16.5 when reads and writes are spread across books and instances.
 Load tests from section 16.5 must run per cell before launch.
+
+### Scale work (F09–F11), before and after
+
+Hardware and method: 2 vCPU (Intel Xeon @ 2.1 GHz), 7 GB RAM sandbox shared with other workloads,
+Node 22.22, PostgreSQL 16 on the same host, in-memory bus, one process. Single runs, not a load
+test; expect ±20–30 % between runs. `review/replay-benchmark.ts` is a pure in-memory fold;
+`scripts/scale-bench.ts <journals>` (needs `TEST_DATABASE_ADMIN_URL`) posts N journals to one book
+with `gl.execute`, then measures cold loads, projection and interactive reads.
+
+| Measure | Before | After |
+| --- | --- | --- |
+| Fold 1k / 3k / 10k journals (replay-benchmark) | 49 / 370 / 6,123 ms (quadratic) | 16 / 21 / 42 ms |
+| Sequential writes, one book, 5k journals | 205/s (last 500: p50 5.7 ms, p95 12.5 ms) | 320–358/s (last 500: p50 1.4–3.5 ms, p95 2.9–6.3 ms) |
+| Sequential writes, one book, 20k journals | not run (quadratic) | 457/s (last 500: p50 1.7 ms, p95 3.8 ms) |
+| Concurrent writes, 8 books | 579/s | 763–882/s |
+| Cold load of a 5k-journal book on a new instance | 1,743–2,158 ms (full replay) | 64–76 ms (snapshot + tail); 183 ms full replay |
+| Cold load, 20k journals | not run | 251–351 ms (snapshot + tail); 676 ms full replay |
+| Heap after the 5k run | 99 MB | 40–81 MB |
+| `dashboard` plan, 5k journals (p50 / p95) | 23 / 56 ms | 17–19 / 23–29 ms (20k: 27 / 40 ms) |
+| `reconcile` plan, 5k journals | 4.4 / 7.0 ms | 1.7–3.1 / 3.8–5.0 ms |
+| Recent journals (20), 5k journals | 37 / 55 ms | 21 / 35 ms; 1.7 / 5 ms at 20k with table statistics |
+| `balance` plan, 5k / 20k journals | 231 / 375 ms (5k) | 171 / 221 ms (5k), 654 / 730 ms (20k): dominated by full hash-chain verification, still O(history) |
+
+Tenant fairness is shown by tests rather than a throughput figure: with 8 lanes a tenant whose
+handler is blocked does not delay a tenant in another lane (memory bus and JetStream); with 1 lane
+it does. Projection of one tenant's 5k journals took 54 s before and ~20 s after on the in-memory
+bus; one tenant always stays in one lane, so a single hot tenant is still bounded by one consumer.
 
 ## Known limits and next steps
 

@@ -12,6 +12,7 @@ import {
   GENESIS_HASH, canonical, sha256, type Account, type Envelope, type EventData, type Line,
 } from "@kuber/contracts";
 import type { NewEvent } from "@kuber/eventstore";
+import { JournalMap } from "./journals.ts";
 
 export class DomainError extends Error {
   constructor(public code: string, message: string) { super(message); }
@@ -27,12 +28,21 @@ export interface BookState {
   locks: { periodEnd: string; level: "soft" | "hard" }[];
   seq: number;
   lastHash: string;
-  journals: Map<string, JournalRecord>;
+  /**
+   * Every journal in posting order. A persistent JournalMap in states built by `evolve` (updates
+   * share structure, and it carries balance/provisional indexes); any ReadonlyMap is accepted,
+   * e.g. a what-if copy, and readers then fall back to scanning it.
+   */
+  journals: ReadonlyMap<string, JournalRecord>;
 }
 
 export const emptyBook = (): BookState => ({
-  exists: false, bookId: "", entityId: "", accounts: new Map(), locks: [], seq: 0, lastHash: GENESIS_HASH, journals: new Map(),
+  exists: false, bookId: "", entityId: "", accounts: new Map(), locks: [], seq: 0, lastHash: GENESIS_HASH, journals: JournalMap.empty(),
 });
+
+/** Set one journal, sharing structure with the previous map (O(log n), not a copy of the book). */
+const withJournal = (m: ReadonlyMap<string, JournalRecord>, id: string, j: JournalRecord) =>
+  (m instanceof JournalMap ? m : JournalMap.from(m)).with(id, j);
 
 export type BookCommand =
   | { kind: "OpenBook"; bookId: string; entityId: string; entityType: string; basis?: "statutory"; accounts: Account[] }
@@ -59,17 +69,14 @@ export function evolve(s: BookState, e: Envelope): BookState {
     }
     case "JournalPosted": {
       const d = e.data as EventData<"JournalPosted">;
-      const journals = new Map(s.journals);
-      journals.set(d.journalId, { lines: d.lines, txnDate: d.txnDate, narration: d.narration, voucherType: d.voucherType,
+      const journals = withJournal(s.journals, d.journalId, { lines: d.lines, txnDate: d.txnDate, narration: d.narration, voucherType: d.voucherType,
         provisional: d.provisional, createdBy: e.meta.principal });
       return { ...s, seq: d.seq, lastHash: d.hash, journals };
     }
     case "JournalReversed": {
       const d = e.data as EventData<"JournalReversed">;
-      const journals = new Map(s.journals);
-      const j = journals.get(d.journalId);
-      if (j) journals.set(d.journalId, { ...j, reversedBy: d.reversalJournalId });
-      return { ...s, journals };
+      const j = s.journals.get(d.journalId);
+      return j ? { ...s, journals: withJournal(s.journals, d.journalId, { ...j, reversedBy: d.reversalJournalId }) } : s;
     }
     case "PeriodLocked": {
       const d = e.data as EventData<"PeriodLocked">;

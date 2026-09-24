@@ -136,6 +136,19 @@ END $$;
 GRANT ${SYSTEM_SCOPE_ROLE} TO CURRENT_USER;
 ` + ROLE_SCOPED_POLICIES_SQL,
   },
+  {
+    id: "es-scale-001-snapshots",
+    // Aggregate snapshots (F10): sealed state plus the schema that wrote it, so a code change makes
+    // old rows a miss instead of a misread. Tenant rows like every other table: RLS on.
+    sql: `
+ALTER TABLE es.snapshots ADD COLUMN IF NOT EXISTS schema TEXT;
+CREATE INDEX IF NOT EXISTS snapshots_tenant ON es.snapshots (tenant_id);
+ALTER TABLE es.snapshots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE es.snapshots FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON es.snapshots USING (${TENANT_CHECK}) WITH CHECK (${TENANT_CHECK});
+CREATE POLICY system_scope ON es.snapshots TO ${SYSTEM_SCOPE_ROLE} USING (true) WITH CHECK (true);
+`,
+  },
 ];
 
 /**

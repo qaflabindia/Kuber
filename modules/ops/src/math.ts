@@ -2,12 +2,25 @@
  * Pure ledger arithmetic used by operations. Integer paise only; every function here is
  * deterministic so a plan can be recomputed and compared byte for byte.
  */
-import type { BookState } from "@kuber/gl";
+import { JournalMap, type BookState, type JournalRecord } from "@kuber/gl";
 
 export interface BalanceFilter { from?: string | null; to?: string | null; excludeVoucher?: string }
 
-/** Balances (debit positive) computed from the authoritative book state, not a projection. */
+/**
+ * Balances (debit positive) computed from the authoritative book state, not a projection.
+ * Uses the book's running balance index (O(accounts x log days)); the scan below is the
+ * reference definition and the fallback for states without the index (what-if copies).
+ */
 export function balancesFromState(s: BookState, f: BalanceFilter = {}): Map<string, bigint> {
+  if (s.journals instanceof JournalMap && (!f.excludeVoucher || f.excludeVoucher === "closing")) {
+    const fast = s.journals.balances({ from: f.from, to: f.to, excludeClosing: f.excludeVoucher === "closing" });
+    if (fast) return fast;
+  }
+  return balancesByScan(s, f);
+}
+
+/** The reference computation: every journal, every line. */
+export function balancesByScan(s: BookState, f: BalanceFilter = {}): Map<string, bigint> {
   const out = new Map<string, bigint>();
   for (const j of s.journals.values()) {
     if (f.from && j.txnDate < f.from) continue;
@@ -16,6 +29,20 @@ export function balancesFromState(s: BookState, f: BalanceFilter = {}): Map<stri
     for (const l of j.lines) out.set(l.accountId, (out.get(l.accountId) ?? 0n) + BigInt(l.amount));
   }
   return out;
+}
+
+/** Provisional journals not yet reversed, in posting order (indexed when available). */
+export function openProvisional(s: BookState): Iterable<[string, JournalRecord]> {
+  if (s.journals instanceof JournalMap) return s.journals.openProvisional();
+  return [...s.journals.entries()].filter(([, j]) => j.provisional && !j.reversedBy);
+}
+
+/** The latest transaction date in the book, or null for an empty book. */
+export function latestTxnDate(s: BookState): string | null {
+  if (s.journals instanceof JournalMap && s.journals.indexed) return s.journals.lastTxnDate;
+  let last: string | null = null;
+  for (const j of s.journals.values()) if (last === null || j.txnDate > last) last = j.txnDate;
+  return last;
 }
 
 /**

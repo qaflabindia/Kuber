@@ -125,7 +125,20 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   });
 
   type T = { Params: { tenant: string; id: string } };
-  app.get<P>("/v1/tenants/:tenant/drafts", async (req) => { const { tenant } = who(req); return cell.agent.queue(tenant); });
+  // Open-work lists are keyset pages (F11): ?limit=&after= (plans: &before=); the next cursor is in x-next-cursor.
+  type PageQ = { limit?: string; after?: string; before?: string; book?: string };
+  const pageOf = (q: PageQ) => ({ limit: q.limit !== undefined && Number.isFinite(Number(q.limit)) ? Number(q.limit) : undefined, after: q.after || undefined });
+  app.get<P>("/v1/tenants/:tenant/drafts", async (req, reply) => {
+    const { tenant } = who(req); const q = req.query as PageQ;
+    const p = await cell.agent.queuePage(tenant, { ...pageOf(q), bookId: q.book || undefined });
+    if (p.next) reply.header("x-next-cursor", p.next);
+    return p.items;
+  });
+  app.get<P>("/v1/tenants/:tenant/books/:book/attention", async (req) => {
+    const { tenant } = who(req);
+    const [d, ratifications, plans] = await Promise.all([cell.agent.queueCounts(tenant), cell.agent.openRatificationCount(tenant), cell.ops.pendingCount(tenant, req.params.book)]);
+    return { drafts: d.open, awaitingApproval: d.awaitingApproval, ratifications, plans };
+  });
   app.post<T>("/v1/tenants/:tenant/drafts/:id/approve", async (req, reply) => {
     const { tenant, principal } = who(req);
     const b = z.object({ accountId: z.string().optional() }).parse(req.body ?? {});
@@ -148,7 +161,12 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     const e = await cell.evidence.get(tenant, req.params.id);
     return e ? reply.send(e) : reply.code(404).send({ error: "not_found", message: `no evidence ${req.params.id}` });
   });
-  app.get<P>("/v1/tenants/:tenant/ratifications", async (req) => { const { tenant } = who(req); return cell.agent.openRatifications(tenant); });
+  app.get<P>("/v1/tenants/:tenant/ratifications", async (req, reply) => {
+    const { tenant } = who(req);
+    const p = await cell.agent.ratificationsPage(tenant, pageOf(req.query as PageQ));
+    if (p.next) reply.header("x-next-cursor", p.next);
+    return p.items;
+  });
   app.post<T>("/v1/tenants/:tenant/journals/:id/ratify", async (req, reply) => {
     const { tenant, principal } = who(req);
     await cell.agent.ratify(tenant, req.params.id, principal);
@@ -178,9 +196,11 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     const q = z.object({ from: IsoDate, to: IsoDate }).parse(req.query);
     return money(await cell.reporting.statementOfAffairs(who(req).tenant, req.params.book, q.from, q.to));
   });
-  app.get<R>("/v1/tenants/:tenant/books/:book/accounts/:account/lines", async (req) => {
+  app.get<R>("/v1/tenants/:tenant/books/:book/accounts/:account/lines", async (req, reply) => {
     const { account } = req.params as unknown as { account: string };
-    return cell.reporting.drill(who(req).tenant, req.params.book, account, req.query.from ?? null, req.query.to ?? null);
+    const p = await cell.reporting.drillPage(who(req).tenant, req.params.book, account, req.query.from ?? null, req.query.to ?? null, pageOf(req.query as PageQ));
+    if (p.next) reply.header("x-next-cursor", p.next);
+    return p.items;
   });
   app.get<P>("/v1/tenants/:tenant/books", async (req) => cell.reporting.books(who(req).tenant));
   app.get<P>("/v1/tenants/:tenant/books/:book/accounts", async (req) => cell.reporting.accounts(who(req).tenant, req.params.book));
@@ -203,7 +223,12 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     const { tenant, principal } = who(req);
     return cell.ops.plan(tenant, req.params.book, principal, req.params.op, req.body ?? {});
   });
-  app.get<P>("/v1/tenants/:tenant/books/:book/plans", async (req) => { const { tenant } = who(req); return cell.ops.pending(tenant, req.params.book); });
+  app.get<P>("/v1/tenants/:tenant/books/:book/plans", async (req, reply) => {
+    const { tenant } = who(req); const q = req.query as PageQ;
+    const p = await cell.ops.pendingPage(tenant, req.params.book, { limit: pageOf(q).limit, before: q.before || undefined });
+    if (p.next) reply.header("x-next-cursor", p.next);
+    return p.items;
+  });
   app.get<T>("/v1/tenants/:tenant/plans/:id", async (req) => { const { tenant } = who(req); return cell.ops.get(tenant, req.params.id); });
   app.post<T>("/v1/tenants/:tenant/plans/:id/commit", async (req, reply) => {
     const { tenant, principal } = who(req);

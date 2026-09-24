@@ -7,7 +7,7 @@ import postgres, { type Sql } from "postgres";
 import { EVENTSTORE_MIGRATIONS, EventStore, OutboxRelay, SYSTEM_SCOPE_ROLE, appGrants, migrate, openEnvelope, systemGrants, type LegacyPolicy } from "@kuber/eventstore";
 import { Keyring, type Kms } from "@kuber/crypto";
 import type { Envelope } from "@kuber/contracts";
-import { MemoryBus, NatsBus, type Bus } from "@kuber/bus";
+import { MemoryBus, NatsBus, busPartitions, type Bus } from "@kuber/bus";
 import { GeneralLedger } from "@kuber/gl";
 import { PolicyEngine } from "@kuber/policy";
 import { Channels } from "@kuber/channels";
@@ -32,6 +32,8 @@ export interface CellOptions {
   systemRole?: { name: string; password?: string };
   cellId?: string;
   bus?: "memory" | { natsUrl: string; caFile?: string; retentionDays?: number; token?: string };
+  /** Tenant partitions (lanes) per module consumer; default KUBER_BUS_PARTITIONS or 8 (F09). */
+  busPartitions?: number;
   policyDir: string;
   /** Key management service holding the master key(s). Required: there is no unencrypted mode. */
   kms: Kms;
@@ -95,7 +97,9 @@ export class Cell {
     const systemSql = postgres(o.systemDatabaseUrl ?? ownerUrl, { max: 3, onnotice: () => undefined });
     const keyring = new Keyring(sql, o.kms);
     const store = new EventStore(sql, cellId, { keyring, legacy: o.legacy ?? "reject" }, systemSql);
-    const bus: Bus = !o.bus || o.bus === "memory" ? new MemoryBus() : await NatsBus.connect(o.bus.natsUrl, cellId, { caFile: o.bus.caFile, retentionDays: o.bus.retentionDays, token: o.bus.token });
+    const partitions = o.busPartitions ?? busPartitions();
+    const bus: Bus = !o.bus || o.bus === "memory" ? new MemoryBus(3, partitions)
+      : await NatsBus.connect(o.bus.natsUrl, cellId, { caFile: o.bus.caFile, retentionDays: o.bus.retentionDays, token: o.bus.token, partitions });
     const relay = new OutboxRelay(systemSql, (subject, env) => bus.publish(subject, env));
     const policies = PolicyEngine.fromDir(o.policyDir);
     const gl = new GeneralLedger(store);
@@ -132,6 +136,7 @@ export class Cell {
 
   async close() {
     this.relay.stop();
+    await this.gl.flushSnapshots();
     await this.bus.close();
     await this.sql.end({ timeout: 5 });
     await this.systemSql.end({ timeout: 5 });

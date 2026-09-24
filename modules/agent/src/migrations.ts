@@ -48,4 +48,12 @@ CREATE INDEX rules_pattern_idx ON agent.rules (tenant_id, pattern_idx);`,
   // Sealed account name, shown to the LLM classifier. Rows projected before this migration keep ''
   // and the classifier falls back to the account id.
   sql: `ALTER TABLE agent.accounts ADD COLUMN name TEXT NOT NULL DEFAULT '';`,
+}, {
+  id: "agent-scale-001-open-work-indexes",
+  // Open drafts and ratifications are read as keyset pages in queue order (F11): the partial
+  // indexes hold only open work, so a page costs its own size, not the tenant's history.
+  sql: `
+CREATE INDEX IF NOT EXISTS drafts_open_page ON agent.drafts (tenant_id, created_at, draft_id) WHERE status IN ('queued','awaiting_approval');
+CREATE INDEX IF NOT EXISTS drafts_open_book_page ON agent.drafts (tenant_id, book_id, created_at, draft_id) WHERE status IN ('queued','awaiting_approval');
+CREATE INDEX IF NOT EXISTS ratifications_open_page ON agent.ratifications (tenant_id, due_by, request_id) WHERE status = 'open';`,
 }];

@@ -268,20 +268,86 @@ export class Agent {
   }
 
   // ------------------------------------------------------------------ queries
-  async queue(tenantId: string) {
-    const keys = await this.store.keys(tenantId);
-    const rows = await this.store.tenantTx(tenantId, (tx) => tx<QueueRow[]>`
-      SELECT draft_id, txn_id, book_id, status, proposal, decision, created_at FROM agent.drafts
-      WHERE tenant_id = ${tenantId} AND status IN ('queued','awaiting_approval') ORDER BY created_at, draft_id`);
-    return rows.map((r): QueueRow => ({ ...r, proposal: openProposal(keys, r.draft_id, r.proposal) }));
+  /**
+   * Open drafts in queue order (created_at, draft_id). With `limit` one keyset page (at most
+   * MAX_PAGE rows) after the `after` cursor; without it every open draft, read page by page.
+   * `bookId` narrows to one book in the index rather than after decryption.
+   */
+  async queue(tenantId: string, opts: QueueOptions = {}): Promise<QueueRow[]> {
+    if (opts.limit !== undefined) return (await this.queuePage(tenantId, opts)).items;
+    const out: QueueRow[] = [];
+    let after = opts.after;
+    for (;;) {
+      const p = await this.queuePage(tenantId, { ...opts, limit: MAX_PAGE, after });
+      out.push(...p.items);
+      if (!p.next) return out;
+      after = p.next;
+    }
   }
 
-  async openRatifications(tenantId: string) {
+  async queuePage(tenantId: string, opts: QueueOptions = {}): Promise<{ items: QueueRow[]; next: string | null }> {
+    const limit = pageSize(opts.limit);
+    const cur = decodeCursor(opts.after);
+    const keys = await this.store.keys(tenantId);
+    const rows = await this.store.tenantTx(tenantId, (tx) => tx<(QueueRow & { cur_ts: string })[]>`
+      SELECT draft_id, txn_id, book_id, status, proposal, decision, created_at, created_at::text AS cur_ts FROM agent.drafts
+      WHERE tenant_id = ${tenantId} AND status IN ('queued','awaiting_approval')
+        ${opts.bookId !== undefined ? tx`AND book_id = ${opts.bookId}` : tx``}
+        -- cursor values are bound as text: a timestamptz-typed parameter is rounded to milliseconds by the driver
+        ${cur ? tx`AND (created_at, draft_id) > (${cur[0]}::text::timestamptz, ${cur[1]})` : tx``}
+      ORDER BY created_at, draft_id LIMIT ${limit + 1}`);
+    const more = rows.length > limit;
+    const page = rows.slice(0, limit);
+    const last = page.at(-1);
+    return {
+      items: page.map(({ cur_ts: _c, ...r }): QueueRow => ({ ...r, proposal: openProposal(keys, r.draft_id, r.proposal) })),
+      next: more && last ? encodeCursor([last.cur_ts, last.draft_id]) : null,
+    };
+  }
+
+  /** Counts of open drafts (for badges): an index count, nothing decrypted. */
+  async queueCounts(tenantId: string, bookId?: string): Promise<{ open: number; awaitingApproval: number }> {
+    const [r] = await this.store.tenantTx(tenantId, (tx) => tx<{ open: number; awaiting: number }[]>`
+      SELECT count(*)::int AS open, count(*) FILTER (WHERE status = 'awaiting_approval')::int AS awaiting FROM agent.drafts
+      WHERE tenant_id = ${tenantId} AND status IN ('queued','awaiting_approval') ${bookId !== undefined ? tx`AND book_id = ${bookId}` : tx``}`);
+    return { open: r?.open ?? 0, awaitingApproval: r?.awaiting ?? 0 };
+  }
+
+  /** Open ratifications by due date; paged like `queue`. */
+  async openRatifications(tenantId: string, opts: { limit?: number; after?: string } = {}) {
+    if (opts.limit !== undefined) return (await this.ratificationsPage(tenantId, opts)).items;
+    const out: Awaited<ReturnType<Agent["ratificationsPage"]>>["items"] = [];
+    let after = opts.after;
+    for (;;) {
+      const p = await this.ratificationsPage(tenantId, { limit: MAX_PAGE, after });
+      out.push(...p.items);
+      if (!p.next) return out;
+      after = p.next;
+    }
+  }
+
+  async ratificationsPage(tenantId: string, opts: { limit?: number; after?: string } = {}) {
+    const limit = pageSize(opts.limit);
+    const cur = decodeCursor(opts.after);
     const keys = await this.store.keys(tenantId);
     const rows = await this.store.tenantTx(tenantId, (tx) => tx<{ request_id: string; journal_id: string; txn_id: string; due_by: string; narration: string }[]>`
       SELECT request_id, journal_id, txn_id, due_by::text AS due_by, narration FROM agent.ratifications
-      WHERE tenant_id = ${tenantId} AND status = 'open' ORDER BY due_by, request_id`);
-    return rows.map((r) => ({ ...r, narration: openText(keys, r.narration, `agent.ratifications.narration|${r.request_id}`) }));
+      WHERE tenant_id = ${tenantId} AND status = 'open'
+        ${cur ? tx`AND (due_by, request_id) > (${cur[0]}::text::date, ${cur[1]})` : tx``}
+      ORDER BY due_by, request_id LIMIT ${limit + 1}`);
+    const more = rows.length > limit;
+    const page = rows.slice(0, limit);
+    const last = page.at(-1);
+    return {
+      items: page.map((r) => ({ ...r, narration: openText(keys, r.narration, `agent.ratifications.narration|${r.request_id}`) })),
+      next: more && last ? encodeCursor([last.due_by, last.request_id]) : null,
+    };
+  }
+
+  async openRatificationCount(tenantId: string): Promise<number> {
+    const [r] = await this.store.tenantTx(tenantId, (tx) => tx<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM agent.ratifications WHERE tenant_id = ${tenantId} AND status = 'open'`);
+    return r?.n ?? 0;
   }
 
   // ------------------------------------------------------------------ helpers
@@ -340,6 +406,21 @@ export function narrationKey(narr: string): string | null {
     "spent", "received", "via", "from", "for", "bank", "card", "pos", "ach"]);
   const words = (narr.toLowerCase().match(/[a-z]{3,}/g) ?? []).filter((w) => !stop.has(w));
   return words.length ? words.slice(0, 2).join(" ") : null;
+}
+
+/** Largest page any queue query returns. */
+export const MAX_PAGE = 500;
+export interface QueueOptions { bookId?: string; limit?: number; after?: string }
+const pageSize = (n?: number) => Math.min(Math.max(Math.trunc(n ?? MAX_PAGE) || 1, 1), MAX_PAGE);
+/** Opaque keyset cursor: the sort key of the last row returned. */
+const encodeCursor = (k: [string, string]) => Buffer.from(JSON.stringify(k)).toString("base64url");
+function decodeCursor(c?: string): [string, string] | null {
+  if (!c) return null;
+  try {
+    const k = JSON.parse(Buffer.from(c, "base64url").toString("utf8"));
+    if (Array.isArray(k) && k.length === 2 && k.every((x) => typeof x === "string")) return k as [string, string];
+  } catch { /* fall through */ }
+  throw new AgentError("bad_cursor", "invalid page cursor");
 }
 
 /** Exposed for the API layer. */
