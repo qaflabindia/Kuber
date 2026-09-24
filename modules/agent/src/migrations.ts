@@ -1,4 +1,5 @@
 import { tenantRlsFor, type Migration } from "@kuber/eventstore";
+import { SUSPENSE_MIGRATIONS } from "./suspense.ts";
 
 /** The agent module's own schema. Only the agent module reads or writes these tables. */
 export const AGENT_MIGRATIONS: Migration[] = [{
@@ -101,4 +102,4 @@ CREATE INDEX IF NOT EXISTS ratifications_open_page ON agent.ratifications (tenan
   sql: `
 CREATE INDEX IF NOT EXISTS match_reviews_open_page ON agent.match_reviews (tenant_id, created_at, review_id) WHERE status = 'open';
 CREATE INDEX IF NOT EXISTS match_reviews_open_book_page ON agent.match_reviews (tenant_id, book_id, created_at, review_id) WHERE status = 'open';`,
-}];
+}, ...SUSPENSE_MIGRATIONS];

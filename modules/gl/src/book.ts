@@ -13,6 +13,7 @@ import {
 } from "@kuber/contracts";
 import type { NewEvent } from "@kuber/eventstore";
 import { JournalMap } from "./journals.ts";
+import { assertBookCurrency, checkManualControl, checkNotSuspenseOriginal, checkSuspenseClearing, isSuspense, suspenseLines } from "./controls.ts";
 
 export class DomainError extends Error {
   constructor(public code: string, message: string) { super(message); }
@@ -55,11 +56,21 @@ export type BookCommand =
   | { kind: "OpenBook"; bookId: string; entityId: string; entityType: string; basis?: "statutory"; accounts: Account[] }
   | { kind: "AddAccount"; account: Account }
   | { kind: "PostJournal"; journalId: string; txnDate: string; narration: string; voucherType?: string; lines: Line[];
-      provisional?: boolean; source?: { stream: string; eventId?: string }; autonomy?: "L0" | "L1" | "L2" | "L3" | "L4" | "human"; confidence?: number }
+      provisional?: boolean; source?: { stream: string; eventId?: string }; autonomy?: "L0" | "L1" | "L2" | "L3" | "L4" | "human"; confidence?: number;
+      /** FIN-GL-04: absent means the book currency; any other currency is refused. */
+      currency?: string;
+      /** FIN-GL-01: a journal entered by a person (API, ops record); control accounts then need a controlled adjustment. */
+      entry?: "manual"; controlledAdjustment?: { reason: string } }
   | { kind: "ReverseJournal"; journalId: string; reversalJournalId: string; reason: string; onDate?: string }
   | { kind: "CorrectJournal"; journalId: string; fromAccount: string; toAccount: string; reversalJournalId: string; newJournalId: string }
   | { kind: "LockPeriod"; periodEnd: string; level: "soft" | "hard" }
-  | { kind: "ConfirmJournal"; journalId: string; source: string; basis?: string };
+  | { kind: "ConfirmJournal"; journalId: string; source: string; basis?: string }
+  /**
+   * FIN-GL-05: clear a suspense item. Reverses the original on `onDate` (not its own date, so earlier
+   * periods keep their position) and, with `toAccount`, reposts it with the suspense line(s) moved there.
+   */
+  | { kind: "ResolveSuspense"; itemId: string; journalId: string; reversalJournalId: string; newJournalId?: string; toAccount?: string;
+      partyId?: string; dimensions?: Record<string, string>; onDate: string };
 
 const PRIVILEGED = new Set(["owner", "controller"]);
 const roleOf = (principal: string) => principal.split(":")[0] ?? "";
@@ -127,9 +138,13 @@ export function decide(s: BookState, c: BookCommand, principal: string): NewEven
     }
     case "PostJournal": {
       if (s.journals.has(c.journalId)) return [];                    // idempotent retry
+      assertBookCurrency(c.currency);
       validateJournal(s, c.txnDate, c.lines, principal);
+      if (c.entry === "manual") checkManualControl(s, c.lines, principal, c.controlledAdjustment);
+      checkSuspenseClearing(s, c.lines, c.entry === "manual");
       return [journalEvent(s, s.seq + 1, s.lastHash, c.journalId, c.txnDate, c.narration, c.voucherType ?? "journal", c.lines,
-        { provisional: c.provisional ?? false, source: c.source, autonomy: c.autonomy, confidence: c.confidence })];
+        { provisional: c.provisional ?? false, source: c.source, autonomy: c.autonomy, confidence: c.confidence,
+          ...(c.entry === "manual" && c.controlledAdjustment ? { controlledAdjustment: { reason: c.controlledAdjustment.reason } } : {}) })];
     }
     case "ReverseJournal": {
       if (s.journals.has(c.reversalJournalId)) return [];
@@ -137,6 +152,7 @@ export function decide(s: BookState, c: BookCommand, principal: string): NewEven
     }
     case "CorrectJournal": {
       if (s.journals.has(c.newJournalId)) return [];
+      checkNotSuspenseOriginal(s, c.journalId);
       const orig = s.journals.get(c.journalId);
       if (!orig) throw new DomainError("no_journal", `no journal ${c.journalId}`);
       if (!orig.lines.some((l) => l.accountId === c.fromAccount)) throw new DomainError("no_line", `${c.journalId} has no line on ${c.fromAccount}`);
@@ -156,6 +172,26 @@ export function decide(s: BookState, c: BookCommand, principal: string): NewEven
       if (!j.provisional) return [];                                  // idempotent (already confirmed, or never provisional)
       if (j.reversedBy) throw new DomainError("already_reversed", `${c.journalId} is reversed; it cannot be confirmed`);
       return [{ type: "JournalConfirmed", data: { bookId: s.bookId, journalId: c.journalId, source: c.source, ...(c.basis ? { basis: c.basis } : {}) } }];
+    }
+    case "ResolveSuspense": {
+      if (s.journals.has(c.reversalJournalId)) return [];             // idempotent retry
+      const orig = s.journals.get(c.journalId);
+      if (!orig) throw new DomainError("no_journal", `no journal ${c.journalId}`);
+      if (!suspenseLines(s, orig.lines).length) throw new DomainError("not_suspense", `${c.journalId} has no suspense line`);
+      if (!isIsoDate(c.onDate)) throw new DomainError("bad_date", `bad resolution date ${c.onDate}`);
+      if (c.toAccount !== undefined) {
+        if (!s.accounts.has(c.toAccount)) throw new DomainError("no_account", `unknown account ${c.toAccount}`);
+        if (isSuspense(s.accounts.get(c.toAccount))) throw new DomainError("suspense_unresolved", "a suspense item cannot be resolved into suspense");
+        if (!c.newJournalId) throw new DomainError("bad_command", "a reclassification needs the replacement journal id");
+      }
+      const r = reversal(s, c.journalId, c.reversalJournalId, `suspense item ${c.itemId} resolved${c.toAccount ? ` to ${c.toAccount}` : " (reversed)"}`, c.onDate, principal);
+      if (c.toAccount === undefined) return r.events;
+      const lines = orig.lines.map((l) => (isSuspense(s.accounts.get(l.accountId))
+        ? { ...l, accountId: c.toAccount!, ...(c.partyId ? { partyId: c.partyId } : {}), dimensions: { ...(l.dimensions ?? {}), ...(c.dimensions ?? {}) } } : l));
+      validateJournal(s, c.onDate, lines, principal);
+      const repost = journalEvent(s, r.seq + 1, r.hash, c.newJournalId!, c.onDate, `Suspense resolved: ${orig.narration}`, orig.voucherType, lines,
+        { provisional: false, autonomy: "human", replaces: c.journalId });
+      return [...r.events, repost];
     }
     case "LockPeriod": {
       if (!isIsoDate(c.periodEnd)) throw new DomainError("bad_date", `bad period end ${c.periodEnd}`);

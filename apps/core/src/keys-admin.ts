@@ -45,6 +45,7 @@ export const SEALED_COLUMNS: SealedColumn[] = [
   { table: "reporting.lines", column: "narration", kind: "text", keyCols: ["journal_id", "line_no"], ctx: (r) => narrationCtx(r.journal_id!) },
   { table: "ops.plans", column: "plan", kind: "json", keyCols: ["plan_id"], ctx: (r) => `ops.plans.plan|${r.plan_id}` },
   { table: "ops.plans", column: "actions", kind: "json", keyCols: ["plan_id"], ctx: (r) => `ops.plans.actions|${r.plan_id}` },
+  { table: "ops.schedules", column: "definition", kind: "json", keyCols: ["schedule_id"], ctx: (r) => `ops.schedules.definition|${r.schedule_id}` },
   { table: "agent.provisional_sources", column: "detail", kind: "text", keyCols: ["txn_id"], ctx: (r) => provisionalSourceCtx(r.txn_id!) },
   { table: "agent.match_reviews", column: "detail", kind: "text", keyCols: ["review_id"], ctx: (r) => matchReviewCtx(r.review_id!) },
   { table: "channels.signals", column: "original", kind: "text", keyCols: ["signal_id"], ctx: (r) => signalOriginalCtx(r.signal_id!) },
@@ -70,7 +71,7 @@ export const RETENTION: Record<string, "purge" | "sealed" | "keys" | "tombstone"
   "agent.drafts": "purge", "agent.ratifications": "purge", "agent.accounts": "purge", "agent.overrides": "purge",
   "agent.provisional_sources": "purge", "agent.match_reviews": "purge", "reporting.confirmations": "purge",
   "channels.signals": "purge",
-  "ops.plans": "purge",
+  "ops.plans": "purge", "ops.schedules": "purge", "ops.schedule_occurrences": "purge", "agent.suspense_items": "purge",
   // Identity (members, passkeys, invitation codes, separation settings): personal data with no
   // value once the tenant's books are unreadable. Credentials before members (foreign key).
   "identity.credentials": "purge", "identity.enrolments": "purge", "identity.members": "purge", "identity.settings": "purge",

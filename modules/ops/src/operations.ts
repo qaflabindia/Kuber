@@ -11,7 +11,7 @@
  *   insight   - report, simulate, dashboard
  */
 import { z } from "zod";
-import { IsoDate, parseAmount, stableId, type Line } from "@kuber/contracts";
+import { BOOK_CURRENCY, IsoDate, isBookCurrency, parseAmount, stableId, type Line } from "@kuber/contracts";
 import { validateJournal, type BookState } from "@kuber/gl";
 import { balancesFromState, financialYear, latestTxnDate, openProvisional, pctToBp, rebalanceTransfers, splitByWeights } from "./math.ts";
 import type { Action, Check, Draft, OpContext, OpDef, Section } from "./types.ts";
@@ -43,8 +43,13 @@ function validates(s: BookState, date: string, lines: Line[], checks: Check[], l
   catch (e) { checks.push({ label, ok: false, blocking: true, detail: e instanceof Error ? e.message : String(e) }); return false; }
 }
 
+/** A journal a person asks for through an operation: a manual entry (control accounts and suspense rules apply, FIN-GL-01/05). */
 const post = (journalId: string, txnDate: string, narration: string, lines: Line[], voucherType = "journal"): Action =>
-  ({ type: "gl", command: { kind: "PostJournal", journalId, txnDate, narration, voucherType, lines, autonomy: "human" } });
+  ({ type: "gl", command: { kind: "PostJournal", journalId, txnDate, narration, voucherType, lines, autonomy: "human", entry: "manual" } });
+
+/** FIN-GL-01: who may flag a manual entry to a control account as a controlled adjustment. */
+export const ADJUSTER_ROLES = new Set(["owner", "controller"]);
+const roleOf = (principal: string) => principal.split(":")[0] ?? "";
 
 /** Default date for transfers and allocations: never before the last posting already in the book. */
 function asOfDefault(ctx: OpContext) {
@@ -63,6 +68,9 @@ const RecordInput = z.object({
   account: AccountId.describe("where it belongs, e.g. LIVING, BIZEXP, SALARY, LOANS"),
   via: AccountId.default("BANK").describe("the money account: BANK, CASH or CARD"),
   dimensions: z.record(z.string(), z.string()).optional(),
+  currency: z.string().optional().describe("INR only (the default); other currencies are refused"),
+  controlledAdjustment: z.object({ reason: z.string().min(3), partyId: z.string().min(1) }).optional()
+    .describe("owner or controller only: a manual entry to a control account (debtors, creditors), with the party it belongs to"),
 });
 
 export const record: OpDef<z.infer<typeof RecordInput>> = {
@@ -74,16 +82,33 @@ export const record: OpDef<z.infer<typeof RecordInput>> = {
     const date = i.date ?? ctx.today;
     requireAccount(s, i.account, checks, "Category"); requireAccount(s, i.via, checks, "Money account");
     checks.push({ label: "Not the suspense account", ok: i.account !== "SUSPENSE", blocking: true });
+    checks.push({ label: `Book currency (${BOOK_CURRENCY})`, ok: isBookCurrency(i.currency), blocking: true,
+      detail: isBookCurrency(i.currency) ? undefined : `${i.currency} is not supported: this book is ${BOOK_CURRENCY} only (foreign currency is deferred)` });
+    // Control accounts are posted from their subledger; by hand only as a controlled adjustment (FIN-GL-01).
+    const control = [i.account, i.via].filter((a) => s.accounts.get(a)?.isControl);
+    const adj = i.controlledAdjustment;
+    if (control.length) {
+      checks.push({ label: "Control account entered only as a controlled adjustment", ok: !!adj, blocking: true,
+        detail: adj ? `${control.join(", ")}: ${adj.reason}` : `${control.join(", ")} is a control account; it is posted from its subledger, or as a controlled adjustment naming the party` });
+      if (adj) checks.push({ label: "Controlled adjustment flagged by an owner or controller", ok: ADJUSTER_ROLES.has(roleOf(ctx.principal)), blocking: true });
+    }
+    const party = (a: string) => (adj && s.accounts.get(a)?.isControl ? { partyId: adj.partyId } : {});
     const dims = i.dimensions ?? {};
     const lines: Line[] = i.direction === "out"
-      ? [{ accountId: i.account, amount: i.amount.toString(), dimensions: dims }, { accountId: i.via, amount: (-i.amount).toString(), dimensions: {} }]
-      : [{ accountId: i.via, amount: i.amount.toString(), dimensions: {} }, { accountId: i.account, amount: (-i.amount).toString(), dimensions: dims }];
+      ? [{ accountId: i.account, amount: i.amount.toString(), ...party(i.account), dimensions: dims }, { accountId: i.via, amount: (-i.amount).toString(), ...party(i.via), dimensions: {} }]
+      : [{ accountId: i.via, amount: i.amount.toString(), ...party(i.via), dimensions: {} }, { accountId: i.account, amount: (-i.amount).toString(), ...party(i.account), dimensions: dims }];
     if (checks.every((c) => c.ok)) validates(s, date, lines, checks);
+    const action = post(jid(ctx, `record/${date}/${i.narration}/${i.amount}/${i.direction}/${i.account}/${i.via}`, 0), date, i.narration, lines);
+    if (action.type === "gl" && action.command.kind === "PostJournal") {
+      if (i.currency) action.command.currency = i.currency;
+      if (adj && control.length) action.command.controlledAdjustment = { reason: adj.reason };
+    }
     return {
       title: `${i.direction === "out" ? "Pay" : "Receive"} ${rs(i.amount)}`,
       summary: `${i.narration}: ${rs(i.amount)} ${i.direction === "out" ? "out of" : "into"} ${name(s, i.via)}, recorded as ${name(s, i.account)} on ${date}.`,
-      actions: [post(jid(ctx, `record/${date}/${i.narration}/${i.amount}/${i.direction}/${i.account}/${i.via}`, 0), date, i.narration, lines)],
+      actions: [action],
       checks, amountPaise: i.amount,
+      ...(adj && control.length ? { data: { controlledAdjustment: { reason: adj.reason, partyId: adj.partyId, accounts: control } } } : {}),
     };
   },
 };
@@ -93,6 +118,7 @@ const PostInput = z.object({
   draftIds: z.array(z.string()).optional().describe("specific drafts; omit to take every draft Kuber has classified"),
   minConfidence: z.number().min(0).max(1).default(0),
   overrides: z.record(z.string(), AccountId).optional().describe("draftId -> account, where you disagree with Kuber"),
+  controlled: z.array(z.string()).optional().describe("owner or controller only: drafts posted to a control account as controlled adjustments (each must carry its party)"),
 });
 
 interface DraftRow { draft_id: string; book_id: string; proposal: { txnDate: string; narration: string; accountId: string; confidence: number; amount: string; direction: "in" | "out"; lines: Line[] } }
@@ -105,12 +131,22 @@ export const postDrafts: OpDef<z.infer<typeof PostInput>> = {
     const s = ctx.state;
     const all = await ctx.svc.agent.queue(ctx.tenant, { bookId: ctx.book }) as unknown as DraftRow[];
     const picked = all.filter((d) => (!i.draftIds || i.draftIds.includes(d.draft_id)) && d.proposal.confidence >= i.minConfidence);
-    const actions: Action[] = [], skipped: DraftRow[] = [];
+    const actions: Action[] = [], skipped: DraftRow[] = [], refusedControl: string[] = [];
     let max = 0n;
     const rows: Section["rows"] = [];
+    const adjuster = ADJUSTER_ROLES.has(roleOf(ctx.principal));
     for (const d of picked) {
       const acc = i.overrides?.[d.draft_id] ?? d.proposal.accountId;
       if (acc === "SUSPENSE" || !s.accounts.has(acc)) { skipped.push(d); continue; }
+      // FIN-GL-01: a draft to a control account posts only as a controlled adjustment, flagged by an owner or
+      // controller, and its line must carry the party (subledger reference).
+      if (s.accounts.get(acc)!.isControl) {
+        const partyOk = d.proposal.lines.some((l) => l.accountId === d.proposal.accountId && !!l.partyId);
+        if (!i.controlled?.includes(d.draft_id) || !adjuster || !partyOk) {
+          refusedControl.push(`${d.draft_id}: ${!partyOk ? "no party on the control line" : !adjuster ? "only an owner or controller may flag a controlled adjustment" : "not flagged as a controlled adjustment"}`);
+          skipped.push(d); continue;
+        }
+      }
       actions.push({ type: "approveDraft", draftId: d.draft_id, accountId: acc });
       const amt = BigInt(d.proposal.amount); if (amt > max) max = amt;
       rows.push([d.proposal.txnDate, d.proposal.narration, name(s, acc), (d.proposal.direction === "out" ? -amt : amt).toString()]);
@@ -118,6 +154,7 @@ export const postDrafts: OpDef<z.infer<typeof PostInput>> = {
     const checks: Check[] = [
       { label: "Something to post", ok: actions.length > 0, blocking: true, detail: `${actions.length} of ${all.length} drafts` },
       { label: "Every posted draft has a category", ok: true, blocking: false, detail: skipped.length ? `${skipped.length} unclassified left for you` : undefined },
+      ...(refusedControl.length ? [{ label: "Control accounts only as controlled adjustments", ok: false, blocking: false, detail: refusedControl.join("; ") }] : []),
     ];
     return {
       title: `Post ${actions.length} ${actions.length === 1 ? "entry" : "entries"}`,
@@ -126,7 +163,8 @@ export const postDrafts: OpDef<z.infer<typeof PostInput>> = {
       sections: [{ title: "Entries", kind: "table", columns: ["Date", "Narration", "Recorded as", "Amount"], rows, money: [3] }],
       links: skipped.length ? [["Decide the unclassified ones", "/review"]] : [],
       // Drafts post through the agent (bus -> GL); effects come from their proposed lines.
-      data: { journalsFromDrafts: picked.filter((d) => !skipped.includes(d)).map((d) => {
+      data: { ...(i.controlled?.length && actions.length ? { controlledAdjustment: { drafts: i.controlled.filter((id) => actions.some((a) => a.type === "approveDraft" && a.draftId === id)) } } : {}),
+        journalsFromDrafts: picked.filter((d) => !skipped.includes(d)).map((d) => {
         const acc = i.overrides?.[d.draft_id] ?? d.proposal.accountId;
         return { txnDate: d.proposal.txnDate, narration: d.proposal.narration,
           lines: d.proposal.lines.map((l) => (l.accountId === d.proposal.accountId ? { ...l, accountId: acc } : l)) };

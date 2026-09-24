@@ -14,6 +14,8 @@ export { DomainError, verifyChain, validateJournal, type BookCommand, type BookS
 export { JournalMap } from "./journals.ts";
 export { BOOK_SNAPSHOT_SCHEMA, SnapshotStore } from "./snapshot.ts";
 export { SEEDS } from "./seeds.ts";
+export { assertBookCurrency, checkManualControl, checkSuspenseClearing, isSuspense, suspenseLines } from "./controls.ts";
+export * as schedules from "./schedules.ts";
 
 /** A book inside `GeneralLedger.transact`: its state as of `version`, and a way to change it. */
 export interface BookTx {
@@ -24,6 +26,10 @@ export interface BookTx {
 }
 
 export const bookStream = (tenantId: string, bookId: string) => `${tenantId}/book/${bookId}`;
+/** Postings the GL refused (PostingRejected), per book: the durable "failed" state of the journal lifecycle. */
+export const rejectionStream = (tenantId: string, bookId: string) => `${tenantId}/gl-rejections/${bookId}`;
+
+export interface Rejection { requestId: string; reason: string; source: string | null; principal: string; at: string; eventId: string }
 
 export interface GlOptions {
   maxRetries?: number;
@@ -225,6 +231,25 @@ export class GeneralLedger {
     return { broken: brokenJournal ?? r.problems[0] ?? null, problems: r.problems, from: r.from, to: r.to, events: r.events, checkpointed: r.checkpointed };
   }
 
+  /**
+   * Record that a posting attempt was refused (FIN-GL-01): a manual journal refused at the API, or
+   * an occurrence the scheduler could not post. Nothing reaches the book; the attempt stays visible
+   * as "failed" with its reason. `requestId` is the caller's command id when it has one.
+   */
+  async recordRejection(tenantId: string, bookId: string, r: { requestId: string; reason: string; source?: string }, meta: MetaInput) {
+    await this.store.append("gl", tenantId, { streamId: rejectionStream(tenantId, bookId), expected: "any",
+      events: [{ type: "PostingRejected", data: { bookId, requestId: r.requestId, reason: r.reason.slice(0, 2000), ...(r.source ? { source: r.source } : {}) } }] }, meta);
+  }
+
+  /** Refused postings of a book, oldest first. */
+  async rejections(tenantId: string, bookId: string): Promise<Rejection[]> {
+    const events = await this.store.readStream(tenantId, rejectionStream(tenantId, bookId));
+    return events.filter((e) => e.type === "PostingRejected").map((e) => {
+      const d = e.data as EventData<"PostingRejected">;
+      return { requestId: d.requestId, reason: d.reason, source: d.source ?? null, principal: e.meta.principal, at: e.recordedAt, eventId: e.eventId };
+    });
+  }
+
   /** Event handler: postings and corrections requested by other modules. */
   handler = async (env: Envelope): Promise<void> => {
     if (env.type !== "PostingRequested" && env.type !== "CorrectionRequested" && env.type !== "ProvisionalConfirmed") return;
@@ -260,7 +285,7 @@ export class GeneralLedger {
       } catch (e) {
         if (!(e instanceof DomainError)) throw e;          // infrastructure failure: let the bus retry
         await this.store.append("gl", tenant, {
-          streamId: `${tenant}/gl-rejections/${bookId}`, expected: "any",
+          streamId: rejectionStream(tenant, bookId), expected: "any",
           events: [{ type: "PostingRejected", data: { bookId, requestId, reason: `${e.code}: ${e.message}`, source: env.streamId } }],
         }, meta);
       }

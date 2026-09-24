@@ -79,6 +79,10 @@ export const GL = {
     autonomy: z.union([AutonomyLevel, z.literal("human")]).optional(),
     confidence: z.number().min(0).max(1).optional(),
     prevHash: z.string().length(64), hash: z.string().length(64),
+    /** FIN-GL-05: the journal a suspense resolution replaces (the original; `reverses` is on the reversal). */
+    replaces: Id.optional(),
+    /** FIN-GL-01: a manual entry to a control account, allowed only as a controlled adjustment by an owner or controller. */
+    controlledAdjustment: z.object({ reason: z.string().min(1) }).optional(),
   }),
   JournalReversed: z.object({ bookId: Id, journalId: Id, reversalJournalId: Id, reason: z.string() }),
   /**
@@ -152,6 +156,12 @@ export const AGENT = {
   CorrectionRequested: z.object({ requestId: Id, bookId: Id, journalId: Id, fromAccount: Id, toAccount: Id }),
   RuleLearned: z.object({ pattern: z.string(), accountId: Id }),
   AutonomyLimited: z.object({ key: z.string(), maxLevel: AutonomyLevel, until: IsoDate, reason: z.string() }),
+  /** FIN-GL-05: an amount posted to suspense is an item-level case until it is resolved. */
+  SuspenseItemOpened: z.object({ itemId: Id, bookId: Id, journalId: Id, amount: MinorString, openedOn: IsoDate, source: z.string(), owner: z.string().nullable() }),
+  SuspenseItemAssigned: z.object({ itemId: Id, owner: z.string() }),
+  /** Resolution links the original, its reversal and the replacement (null when the item was only reversed). */
+  SuspenseItemResolved: z.object({ itemId: Id, bookId: Id, journalId: Id, reversalJournalId: Id, replacementJournalId: Id.nullable(),
+    toAccount: Id.nullable(), resolvedOn: IsoDate, note: z.string().optional() }),
 } as const;
 
 // ------------------------------------------------------------------ Ops events
@@ -164,6 +174,11 @@ export const OPS = {
     preparedBy: Principal,
     policy: z.object({ ids: z.array(z.string()), level: AutonomyLevel, approver: z.string(), reasons: z.array(z.string()) }).nullable(),
   }),
+  /** FIN-GL-02/03: a recurring or recognition schedule was defined (it posts nothing until approved by a plan). */
+  ScheduleCreated: z.object({ scheduleId: Id, bookId: Id, kind: z.enum(["recurring", "recognition"]), hash: z.string().length(64), policyVersion: z.string() }),
+  /** An occurrence could not post as scheduled (locked period, amount above the approval, ledger refusal): a person decides. */
+  ScheduleExceptionRaised: z.object({ scheduleId: Id, bookId: Id, occurrenceId: Id, period: z.string(), kind: z.enum(["post", "reverse"]),
+    dueOn: IsoDate, reason: z.string() }),
 } as const;
 
 // ------------------------------------------------------------------ Evidence events
