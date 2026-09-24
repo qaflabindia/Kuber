@@ -21,6 +21,21 @@
  *   ops verify [--full] [--tenant t]              link chains and digests from each stream's verified checkpoint
  *                                                 (--full: from the first event); moves checkpoints of clean streams
  *
+ * Finance controls (writes act as a member, `--as <principal>`, and pass the same authorization as the API):
+ *   ops access-review [--tenant t] [--since d] [--dormant-days n]      FIN-MDM-05: removed and dormant members,
+ *                                                 role/scope changes and every identity change, with dispositions
+ *   ops access-review dispose <tenant> <itemId> --decision appropriate|revoke|investigate|accepted --note "…" --as p
+ *   ops autonomy [status] [--tenant t]            FIN-OPS-03: kill-switch state and autonomous errors per period
+ *   ops autonomy halt|resume <tenant> [--book b] --reason "…" --as p   the kill switch (owner/controller)
+ *   ops incident list <tenant> [--status s] | show <tenant> <id>        FIN-OPS-02: the incident register
+ *   ops incident open <tenant> --title "…" --description "…" --books a,b --periods 2026-10 --loss <paise>
+ *                    [--duplication] --owner p --as p
+ *   ops incident update <tenant> <id> [--containment "…"] [--corrections j1,j2] [--owner p] [--note "…"] --as p
+ *   ops incident close <tenant> <id> --reconciliation <ref> [--note "…"] --as p   (not the incident's owner)
+ *   ops drill-compare --source <owner url> --restored <owner url> [--out file] [--meta json]
+ *                                                 FIN-OPS-01: compare a restored database with its source
+ *                                                 (used by scripts/restore-drill.sh); exit 1 on any difference
+ *
  * It starts a cell with the in-memory bus and no relay: handlers run here, events they append are
  * published by the running core's relay. Environment as for the core: DATABASE_URL, MIGRATION_URL
  * (owner; required: rebuild deletes projection rows), SYSTEM_DATABASE_URL, KUBER_MASTER_KEY_FILE,
@@ -31,6 +46,9 @@ import postgres from "postgres";
 import { LocalFileKms } from "@kuber/crypto";
 import { NatsConsumerAdmin, busPartitions, streamNameFor } from "@kuber/bus";
 import { renderText, type CertifiableKind } from "@kuber/reporting";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { REVIEW_DECISIONS, type ReviewDecision } from "@kuber/identity";
 import { Cell } from "./cell.ts";
 import { OpsAdmin } from "./ops-admin.ts";
 
@@ -127,8 +145,58 @@ try {
       print(v); process.exitCode = v.problems.length ? 1 : 0;
       break;
     }
+    // ---------------------------------------------------------------- finance controls
+    case "access-review": {
+      if (positional[0] === "dispose") {
+        const [, tenant, itemId] = positional, decision = flag("--decision") as ReviewDecision, note = flag("--note"), as = flag("--as");
+        if (!tenant || !itemId || !REVIEW_DECISIONS.includes(decision) || !note || !as) throw new Error(`usage: ops access-review dispose <tenant> <itemId> --decision ${REVIEW_DECISIONS.join("|")} --note "…" --as <principal>`);
+        print(await cell.identity.accessReview.dispose(tenant, as, itemId, { decision, note }));
+        break;
+      }
+      const r = await ops.accessReview({ tenant: flag("--tenant"), since: flag("--since"), dormantDays: flag("--dormant-days") ? Number(flag("--dormant-days")) : undefined });
+      print(r);
+      process.exitCode = r.some((x) => x.unreviewed > 0) ? 1 : 0;           // a scheduled review can alert on open items
+      break;
+    }
+    case "autonomy": {
+      const sub = positional[0] ?? "status";
+      if (sub === "status") { print(await ops.autonomy(flag("--tenant"))); break; }
+      const tenant = positional[1], reason = flag("--reason"), as = flag("--as");
+      if ((sub !== "halt" && sub !== "resume") || !tenant || !reason || !as) throw new Error('usage: ops autonomy halt|resume <tenant> [--book b] --reason "…" --as <principal>');
+      print(await cell.identity.autonomy.set(tenant, as, { book: flag("--book") ?? null, halted: sub === "halt", reason }));
+      break;
+    }
+    case "incident": {
+      const [sub, tenant, id] = positional, as = flag("--as");
+      const list = (k: string) => flag(k)?.split(",").map((x) => x.trim()).filter(Boolean);
+      if (!sub || !tenant) throw new Error("usage: ops incident list|show|open|update|close <tenant> …");
+      if (sub === "list") print(await cell.incidents.list(tenant, { status: flag("--status") as never }));
+      else if (sub === "show" && id) print(await cell.incidents.get(tenant, id));
+      else if (!as) throw new Error("incident changes need --as <principal>");
+      else if (sub === "open") {
+        print(await cell.incidents.open(tenant, as, { title: flag("--title") ?? "", description: flag("--description") ?? "", books: list("--books") ?? [],
+          periods: list("--periods") ?? [], possibleLossPaise: flag("--loss") ?? "0", duplication: args.includes("--duplication"), owner: flag("--owner") ?? as }));
+      } else if (sub === "update" && id) {
+        print(await cell.incidents.update(tenant, as, id, { containment: flag("--containment"), corrections: list("--corrections"), owner: flag("--owner"), note: flag("--note") }));
+      } else if (sub === "close" && id) {
+        print(await cell.incidents.close(tenant, as, id, { reconciliationRef: flag("--reconciliation") ?? "", note: flag("--note") }));
+      } else throw new Error("usage: ops incident list|show|open|update|close <tenant> …");
+      break;
+    }
+    case "drill-compare": {
+      const source = flag("--source"), restored = flag("--restored");
+      if (!source || !restored) throw new Error("usage: ops drill-compare --source <owner url> --restored <owner url> [--out file] [--meta json]");
+      const r = await OpsAdmin.compareCells(source, restored);
+      const evidence = { kind: "restore-drill", ...(flag("--meta") ? { drill: JSON.parse(flag("--meta")!) } : {}), comparison: r };
+      const out = flag("--out");
+      if (out) { mkdirSync(dirname(out), { recursive: true, mode: 0o700 }); writeFileSync(out, JSON.stringify(evidence, null, 2) + "\n", { mode: 0o600 }); }
+      print({ ok: r.ok, tenants: r.tenants.map((t) => ({ tenant: t.tenant, ok: t.ok, failed: Object.entries(t.checks).filter(([, c]) => !c.ok).map(([k]) => k) })),
+        missingTenants: r.missingTenants, extraTenants: r.extraTenants, ...(out ? { evidence: out } : {}) });
+      process.exitCode = r.ok ? 0 : 1;
+      break;
+    }
     default:
-      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify, bus-consumers, backfill-confirmations");
+      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify, bus-consumers, backfill-confirmations, access-review, autonomy, incident, drill-compare");
       process.exitCode = 2;
   }
 } finally {

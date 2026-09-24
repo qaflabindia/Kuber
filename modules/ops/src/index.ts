@@ -18,7 +18,7 @@
  * Authorization (F02): every plan, commit and discard first passes the OpsGuard (the identity
  * module): membership, role, book scope and separation of duties. Without a guard, nothing passes.
  */
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import { canonical, sha256, uuid, type EventData, type Line } from "@kuber/contracts";
 import { tenantRlsFor, type EventStore, type Migration } from "@kuber/eventstore";
 import { DomainError, type BookState } from "@kuber/gl";
@@ -26,10 +26,13 @@ import { AgentError } from "@kuber/agent";
 import { isToken, type TenantKeys } from "@kuber/crypto";
 import { balancesFromState } from "./math.ts";
 import { OPERATIONS } from "./operations.ts";
+import { OPS_FIN_MIGRATIONS } from "./fin-migrations.ts";
 import type { Action, Effect, OpContext, OpDef, OpName, OpsGuard, Plan, PlanJournal, Services } from "./types.ts";
 
 export * from "./types.ts";
 export { OPERATIONS } from "./operations.ts";
+export { OPS_FIN_MIGRATIONS, incidentDetailCtx } from "./fin-migrations.ts";
+export { IncidentError, Incidents, type Incident, type IncidentInput } from "./incidents.ts";
 export { balancesFromState, splitByWeights, rebalanceTransfers, financialYear, pctToBp } from "./math.ts";
 
 export const OPS_MIGRATIONS: Migration[] = [{
@@ -54,7 +57,7 @@ CREATE INDEX plans_open ON ops.plans (tenant_id, book_id, created_at DESC) WHERE
   id: "ops-scale-001-plan-pages",
   // Keyset pages of open plans (F11): newest first, plan id breaks ties.
   sql: `CREATE INDEX IF NOT EXISTS plans_open_page ON ops.plans (tenant_id, book_id, created_at DESC, plan_id DESC) WHERE status = 'proposed';`,
-}];
+}, ...OPS_FIN_MIGRATIONS];
 
 export class OpsError extends Error {
   constructor(public code: string, message: string, public status = 409) { super(message); }
@@ -171,14 +174,22 @@ export class Operations {
     if (!stored) throw new OpsError("no_plan", `no plan ${planId}`, 404);
     const keys = await this.store.keys(tenant);
     const row = { ...stored, plan: open<Plan>(keys, planId, "plan", stored.plan), actions: open<Action[]>(keys, planId, "actions", stored.actions) };
+    // FIN-MDM-04: a person carrying out an approval someone else recorded for this hash executes it
+    // under that approver's authority, which the guard checks again now (not only when approving).
+    const approvedBy = !isAgent(principal) && row.status === "proposed" && row.hash === hash ? await this.activeApprover(tenant, planId, row.hash, principal) : null;
     // Authorization first, for a replay too: the stored outcome goes only to someone who may commit it.
-    await this.guard.check({ step: "commit", tenant, book: row.book_id, principal, op: { name: row.plan.op, kind: row.plan.kind, gate: row.plan.gate }, plan: row.plan });
+    await this.guard.check({ step: approvedBy ? "execute" : "commit", tenant, book: row.book_id, principal, op: { name: row.plan.op, kind: row.plan.kind, gate: row.plan.gate },
+      plan: row.plan, parties: planParties(row.plan, row.actions), ...(approvedBy ? { approvedBy } : {}) });
     if (row.status === "committed" && row.hash === hash) return { planId, status: "committed" as const, steps: row.result?.done ?? [], replayed: true };
     if (row.status !== "proposed") throw new OpsError("not_open", `plan is ${row.status}`);
     if (row.hash !== hash) throw new OpsError("hash_mismatch", "the plan you approved is not the plan on record; simulate again");
     if (row.plan.blocked) throw new OpsError("blocked", "a blocking check failed; resolve it and simulate again");
     if (isAgent(principal) && row.plan.needsPerson) {
       return { planId, status: "awaiting_person" as const, message: `A person must approve this ${row.plan.gate === "human" ? "period operation" : "plan"} in Kuber.` };
+    }
+    // FIN-OPS-03: with the kill switch on, nothing autonomous executes; the plan waits for a person.
+    if (isAgent(principal) && (await this.guard.autonomyHalted?.(tenant, row.book_id))) {
+      return { planId, status: "awaiting_person" as const, message: "Autonomous action is halted for this book (kill switch): a person must approve this plan in Kuber." };
     }
     const p = row.plan;
     let out: { steps: string[]; replayed?: true };
@@ -195,13 +206,21 @@ export class Operations {
         if (moved) throw new OpsError("stale", row.basis_version !== null
           ? `the books changed since this was simulated (version ${row.basis_version} → ${b.version}); simulate again`
           : `the books changed since this was simulated (journal ${row.basis_seq} → ${b.state.seq}); simulate again`);
+        if (approvedBy) {
+          // The approval must still stand at execution (an authority change invalidates it).
+          const [a] = await b.tx`SELECT 1 FROM ops.plan_approvals WHERE tenant_id = ${tenant} AND plan_id = ${planId} AND approver = ${approvedBy}
+            AND hash = ${row.hash} AND status = 'active' FOR UPDATE`;
+          if (!a) throw new OpsError("approval_invalidated", `the approval by ${approvedBy} no longer stands; the plan needs approval again`);
+        }
         await b.tx`UPDATE ops.plans SET status = 'committed', resolved_by = ${principal}, resolved_at = now()
           WHERE tenant_id = ${tenant} AND plan_id = ${planId}`;
+        await b.tx`UPDATE ops.plan_approvals SET status = 'used' WHERE tenant_id = ${tenant} AND plan_id = ${planId} AND status = 'active'`;
         // The approval is a fact alongside its effects: who committed which hash. Every action carries
         // the plan id as its command id, so the journals it posts link back here (evidence, 14.7).
         await this.store.append("ops", tenant, { streamId: `${tenant}/plan/${planId}`, expected: "any", events: [{ type: "PlanApproved", data: {
           planId, bookId: row.book_id, op: p.op, hash: row.hash, basisSeq: row.basis_seq, ...(row.basis_version !== null ? { basisVersion: row.basis_version } : {}),
-          gate: p.gate, needsPerson: p.needsPerson, actions: row.actions.length, preparedBy: p.createdBy, policy: p.policy as EventData<"PlanApproved">["policy"] } }] },
+          gate: p.gate, needsPerson: p.needsPerson, actions: row.actions.length, preparedBy: p.createdBy, policy: p.policy as EventData<"PlanApproved">["policy"],
+          ...(approvedBy ? { approvedBy } : {}) } }] },
           { principal, commandId: planId, policyIds: p.policy?.ids }, b.tx);
         const steps: string[] = [];
         for (const a of row.actions) {
@@ -230,8 +249,101 @@ export class Operations {
         WHERE tenant_id = ${tenant} AND plan_id = ${planId} AND status = 'proposed'`);
       throw new OpsError(e instanceof DomainError || e instanceof AgentError ? e.code : "commit_failed", `${msg} (nothing was applied; the plan is still open)`);
     }
-    return { planId, status: "committed" as const, steps: out.steps, ...(out.replayed ? { replayed: true as const } : {}) };
+    return { planId, status: "committed" as const, steps: out.steps, ...(out.replayed ? { replayed: true as const } : {}), ...(approvedBy ? { approvedBy } : {}) };
   }
+
+  // ---------------------------------------------------------------- FIN-MDM-04: approve now, execute later
+  /**
+   * Record that `principal` approves exactly this plan hash, without executing it. The guard checks
+   * their authority (role or delegation, amount band, book, conflicts, separation from the
+   * preparer). Anyone who may prepare plans in the book can then execute it with commit(); the
+   * approver's authority is checked again at that moment, and an authority change in between
+   * invalidates the approval.
+   */
+  async approve(tenant: string, planId: string, principal: string, hash: string) {
+    const [stored] = await this.store.tenantTx(tenant, (tx) => tx<{ plan: unknown; actions: unknown; status: string; hash: string; book_id: string }[]>`
+      SELECT plan, actions, status, hash, book_id FROM ops.plans WHERE tenant_id = ${tenant} AND plan_id = ${planId}`);
+    if (!stored) throw new OpsError("no_plan", `no plan ${planId}`, 404);
+    const keys = await this.store.keys(tenant);
+    const plan = open<Plan>(keys, planId, "plan", stored.plan), actions = open<Action[]>(keys, planId, "actions", stored.actions);
+    await this.guard.check({ step: "approve", tenant, book: stored.book_id, principal, op: { name: plan.op, kind: plan.kind, gate: plan.gate }, plan, parties: planParties(plan, actions) });
+    if (stored.hash !== hash) throw new OpsError("hash_mismatch", "the plan you approved is not the plan on record; simulate again");
+    if (plan.blocked) throw new OpsError("blocked", "a blocking check failed; resolve it and simulate again");
+    await this.store.tenantTx(tenant, async (tx) => {
+      const [cur] = await tx<{ status: string }[]>`SELECT status FROM ops.plans WHERE tenant_id = ${tenant} AND plan_id = ${planId} FOR UPDATE`;
+      if (cur!.status !== "proposed") throw new OpsError("not_open", `plan is ${cur!.status}`);
+      await tx`INSERT INTO ops.plan_approvals (tenant_id, plan_id, approver, book_id, hash) VALUES (${tenant}, ${planId}, ${principal}, ${stored.book_id}, ${hash})
+        ON CONFLICT (tenant_id, plan_id, approver) DO UPDATE SET hash = EXCLUDED.hash, status = 'active', approved_at = now(), invalidated_at = NULL, invalidated_reason = NULL`;
+      const amount = plan.journals.reduce((m, j) => { const d = j.lines.reduce((a, l) => (BigInt(l.amount) > 0n ? a + BigInt(l.amount) : a), 0n); return d > m ? d : m; }, 0n);
+      await this.store.append("ops", tenant, { streamId: `${tenant}/plan/${planId}`, expected: "any", events: [{ type: "PlanApprovalRecorded",
+        data: { planId, bookId: stored.book_id, hash, preparedBy: plan.requestedBy ?? plan.createdBy, amountPaise: amount.toString() } }] }, { principal, commandId: planId }, tx);
+    });
+    return { planId, status: "approved" as const, approvedBy: principal, hash };
+  }
+
+  /** Approvals recorded for a plan (active, used or invalidated with the reason). */
+  async approvals(tenant: string, planId: string) {
+    const rows = await this.store.tenantTx(tenant, (tx) => tx<{ approver: string; hash: string; status: string; approved_at: Date; invalidated_at: Date | null; invalidated_reason: string | null }[]>`
+      SELECT approver, hash, status, approved_at, invalidated_at, invalidated_reason FROM ops.plan_approvals
+      WHERE tenant_id = ${tenant} AND plan_id = ${planId} ORDER BY approved_at`);
+    return rows.map((r) => ({ approver: r.approver, hash: r.hash, status: r.status, approvedAt: r.approved_at.toISOString(),
+      invalidatedAt: r.invalidated_at?.toISOString() ?? null, reason: r.invalidated_reason }));
+  }
+
+  /** The most recent active approval of this hash by someone other than `principal`. */
+  private async activeApprover(tenant: string, planId: string, hash: string, principal: string): Promise<string | null> {
+    const [r] = await this.store.tenantTx(tenant, (tx) => tx<{ approver: string }[]>`
+      SELECT approver FROM ops.plan_approvals WHERE tenant_id = ${tenant} AND plan_id = ${planId} AND hash = ${hash} AND status = 'active'
+        AND approver <> ${principal} ORDER BY approved_at DESC LIMIT 1`);
+    return r?.approver ?? null;
+  }
+
+  /**
+   * FIN-MDM-04: someone's approval authority changed (band, delegation, conflict flag, role, scope or
+   * removal; see Identity.onAuthorityChange). Approvals that relied on it no longer stand: the plan
+   * needs re-approval. Plans saved by a removed person are stale. Runs in the change's transaction.
+   */
+  async invalidateApprovals(tenant: string, change: AuthorityChange, tx: TransactionSql) {
+    return invalidateApprovals(this.store, tenant, change, tx);
+  }
+}
+
+/** What changed someone's approval authority (see Identity.onAuthorityChange). */
+export interface AuthorityChange { approvers: string[] | "all"; books: string[] | null; stalePreparedBy?: string[]; reason: string }
+
+/**
+ * FIN-MDM-04, standalone so any process that changes authority (the core, identity-cli) applies it
+ * in the change's own transaction. Locks plans before approvals, the order commit() takes them.
+ */
+export async function invalidateApprovals(store: EventStore, tenant: string, change: AuthorityChange, tx: TransactionSql) {
+  const meta = { principal: "system:authority-change" };
+  const stale = change.stalePreparedBy?.length ? await tx<{ plan_id: string; book_id: string }[]>`
+    UPDATE ops.plans SET status = 'stale' WHERE tenant_id = ${tenant} AND status = 'proposed' AND created_by IN ${tx(change.stalePreparedBy)}
+    RETURNING plan_id, book_id` : [];
+  for (const p of stale) {
+    await store.append("ops", tenant, { streamId: `${tenant}/plan/${p.plan_id}`, expected: "any", events: [{ type: "PlanMarkedStale",
+      data: { planId: p.plan_id, bookId: p.book_id, reason: change.reason } }] }, meta, tx);
+  }
+  const invalidated = change.approvers !== "all" && !change.approvers.length ? [] : await tx<{ plan_id: string; book_id: string; approver: string }[]>`
+    UPDATE ops.plan_approvals SET status = 'invalidated', invalidated_at = now(), invalidated_reason = ${change.reason}
+    WHERE tenant_id = ${tenant} AND status = 'active'
+      ${change.approvers === "all" ? tx`` : tx`AND approver IN ${tx(change.approvers)}`}
+      ${change.books ? tx`AND book_id IN ${tx(change.books.length ? change.books : [""])}` : tx``}
+    RETURNING plan_id, book_id, approver`;
+  for (const a of invalidated) {
+    await store.append("ops", tenant, { streamId: `${tenant}/plan/${a.plan_id}`, expected: "any", events: [{ type: "PlanApprovalInvalidated",
+      data: { planId: a.plan_id, bookId: a.book_id, approver: a.approver, reason: change.reason } }] }, meta, tx);
+  }
+  return { invalidated: invalidated.map((a) => a.plan_id), stale: stale.map((p) => p.plan_id) };
+}
+
+/** FIN-MDM-04: parties a plan's journals pay or receive from (its own journals and the drafts it would post). */
+export function planParties(plan: Pick<Plan, "data">, actions: Action[]): string[] {
+  const out = new Set<string>();
+  for (const a of actions) if (a.type === "gl" && a.command.kind === "PostJournal") for (const l of a.command.lines) if (l.partyId) out.add(l.partyId);
+  const drafts = (plan.data as { journalsFromDrafts?: { lines: Line[] }[] } | undefined)?.journalsFromDrafts ?? [];
+  for (const j of drafts) for (const l of j.lines) if (l.partyId) out.add(l.partyId);
+  return [...out].sort();
 }
 
 // ---------------------------------------------------------------- derived views of a plan

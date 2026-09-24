@@ -24,13 +24,14 @@ import { Account, IsoDate, Principal, parseAmount, uuid, type Line } from "@kube
 import { CommandConflict, ConcurrencyError, GuardDenied } from "@kuber/eventstore";
 import { DomainError, type BookCommand } from "@kuber/gl";
 import { AgentError } from "@kuber/agent";
-import { OpsError } from "@kuber/ops";
+import { IncidentError, OpsError } from "@kuber/ops";
 import { StaleReportError, type ReportBasis, type ReportOptions } from "@kuber/reporting";
 import { IngestionError } from "@kuber/channels";
 import type { Cell } from "./cell.ts";
 import { Copilot } from "./copilot/index.ts";
 import { HELP } from "./copilot/router.ts";
 import { registerMcp } from "./mcp.ts";
+import { registerFinRoutes } from "./fin-routes.ts";
 import type { Who } from "./tools.ts";
 
 export interface ServerOptions {
@@ -122,6 +123,7 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     if (err instanceof AgentError) return reply.code(err.code === "not_found" ? 404 : 409).send({ error: err.code, message: err.message });
     if (err instanceof IngestionError) return reply.code(422).send({ error: err.code, message: err.message, detail: err.detail });
     if (err instanceof OpsError) return reply.code(err.status).send({ error: err.code, message: err.message });
+    if (err instanceof IncidentError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof ConcurrencyError) return reply.code(409).send({ error: "conflict", message: err.message });
     if (err instanceof StaleReportError) return reply.code(409).send({ error: err.code, message: err.message, basis: err.basis });
     if (err instanceof CommandConflict) return reply.code(409).send({ error: "idempotency_conflict", message: err.message });
@@ -458,6 +460,9 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     const broken = await cell.gl.verify((await who(req, "read")).tenant, req.params.book);
     return { intact: broken === null, firstBrokenJournal: broken };
   });
+
+  // ------------------------------------------------------------ finance controls (FIN-MDM-04/05, FIN-OPS-02/03)
+  registerFinRoutes(app, cell, who);
 
   return app;
 }

@@ -20,6 +20,7 @@ export interface BusConsumerAdmin {
   delete(name: string): Promise<unknown>;
 }
 import { pruneOutbox } from "./keys-admin.ts";
+import { autonomyErrors, compareCells } from "./fin-ops.ts";
 
 /**
  * Event types each consumer takes (keep in step with the subscriptions in cell.ts). Keyed by module
@@ -250,6 +251,33 @@ export class OpsAdmin {
       deadLetters: Object.fromEntries(dead.map((d) => [d.consumer, d.n])),
       gaps: await this.gaps(),
       reports,
+      autonomy: await this.autonomy(),
     };
   }
+
+  // ------------------------------------------------------------------ finance controls
+  /**
+   * FIN-OPS-03: per tenant, the kill-switch state and the agent's autonomous errors (reversals and
+   * corrections of journals it posted at L3/L4) per period. Tenants without either are left out.
+   */
+  async autonomy(tenant?: string) {
+    const out = [];
+    for (const t of tenant ? [tenant] : await this.tenants()) {
+      const [switches, periods] = [await this.cell.identity.autonomy.status(t), await autonomyErrors(this.cell.store, t)];
+      if (!switches.length && !periods.length && !tenant) continue;
+      out.push({ tenant: t, halted: switches.filter((s) => s.halted).map((s) => ({ book: s.book, reason: s.reason, by: s.setBy, at: s.setAt })),
+        errors: { reversed: periods.reduce((n, p) => n + p.reversed, 0), corrected: periods.reduce((n, p) => n + p.corrected, 0), periods } });
+    }
+    return out;
+  }
+
+  /** FIN-MDM-05: the access and master-change review for one tenant or every tenant (read-only). */
+  async accessReview(o: { tenant?: string; since?: string; dormantDays?: number } = {}) {
+    const out = [];
+    for (const t of o.tenant ? [o.tenant] : await this.tenants()) out.push(await this.cell.identity.accessReview.report(t, { since: o.since, dormantDays: o.dormantDays }));
+    return out;
+  }
+
+  /** FIN-OPS-01: compare a restored database with its source (owner URLs); see fin-ops.ts. */
+  static compareCells(sourceUrl: string, restoredUrl: string) { return compareCells(sourceUrl, restoredUrl); }
 }

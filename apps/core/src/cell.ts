@@ -13,7 +13,7 @@ import { PolicyEngine } from "@kuber/policy";
 import { CHANNELS_MIGRATIONS, Channels, channelsGrants } from "@kuber/channels";
 import { AGENT_MIGRATIONS, Agent, type LlmClassifier } from "@kuber/agent";
 import { REPORTING_MIGRATIONS, Reporting } from "@kuber/reporting";
-import { OPS_MIGRATIONS, Operations } from "@kuber/ops";
+import { Incidents, OPS_MIGRATIONS, Operations } from "@kuber/ops";
 import { EVIDENCE_MIGRATIONS, EvidenceService } from "@kuber/evidence";
 import { IDENTITY_MIGRATIONS, Identity, type IdentityOptions } from "@kuber/identity";
 import { sealIdentityColumns } from "./keys-admin.ts";
@@ -85,6 +85,8 @@ export class Cell {
   /** Module handlers by consumer name (plaintext envelopes), for dead-letter retry. */
   consumers: Record<string, (e: Envelope) => Promise<void>> = {};
   deadLetters!: DeadLetterStore;
+  /** FIN-OPS-02: the financial incident register. */
+  incidents!: Incidents;
 
   private constructor(
     public readonly cellId: string, public readonly sql: Sql, private readonly systemSql: Sql, public readonly store: EventStore, public readonly bus: Bus,
@@ -122,12 +124,15 @@ export class Cell {
     // Memberships, passkeys and the authorization guard every operation passes through (F01/F02).
     // It also guards the agent's decisions and channel submissions at the module boundary.
     const identity = new Identity(store, policies, { rpId: "localhost", origins: ["http://localhost:3000"], ...o.identity });
-    const gl = new GeneralLedger(store);
+    // FIN-OPS-03: the kill switch stops queued autonomous postings at the GL, too.
+    const gl = new GeneralLedger(store, { autonomyGate: (t, b) => identity.autonomyHalted(t, b) });
     const channels = new Channels(store, identity);
     const agent = new Agent(sql, store, policies, o.clock, o.classifier, identity);
     const reporting = new Reporting(sql, store);
     const ops = new Operations(sql, store, { gl, reporting, agent, policies }, o.clock, identity);
     const evidence = new EvidenceService(store);
+    // FIN-MDM-04: an authority change invalidates approvals that relied on it, in the same transaction.
+    identity.onAuthorityChange((t, change, tx) => ops.invalidateApprovals(t, change, tx).then(() => undefined));
 
     const s = (module: string, type: string) => `kuber.${cellId}.${module}.${type}.*`;
     // The broker carries sealed payloads; decrypt just before the module's handler runs.
@@ -140,6 +145,7 @@ export class Cell {
     const cell = new Cell(cellId, sql, systemSql, store, bus, relay, gl, channels, agent, reporting, policies, ops, keyring, evidence, identity);
     cell.consumers = { gl: gl.handler, agent: agent.handler, evidence: evidence.handler, reporting: reporting.handler };
     cell.deadLetters = deadLetters;
+    cell.incidents = new Incidents(store, identity);
     return cell;
   }
 

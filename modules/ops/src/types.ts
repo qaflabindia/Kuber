@@ -92,7 +92,7 @@ export type Accounts = Map<string, Account>;
  * the principal's membership, role and book scope and enforces separation of duties. Throws when
  * the step is not allowed.
  */
-export type OpsStep = "plan" | "commit" | "discard";
+export type OpsStep = "plan" | "commit" | "discard" | "approve" | "execute";
 export interface OpsGuardQuery {
   step: OpsStep; tenant: string; book: string; principal: string;
   op: Pick<OpDef, "name" | "kind" | "gate">;
@@ -100,5 +100,16 @@ export interface OpsGuardQuery {
   plan?: Plan;
   /** When an agent acts for a person (the copilot), that person's principal. */
   onBehalfOf?: string;
+  /**
+   * FIN-MDM-04, step "execute": `principal` carries out a plan `approvedBy` approved earlier. The
+   * approver's authority is checked again now (role, band, delegation, conflicts, separation).
+   */
+  approvedBy?: string;
+  /** FIN-MDM-04: parties the plan's journals pay or receive from (related-party conflict rules). */
+  parties?: string[];
 }
-export interface OpsGuard { check(q: OpsGuardQuery): Promise<void> }
+export interface OpsGuard {
+  check(q: OpsGuardQuery): Promise<void>;
+  /** FIN-OPS-03: is autonomous action halted (kill switch) for this tenant or book? Absent: never. */
+  autonomyHalted?(tenant: string, book: string): Promise<boolean>;
+}

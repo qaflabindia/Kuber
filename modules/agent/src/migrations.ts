@@ -101,4 +101,11 @@ CREATE INDEX IF NOT EXISTS ratifications_open_page ON agent.ratifications (tenan
   sql: `
 CREATE INDEX IF NOT EXISTS match_reviews_open_page ON agent.match_reviews (tenant_id, created_at, review_id) WHERE status = 'open';
 CREATE INDEX IF NOT EXISTS match_reviews_open_book_page ON agent.match_reviews (tenant_id, book_id, created_at, review_id) WHERE status = 'open';`,
+}, {
+  id: "agent-fin-001-withdrawn-ratifications",
+  // FIN-OPS-03: an autonomous posting refused because the kill switch was on never posted, so its
+  // ratification is withdrawn (the entry goes to review as a draft instead).
+  sql: `
+ALTER TABLE agent.ratifications DROP CONSTRAINT ratifications_status_check;
+ALTER TABLE agent.ratifications ADD CONSTRAINT ratifications_status_check CHECK (status IN ('open','ratified','corrected','withdrawn'));`,
 }];

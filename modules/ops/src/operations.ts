@@ -11,7 +11,7 @@
  *   insight   - report, simulate, dashboard
  */
 import { z } from "zod";
-import { IsoDate, parseAmount, stableId, type Line } from "@kuber/contracts";
+import { Id, IsoDate, parseAmount, stableId, type Line } from "@kuber/contracts";
 import { validateJournal, type BookState } from "@kuber/gl";
 import { balancesFromState, financialYear, latestTxnDate, openProvisional, pctToBp, rebalanceTransfers, splitByWeights } from "./math.ts";
 import type { Action, Check, Draft, OpContext, OpDef, Section } from "./types.ts";
@@ -63,6 +63,7 @@ const RecordInput = z.object({
   account: AccountId.describe("where it belongs, e.g. LIVING, BIZEXP, SALARY, LOANS"),
   via: AccountId.default("BANK").describe("the money account: BANK, CASH or CARD"),
   dimensions: z.record(z.string(), z.string()).optional(),
+  party: Id.optional().describe("the counterparty's party id, when known (conflict-of-interest rules apply to it)"),
 });
 
 export const record: OpDef<z.infer<typeof RecordInput>> = {
@@ -74,15 +75,15 @@ export const record: OpDef<z.infer<typeof RecordInput>> = {
     const date = i.date ?? ctx.today;
     requireAccount(s, i.account, checks, "Category"); requireAccount(s, i.via, checks, "Money account");
     checks.push({ label: "Not the suspense account", ok: i.account !== "SUSPENSE", blocking: true });
-    const dims = i.dimensions ?? {};
+    const dims = i.dimensions ?? {}, party = i.party ? { partyId: i.party } : {};
     const lines: Line[] = i.direction === "out"
-      ? [{ accountId: i.account, amount: i.amount.toString(), dimensions: dims }, { accountId: i.via, amount: (-i.amount).toString(), dimensions: {} }]
-      : [{ accountId: i.via, amount: i.amount.toString(), dimensions: {} }, { accountId: i.account, amount: (-i.amount).toString(), dimensions: dims }];
+      ? [{ accountId: i.account, amount: i.amount.toString(), ...party, dimensions: dims }, { accountId: i.via, amount: (-i.amount).toString(), dimensions: {} }]
+      : [{ accountId: i.via, amount: i.amount.toString(), dimensions: {} }, { accountId: i.account, amount: (-i.amount).toString(), ...party, dimensions: dims }];
     if (checks.every((c) => c.ok)) validates(s, date, lines, checks);
     return {
       title: `${i.direction === "out" ? "Pay" : "Receive"} ${rs(i.amount)}`,
       summary: `${i.narration}: ${rs(i.amount)} ${i.direction === "out" ? "out of" : "into"} ${name(s, i.via)}, recorded as ${name(s, i.account)} on ${date}.`,
-      actions: [post(jid(ctx, `record/${date}/${i.narration}/${i.amount}/${i.direction}/${i.account}/${i.via}`, 0), date, i.narration, lines)],
+      actions: [post(jid(ctx, `record/${date}/${i.narration}/${i.amount}/${i.direction}/${i.account}/${i.via}${i.party ? `/${i.party}` : ""}`, 0), date, i.narration, lines)],
       checks, amountPaise: i.amount,
     };
   },

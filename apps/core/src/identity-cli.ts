@@ -18,6 +18,7 @@ import { EventStore } from "@kuber/eventstore";
 import { Keyring, LocalFileKms } from "@kuber/crypto";
 import { PolicyEngine } from "@kuber/policy";
 import { Identity, isRole } from "@kuber/identity";
+import { invalidateApprovals } from "@kuber/ops";
 
 const [cmd, tenant, principal, ...rest] = process.argv.slice(2);
 const flag = (k: string) => { const i = rest.indexOf(`--${k}`); return i >= 0 ? rest[i + 1] : undefined; };
@@ -28,7 +29,10 @@ if (!url || !keyFile || !cmd || !tenant) {
 }
 const sql = postgres(url, { max: 1, onnotice: () => undefined });
 const keyring = new Keyring(sql, LocalFileKms.load(keyFile, { strictPermissions: process.env.KUBER_KEY_FILE_STRICT !== "false" }));
-const id = new Identity(new EventStore(sql, "cli", { keyring }), PolicyEngine.fromDir(process.env.POLICY_DIR ?? "./policies"), { rpId: "localhost", origins: [] });
+const store = new EventStore(sql, "cli", { keyring });
+const id = new Identity(store, PolicyEngine.fromDir(process.env.POLICY_DIR ?? "./policies"), { rpId: "localhost", origins: [] });
+// FIN-MDM-04: a removal here also invalidates the member's approvals and makes their saved plans stale.
+id.onAuthorityChange((t, change, tx) => invalidateApprovals(store, t, change, tx).then(() => undefined));
 try {
   if (cmd === "members") console.table(await id.members(tenant));
   else if (cmd === "revoke" && principal) { await id.revoke(tenant, "operator:cli", principal); console.log(`revoked ${principal}`); }

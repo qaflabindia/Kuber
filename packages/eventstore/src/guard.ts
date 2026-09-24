@@ -17,6 +17,8 @@ export interface ModuleGuard {
    * given, is the caller's tenant transaction: the check reads memberships in it.
    */
   permit(tenant: string, principal: string, action: string, scope?: GuardScope, tx?: TransactionSql): Promise<void>;
+  /** FIN-OPS-03: is autonomous action halted (kill switch) for this tenant's book? Absent: never. */
+  autonomyHalted?(tenant: string, book: string, tx?: TransactionSql): Promise<boolean>;
 }
 
 export class GuardDenied extends Error {

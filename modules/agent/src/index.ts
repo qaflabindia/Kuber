@@ -40,6 +40,8 @@ const CORRECTION_LIMIT_DAYS = 30;
 const KNOWN_AFTER = 3;
 /** Draft states a person can act on: new, or returned by the GL with a reason. */
 const REVIEWABLE = ["queued", "awaiting_approval", "rejected_by_gl"];
+/** FIN-OPS-03: the reason recorded on decisions capped by the kill switch. */
+const HALTED_REASON = "autonomy halted (kill switch): a person reviews this entry";
 
 export class AgentError extends Error { constructor(public code: string, msg: string) { super(msg); } }
 
@@ -158,10 +160,48 @@ export class Agent {
     const d = env.data as EventData<"PostingRejected">;
     const [r] = await tx<{ draft_id: string }[]>`
       SELECT draft_id FROM agent.drafts WHERE tenant_id = ${t} AND request_id = ${d.requestId} AND book_id = ${d.bookId} AND status = 'approved' FOR UPDATE`;
-    if (!r) return;
+    if (!r) {
+      if (d.reason.startsWith("autonomy_halted:")) await this.haltedToReview(tx, env, d);
+      return;
+    }
     const keys = await this.store.keys(t);
     await tx`UPDATE agent.drafts SET status = 'rejected_by_gl', gl_rejection = ${keys.seal(d.reason, `agent.drafts.gl_rejection|${r.draft_id}`)}
              WHERE tenant_id = ${t} AND draft_id = ${r.draft_id}`;
+  }
+
+  /**
+   * FIN-OPS-03: an autonomous posting the agent had queued was refused by the GL because the kill
+   * switch was turned on before it executed. The entry becomes a draft for a person (same request
+   * id, so approving it posts the journal it would have posted), and its ratification is withdrawn.
+   */
+  private async haltedToReview(tx: TransactionSql, env: Envelope, d: EventData<"PostingRejected">) {
+    const t = env.meta.tenantId, stream = d.source;
+    if (!stream?.startsWith(`${t}/txn/`)) return;
+    const events = await this.store.readStream(t, stream, 0, tx);
+    const req = events.find((e) => e.type === "PostingRequested" && (e.data as EventData<"PostingRequested">).requestId === d.requestId);
+    const extracted = events.find((e) => e.type === "TransactionExtracted");
+    const classified = [...events].reverse().find((e) => e.type === "TransactionClassified");
+    const decided = [...events].reverse().find((e) => e.type === "PolicyDecisionMade");
+    const party = [...events].reverse().find((e) => e.type === "PartyResolved");
+    if (!req || !extracted || !classified) return;
+    const p = req.data as EventData<"PostingRequested">, x = extracted.data as EventData<"TransactionExtracted">;
+    const c = classified.data as EventData<"TransactionClassified">, pr = party?.data as EventData<"PartyResolved"> | undefined;
+    const draftId = stableId("draft", `${t}/${x.txnId}`);
+    const proposal = { txnDate: p.txnDate, narration: p.narration, voucherType: p.voucherType, lines: p.lines, provisional: p.provisional };
+    const base = (decided?.data as EventData<"PolicyDecisionMade"> | undefined)?.decision;
+    const decision: Decision = { policyIds: base?.policyIds ?? [], level: "L1", action: "draft", approver: base?.approver ?? "", reasons: [...(base?.reasons ?? []), HALTED_REASON] };
+    const keys = await this.store.keys(t);
+    const ins = await tx`INSERT INTO agent.drafts (tenant_id, draft_id, txn_id, book_id, status, proposal, decision)
+      VALUES (${t}, ${draftId}, ${x.txnId}, ${p.bookId}, 'queued',
+              ${tx.json({ $c: keys.sealJson({ ...proposal, accountId: c.accountId, confidence: c.confidence, classifiedBy: c.source, partyName: pr?.partyName ?? null,
+                partyId: pr?.partyId ?? null, amount: x.txn.amount, direction: x.txn.direction }, `agent.drafts.proposal|${draftId}`) } as never)},
+              ${tx.json(decision as never)}) ON CONFLICT DO NOTHING RETURNING 1`;
+    if (!ins.length) return;
+    await tx`UPDATE agent.ratifications SET status = 'withdrawn', resolved_by = ${AGENT_PRINCIPAL}, resolved_at = now()
+             WHERE tenant_id = ${t} AND request_id = ${d.requestId} AND status = 'open'`;
+    await this.store.append("agent", t, { streamId: stream, expected: "any", events: [{ type: "DraftQueued", data: { txnId: x.txnId, draftId, bookId: p.bookId,
+      status: "queued", proposal, accountId: c.accountId, confidence: c.confidence, ...(pr?.partyName ? { partyName: pr.partyName } : {}),
+      amount: x.txn.amount, direction: x.txn.direction } }] }, { principal: AGENT_PRINCIPAL, correlationId: env.meta.correlationId, causationId: env.eventId }, tx);
   }
 
   private async projectReversal(tx: TransactionSql, env: Envelope) {
@@ -236,10 +276,14 @@ export class Agent {
     }
 
     // 5. policy decides what the agent may do
-    const decision = this.policies.decide({
+    let decision = this.policies.decide({
       eventCode: INGEST_EVENT, on: this.clock(), amountPaise: BigInt(txn.amount), confidence: c.confidence,
       counterpartyKnown: await this.partyKnown(tx, t, partyId), overrideMax: await this.override(tx, t, c.accountId, partyId),
     });
+    // FIN-OPS-03: with the kill switch on, nothing posts autonomously; a person reviews the draft.
+    if ((decision.action === "post" || decision.action === "post_then_ratify") && (await this.guard.autonomyHalted?.(t, d.bookId, tx))) {
+      decision = { ...decision, level: "L1", action: "draft", reasons: [...decision.reasons, HALTED_REASON] };
+    }
     events.push({ type: "PolicyDecisionMade", data: { txnId: d.txnId, decision: decision as Decision } });
     const meta = { ...baseMeta, policyIds: decision.policyIds };
 
