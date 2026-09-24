@@ -8,7 +8,7 @@
  */
 import { performance } from "node:perf_hooks";
 import { GeneralLedger } from "@kuber/gl";
-import { startCell } from "../tests/helpers.ts";
+import { enrol, startCell } from "../tests/helpers.ts";
 
 const N = Number(process.argv[2] ?? 5000);
 const T = "bench", B = "main", OWNER = "owner:bench";
@@ -18,6 +18,7 @@ const ms = async (f: () => Promise<unknown>) => { const t = performance.now(); a
 const clock = { value: "2026-10-25" };
 const { cell, stop } = await startCell(clock);
 try {
+  await enrol(cell, T, [OWNER]);                                         // ops plans run under identity
   await cell.gl.openBook(T, B, T, "freelancer", OWNER);
   const day = (i: number) => { const d = new Date(Date.UTC(2025, 3, 1) + (i % 540) * 86_400_000); return d.toISOString().slice(0, 10); };
   const post = (i: number) => cell.gl.execute(T, B, { kind: "PostJournal", journalId: `j-${i}`, txnDate: day(i), narration: `Synthetic journal ${i} with a narration`,
@@ -50,6 +51,9 @@ try {
   };
   const readStats = {
     ...(await reads("ops.balance", () => cell.ops.plan(T, B, OWNER, "balance", {}), 10)),
+    // the balance check verifies from the last checkpoint; a full verification re-reads the whole book
+    ...(await reads("gl.verify (incremental)", () => cell.gl.verify(T, B), 10)),
+    ...(await reads("gl.verify --full", () => cell.gl.verify(T, B, { full: true }), 3)),
     ...(await reads("ops.dashboard", () => cell.ops.plan(T, B, OWNER, "dashboard", {}))),
     ...(await reads("ops.reconcile", () => cell.ops.plan(T, B, OWNER, "reconcile", { account: "BANK", statementBalance: "0", asOf: "2026-09-30" }))),
     ...(await reads("reporting.trialBalance", () => cell.reporting.trialBalance(T, B))),

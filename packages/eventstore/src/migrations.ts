@@ -170,6 +170,29 @@ CREATE POLICY tenant_isolation ON es.snapshots USING (${TENANT_CHECK}) WITH CHEC
 CREATE POLICY system_scope ON es.snapshots TO ${SYSTEM_SCOPE_ROLE} USING (true) WITH CHECK (true);
 `,
   },
+  {
+    id: "es-scale-002-verify-checkpoints",
+    // Verified chain positions: every event of the stream up to stream_version was checked (link
+    // chain, digests) and the stored link there was `link`. Balance checks verify only what follows
+    // (and that the link at the checkpoint is unchanged); a full verification re-checks all history.
+    // Written by the owner (keys verify) or the system role only: the application role may read them
+    // (see appGrants), so a request path cannot vouch for history it did not check.
+    sql: `
+CREATE TABLE es.verify_checkpoints (
+  stream_id      TEXT PRIMARY KEY,
+  tenant_id      TEXT NOT NULL,
+  stream_version INTEGER NOT NULL CHECK (stream_version > 0),
+  link           TEXT NOT NULL,
+  verified_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  verified_by    TEXT NOT NULL DEFAULT current_user
+);
+CREATE INDEX verify_checkpoints_tenant ON es.verify_checkpoints (tenant_id);
+ALTER TABLE es.verify_checkpoints ENABLE ROW LEVEL SECURITY;
+ALTER TABLE es.verify_checkpoints FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON es.verify_checkpoints USING (${TENANT_CHECK}) WITH CHECK (${TENANT_CHECK});
+CREATE POLICY system_scope ON es.verify_checkpoints TO ${SYSTEM_SCOPE_ROLE} USING (true) WITH CHECK (true);
+`,
+  },
 ];
 
 /**
@@ -201,6 +224,8 @@ GRANT USAGE ON SCHEMA ${s} TO ${role};
 GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA ${s} TO ${role};
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA ${s} TO ${role};`).join("\n") + `
 REVOKE UPDATE ON es.events FROM ${role};
+-- Verification checkpoints vouch for history: readable, written only by the owner or the system role.
+REVOKE INSERT, UPDATE ON es.verify_checkpoints FROM ${role};
 -- Key records: the application may create a tenant's first keys and read them; rotation,
 -- re-wrapping and shredding are operator actions that run with the owner role.
 REVOKE UPDATE ON keys.tenant_keys FROM ${role};
@@ -213,4 +238,5 @@ GRANT SELECT, INSERT ON public.schema_migrations TO ${role};`;
  * outbox relay and system reads, never to serve a tenant request.
  */
 export const systemGrants = (role: string, schemas: string[]) => appGrants(role, schemas) + `
+GRANT INSERT, UPDATE ON es.verify_checkpoints TO ${role};
 GRANT ${SYSTEM_SCOPE_ROLE} TO ${role};`;

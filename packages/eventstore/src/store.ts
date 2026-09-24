@@ -13,6 +13,7 @@
  * - Encryption at rest: payloads are sealed with the tenant's data key before they touch the
  *   database; the outbox and broker carry the same ciphertext (see sealing.ts).
  */
+import type postgres from "postgres";
 import type { Sql, TransactionSql } from "postgres";
 import {
   OWNER, SCHEMA_VERSION, canonical, sha256, subjectFor, uuid, validateEvent,
@@ -239,34 +240,152 @@ export class EventStore {
   }
 
   /**
-   * Storage integrity: recompute every stream's link chain from stored digests (no keys needed)
-   * and, with `deep`, decrypt each event and recompute its digest. Returns problems found.
+   * Storage integrity: recompute stream link chains from stored digests (no keys needed) and, with
+   * `deep`, decrypt each event and recompute its digest. Returns problems found.
+   *
+   * Full (the default): every stream from its first event. `incremental`: each stream from its
+   * verified checkpoint (es.verify_checkpoints) — the stored link at the checkpoint must still be
+   * the recorded one, and only later events are checked; tampering before a checkpoint is found by
+   * a full run. `record`: afterwards, move the checkpoint of every stream that verified cleanly to
+   * its last event (written on the system connection; the application role cannot write them).
    */
-  async verifyStorage(opts: { deep?: boolean; tenantId?: string } = {}): Promise<{ streams: number; events: number; problems: string[] }> {
-    const rows = await this.systemTx((t) => t<(Row & { digest: string | null; link: string | null })[]>`
-      SELECT event_id, global_position::text, stream_id, stream_version, type, schema_version, data, meta, recorded_at, digest, link
-      FROM es.events ${opts.tenantId ? t`WHERE tenant_id = ${opts.tenantId}` : t``} ORDER BY stream_id, stream_version`);
+  async verifyStorage(opts: { deep?: boolean; tenantId?: string; streamId?: string; incremental?: boolean; record?: boolean } = {}):
+    Promise<{ streams: number; events: number; problems: string[]; resumed: number; checkpointed: number }> {
+    const { rows, cps, orphans } = await this.systemTx(async (t) => {
+      const where = t`${opts.tenantId ? t`AND e.tenant_id = ${opts.tenantId}` : t``} ${opts.streamId ? t`AND e.stream_id = ${opts.streamId}` : t``}`;
+      return this.chainRows(t, !!opts.incremental, where, opts);
+    });
+    const r = await this.checkChains(rows, cps, !!opts.deep, false);
+    r.problems.unshift(...orphans);
+    const checkpointed = opts.record ? await this.recordCheckpoints(r.heads, cps) : 0;
+    return { streams: r.streams, events: r.events, problems: r.problems, resumed: r.resumed, checkpointed };
+  }
+
+  /**
+   * Verify one stream (deep: link chain, digest of each decrypted payload) from its checkpoint, or
+   * from its first event with `full`. `check` adds the caller's own checks over the newly verified
+   * events (the GL's journal hash chain); `from` is the checkpoint version (0 when none). When
+   * everything holds the checkpoint moves to the stream's last event.
+   */
+  async verifyStream(tenantId: string, streamId: string, opts: {
+    full?: boolean;
+    check?: (events: Envelope[], from: number, tx: TransactionSql) => Promise<string[]>;
+  } = {}): Promise<{ from: number; to: number; events: number; problems: string[]; checkpointed: boolean }> {
+    if (!streamId.startsWith(`${tenantId}/`)) throw new Error(`stream ${streamId} is not in tenant ${tenantId}`);
+    const { r, cps, extra } = await this.tenantTx(tenantId, async (t) => {
+      const { rows, cps, orphans } = await this.chainRows(t, !opts.full, t`AND e.stream_id = ${streamId}`, { streamId });
+      const r = await this.checkChains(rows, cps, true, true);
+      r.problems.unshift(...orphans);
+      const from = opts.full ? 0 : cps.get(streamId)?.version ?? 0;
+      let extra: string[] = [];
+      if (opts.check && !r.problems.length) {
+        try { extra = await opts.check(r.opened, from, t); } catch (e) { extra = [`${streamId}: ${(e as Error).message}`]; }
+      }
+      return { r, cps, extra };
+    });
+    const problems = [...r.problems, ...extra];
+    const head = r.heads.get(streamId);
+    const from = opts.full ? 0 : cps.get(streamId)?.version ?? 0;
+    const checkpointed = !problems.length && (await this.recordCheckpoints(r.heads, cps)) > 0;
+    return { from, to: head?.version ?? from, events: r.events, problems, checkpointed };
+  }
+
+  /** The stream's last event of `type` at or before `atOrBefore` (decrypted), or null. */
+  async lastEventOfType(tenantId: string, streamId: string, type: string, atOrBefore: number, tx?: TransactionSql): Promise<Envelope | null> {
+    const q = (t: TransactionSql) => t<Row[]>`
+      SELECT event_id, global_position::text, stream_id, stream_version, type, schema_version, data, meta, recorded_at
+      FROM es.events WHERE stream_id = ${streamId} AND type = ${type} AND stream_version <= ${atOrBefore}
+      ORDER BY stream_version DESC LIMIT 1`;
+    const rows = tx ? await q(tx) : await this.tenantTx(tenantId, q);
+    return (await this.openRows(rows))[0] ?? null;
+  }
+
+  /** Rows to verify (from each stream's checkpoint when `incremental`), the checkpoints, and checkpoints whose event is gone. */
+  private async chainRows(t: TransactionSql, incremental: boolean, where: postgres.PendingQuery<postgres.Row[]>,
+                          f: { tenantId?: string; streamId?: string }) {
+    const rows = await t<ChainRow[]>`
+      SELECT e.event_id, e.global_position::text, e.tenant_id, e.stream_id, e.stream_version, e.type, e.schema_version, e.data, e.meta,
+             e.recorded_at, e.digest, e.link
+      FROM es.events e ${incremental ? t`LEFT JOIN es.verify_checkpoints c ON c.stream_id = e.stream_id` : t``}
+      WHERE true ${incremental ? t`AND (c.stream_id IS NULL OR e.stream_version >= c.stream_version)` : t``} ${where}
+      ORDER BY e.stream_id, e.stream_version`;
+    const cpRows = await t<{ stream_id: string; stream_version: number; link: string; present: boolean }[]>`
+      SELECT c.stream_id, c.stream_version, c.link,
+             EXISTS (SELECT 1 FROM es.events e WHERE e.stream_id = c.stream_id AND e.stream_version = c.stream_version) AS present
+      FROM es.verify_checkpoints c WHERE true
+        ${f.tenantId ? t`AND c.tenant_id = ${f.tenantId}` : t``} ${f.streamId ? t`AND c.stream_id = ${f.streamId}` : t``}`;
+    const cps = new Map(cpRows.map((c) => [c.stream_id, { version: c.stream_version, link: c.link }]));
+    const orphans = cpRows.filter((c) => !c.present).map((c) => `${c.stream_id}#${c.stream_version}: verified event is missing from the store`);
+    return { rows, cps: incremental ? cps : new Map<string, ChainCheckpoint>(), all: cps, orphans };
+  }
+
+  /** Walk rows (ordered by stream, version) from each stream's checkpoint or genesis. */
+  private async checkChains(rows: ChainRow[], cps: Map<string, ChainCheckpoint>, deep: boolean, open: boolean) {
     const problems: string[] = [];
-    let prev = GENESIS_LINK, stream = "", streams = 0;
+    const heads = new Map<string, ChainHead>();
+    const opened: Envelope[] = [];
+    let prev = GENESIS_LINK, stream = "", streams = 0, events = 0, resumed = 0;
+    let head: ChainHead = { tenant: "", version: 0, link: GENESIS_LINK, clean: true };
     const keysBy = new Map<string, TenantKeys | null>();
     for (const r of rows) {
-      if (r.stream_id !== stream) { stream = r.stream_id; prev = GENESIS_LINK; streams++; }
-      if (!r.digest || !r.link) { problems.push(`${r.stream_id}#${r.stream_version}: not sealed (legacy plaintext)`); continue; }
-      if (linkOf(prev, r.digest, r.stream_id, r.stream_version) !== r.link) problems.push(`${r.stream_id}#${r.stream_version}: link chain broken`);
-      prev = r.link;
-      if (opts.deep && this.crypto && isSealed(r.data)) {
-        const tenant = r.meta.tenantId;
+      if (r.stream_id !== stream) {
+        stream = r.stream_id; prev = GENESIS_LINK; streams++;
+        head = { tenant: r.tenant_id, version: 0, link: GENESIS_LINK, clean: true };
+        heads.set(stream, head);
+        const cp = cps.get(stream);
+        if (cp) {
+          resumed++;
+          prev = cp.link; head.version = cp.version; head.link = cp.link;
+          if (r.stream_version !== cp.version || r.link !== cp.link) {
+            problems.push(`${stream}#${cp.version}: stored chain no longer matches its verified checkpoint`); head.clean = false;
+          }
+          if (r.stream_version === cp.version) continue;                // verified before
+        }
+      }
+      events++;
+      const bad = (m: string) => { problems.push(`${r.stream_id}#${r.stream_version}: ${m}`); head.clean = false; };
+      if (!r.digest || !r.link) { bad("not sealed (legacy plaintext)"); continue; }
+      if (linkOf(prev, r.digest, r.stream_id, r.stream_version) !== r.link) bad("link chain broken");
+      prev = r.link; head.version = r.stream_version; head.link = r.link;
+      if (deep && this.crypto && isSealed(r.data)) {
+        const tenant = r.tenant_id;
         if (!keysBy.has(tenant)) keysBy.set(tenant, await this.crypto.keyring.forTenant(tenant).catch(() => null));
         const k = keysBy.get(tenant);
-        if (!k) continue;                                               // shredded: structure only
+        if (!k) { if (open) bad("no key to open it"); continue; }       // shredded: structure only
         try {
-          if (openEventData(k, r.event_id, r.type, r.stream_id, r.data).digest !== r.digest) problems.push(`${r.stream_id}#${r.stream_version}: digest mismatch`);
-        } catch (e) { problems.push(`${r.stream_id}#${r.stream_version}: ${(e as Error).message}`); }
+          const o = openEventData(k, r.event_id, r.type, r.stream_id, r.data);
+          if (o.digest !== r.digest) bad("digest mismatch");
+          else if (open) opened.push(toEnvelope({ ...r, data: o.data }));
+        } catch (e) { bad((e as Error).message); }
       }
     }
-    return { streams, events: rows.length, problems };
+    return { streams, events, problems, heads, opened, resumed };
+  }
+
+  /** Move checkpoints forward to the last verified event of each clean stream (never backwards; never for shredded tenants). */
+  private async recordCheckpoints(heads: Map<string, ChainHead>, cps: Map<string, ChainCheckpoint>): Promise<number> {
+    const rows = [...heads].filter(([s, h]) => h.clean && h.version > (cps.get(s)?.version ?? 0))
+      .map(([stream_id, h]) => ({ stream_id, tenant_id: h.tenant, stream_version: h.version, link: h.link }));
+    let n = 0;
+    for (let i = 0; i < rows.length; i += 1000) {
+      const chunk = rows.slice(i, i + 1000);
+      n += await this.systemTx(async (t) => (await t`
+        INSERT INTO es.verify_checkpoints (stream_id, tenant_id, stream_version, link)
+        SELECT x.stream_id, x.tenant_id, x.stream_version::int, x.link
+        FROM jsonb_to_recordset(${t.json(chunk as never)}) AS x(stream_id text, tenant_id text, stream_version int, link text)
+        WHERE NOT EXISTS (SELECT 1 FROM keys.shredded s WHERE s.tenant_id = x.tenant_id)
+        ON CONFLICT (stream_id) DO UPDATE SET stream_version = EXCLUDED.stream_version, link = EXCLUDED.link,
+          verified_at = now(), verified_by = current_user
+        WHERE es.verify_checkpoints.stream_version <= EXCLUDED.stream_version`).count);
+    }
+    return n;
   }
 }
+
+/** A verified chain position: every event of the stream up to `version` checked out, ending in `link`. */
+export interface ChainCheckpoint { version: number; link: string }
+interface ChainHead { tenant: string; version: number; link: string; clean: boolean }
+type ChainRow = Row & { tenant_id: string; digest: string | null; link: string | null };
 
 interface Row {
   event_id: string; global_position: string; stream_id: string; stream_version: number; type: string;

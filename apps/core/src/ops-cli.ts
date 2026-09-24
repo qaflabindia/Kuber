@@ -12,6 +12,8 @@
  *   ops certify <tenant> <book> <trial-balance|profit-and-loss|balance-sheet> [--from d] [--to d] [--as-of d] [--timeout ms]
  *   ops snapshots <tenant> [book]                 list certified report snapshots
  *   ops reproduce <tenant> <snapshotId>           recompute a certified report at its ledger position and compare
+ *   ops verify [--full] [--tenant t]              link chains and digests from each stream's verified checkpoint
+ *                                                 (--full: from the first event); moves checkpoints of clean streams
  *
  * It starts a cell with the in-memory bus and no relay: handlers run here, events they append are
  * published by the running core's relay. Environment as for the core: DATABASE_URL, MIGRATION_URL
@@ -94,8 +96,13 @@ try {
       process.exitCode = r.matches ? 0 : 1;
       break;
     }
+    case "verify": {
+      const v = await ops.verify({ full: args.includes("--full"), tenantId: flag("--tenant") });
+      print(v); process.exitCode = v.problems.length ? 1 : 0;
+      break;
+    }
     default:
-      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce");
+      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify");
       process.exitCode = 2;
   }
 } finally {

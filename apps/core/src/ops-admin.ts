@@ -155,6 +155,16 @@ export class OpsAdmin {
     return { projection: name, tenant, ok: problems.length === 0, problems, fingerprint: await fingerprintProjection(this.owner, p, tenant) };
   }
 
+  // ------------------------------------------------------------------ storage verification
+  /**
+   * Link chains and digests of every stream (or one tenant's): from each stream's verified
+   * checkpoint, or from the first event with `full`. Checkpoints of clean streams move forward
+   * (written on the cell's system connection).
+   */
+  verify(opts: { full?: boolean; tenantId?: string } = {}) {
+    return this.cell.store.verifyStorage({ deep: true, tenantId: opts.tenantId, incremental: !opts.full, record: true });
+  }
+
   // ------------------------------------------------------------------ status
   pruneOutbox() { return pruneOutbox(this.owner, this.busRetentionMs); }
 
