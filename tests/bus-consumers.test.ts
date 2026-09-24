@@ -66,7 +66,7 @@ describe("OpsAdmin.busConsumers against es.inbox (fake broker)", () => {
     const deleted: string[] = [];
     const fake: BusConsumerAdmin = {
       list: async () => [c("gl_p0"), c("gl", 1), c("agent", 2), c("reporting_p8", 7), c("evidence_p5")],
-      pendingEventIds: async (x) => pending[x.name] ?? [],
+      pendingEventIds: async (x) => (x.name in pending ? pending[x.name]! : []),
       delete: async (n) => { deleted.push(n); },
     };
     const list = await ops.busConsumers(fake, { partitions: 2 });

@@ -87,6 +87,7 @@ export class NatsConsumerAdmin {
   async list(): Promise<ConsumerState[]> {
     const out: ConsumerState[] = [];
     for await (const c of this.jsm.consumers.list(this.stream)) {
+      if (!c.config.durable_name) continue;                            // ephemeral (e.g. an inspection in progress)
       const f = c.config.filter_subjects ?? (c.config.filter_subject ? [c.config.filter_subject] : []);
       out.push({ name: c.name, pending: c.num_pending, ackPending: c.num_ack_pending, filter: f, ackFloor: c.ack_floor.stream_seq });
     }
@@ -104,17 +105,23 @@ export class NatsConsumerAdmin {
     if (want > max || !c.filter.length) return null;
     const oc = await this.js.consumers.get(this.stream, { filter_subjects: c.filter, deliver_policy: DeliverPolicy.StartSequence, opt_start_seq: c.ackFloor + 1 });
     const ids: string[] = [];
+    try {
+      await this.readInto(oc, want, ids);
+    } catch { return null; } finally { await oc.delete().catch(() => undefined); }
+    return ids.length >= want ? ids : null;                           // could not read them all: conclude nothing
+  }
+
+  private async readInto(oc: Awaited<ReturnType<JetStreamClient["consumers"]["get"]>>, want: number, ids: string[]) {
     while (ids.length < want) {
       const batch = await oc.fetch({ max_messages: Math.min(want - ids.length, 1000), expires: 2000 });
       let got = 0;
       for await (const m of batch) {
         got++;
-        try { ids.push(m.json<Envelope>().eventId); } catch { return null; }
+        ids.push(m.json<Envelope>().eventId);
         if (ids.length >= want) break;
       }
       if (got === 0) break;
     }
-    return ids.length >= want ? ids : null;                           // could not read them all: conclude nothing
   }
 
   async delete(name: string) { return this.jsm.consumers.delete(this.stream, name); }
