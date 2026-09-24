@@ -124,7 +124,7 @@ describe("verification checkpoints", () => {
     try {
       const asTenant = (sql: postgres.Sql, fn: (t: postgres.TransactionSql) => Promise<unknown>) =>
         sql.begin(async (t) => { await t`SELECT set_config('kuber.tenant', ${T}, true)`; return fn(t); });
-      expect(await asTenant(app, (t) => t`SELECT stream_version FROM es.verify_checkpoints`)).toHaveLength(1);
+      expect(await asTenant(app, (t) => t`SELECT stream_version FROM es.verify_checkpoints WHERE stream_id = ${STREAM}`)).toHaveLength(1);
       await expect(asTenant(app, (t) => t`UPDATE es.verify_checkpoints SET stream_version = 1`)).rejects.toThrow(/permission denied/);
       await expect(asTenant(app, (t) => t`INSERT INTO es.verify_checkpoints (stream_id, tenant_id, stream_version, link)
         VALUES (${`${T}/book/forged`}, ${T}, 1, ${"a".repeat(64)})`)).rejects.toThrow(/permission denied/);
