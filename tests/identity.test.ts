@@ -15,7 +15,7 @@ import { Keyring } from "@kuber/crypto";
 import { EventStore } from "@kuber/eventstore";
 import { KeyAdmin, buildServer, kuberTools, Copilot, type Cell } from "@kuber/core";
 import { AUDIENCE, AUTH_HEADER, ISSUER, ReplayCache, authKey, bodyHash, signRequest, verifyRequest } from "@kuber/auth";
-import { ACTIONS, Identity, ROLES, can, permissionTable, type Action, type Role } from "@kuber/identity";
+import { ACTIONS, Identity, ROLES, can, identityStream, permissionTable, type Action, type Role } from "@kuber/identity";
 import type { Plan } from "@kuber/ops";
 import { CORE_AUTH_SECRET, enrol, newSession, signedInject, startCell, type SignedRequest } from "./helpers.ts";
 
@@ -393,6 +393,64 @@ describe("passkeys", () => {
     const dev = new Identity(cell.store, cell.policies, { rpId: RP_ID, origins: [ORIGIN], devSignIn: true });
     expect(await dev.devSignIn("devco", "Dev User")).toMatchObject({ principal: "owner:dev-user", source: "dev" });
     await expect(dev.devSignIn(W, "Mallory")).rejects.toThrow(/sign in with a passkey/);
+  });
+
+  it("a signed-in request must carry a session id; sign-out revokes that session only", async () => {
+    const url = `/v1/tenants/${T}/books`;
+    const none = await send({ method: "GET", url, tenant: T, principal: P.owner, session: null });
+    expect(none.statusCode).toBe(401);
+    expect(none.json().error).toBe("no_session");
+    const s1 = newSession(), s2 = newSession();
+    expect((await send({ method: "GET", url, tenant: T, principal: P.owner, session: s1 })).statusCode).toBe(200);
+    expect((await send({ method: "POST", url: `/v1/tenants/${T}/sessions/revoke`, tenant: T, principal: P.owner, session: s1, payload: {} })).statusCode).toBe(204);
+    const after = await send({ method: "GET", url, tenant: T, principal: P.owner, session: s1 });
+    expect(after.statusCode).toBe(401);
+    expect(after.json().error).toBe("session_revoked");
+    expect((await send({ method: "GET", url, tenant: T, principal: P.owner, session: s2 })).statusCode).toBe(200);
+    // Signing out needs no membership (a removed member can still end their session) but does need a session.
+    expect((await send({ method: "POST", url: `/v1/tenants/${T}/sessions/revoke`, tenant: T, principal: null, payload: {} })).statusCode).toBe(401);
+    const audit = (await cell.store.readStream(T, identityStream(T))).filter((e) => e.type === "SessionRevoked");
+    expect(audit.at(-1)).toMatchObject({ meta: { principal: P.owner }, data: { principal: P.owner } });
+    expect(JSON.stringify(audit.at(-1)!.data)).not.toContain(s1);                    // only the hash is recorded
+  });
+
+  it("a session is bound to the passkey it signed in with; revoking the passkey ends it and blocks sign-in", async () => {
+    const S = "sessco", key = new SoftAuthenticator(), spare = new SoftAuthenticator();
+    const reg = (await ceremony(S, "registration/options", { displayName: "Sam Owner" })).json();
+    expect((await ceremony(S, "registration/verify", { displayName: "Sam Owner", response: key.create(reg) })).statusCode).toBe(201);
+    // A second passkey arrives by invitation to a second person, so the workspace keeps a way in.
+    const inv = (await send({ method: "POST", url: `/v1/tenants/${S}/members/invitations`, tenant: S, principal: "owner:sam-owner", payload: { role: "owner", displayName: "Second Owner" } })).json();
+    const o2 = (await ceremony(S, "registration/options", { displayName: "Second Owner", enrolment: inv.token })).json();
+    expect((await ceremony(S, "registration/verify", { displayName: "Second Owner", enrolment: inv.token, response: spare.create(o2) })).statusCode).toBe(201);
+    // Sign in with a session id the web tier chose; the core binds it to this passkey.
+    const sid = newSession();
+    const opts = (await ceremony(S, "authentication/options")).json();
+    const signedIn = await send({ method: "POST", url: `/v1/tenants/${S}/identity/authentication/verify`, tenant: S, principal: null, session: sid, payload: { response: key.get(opts) } });
+    expect(signedIn.json().principal).toBe("owner:sam-owner");
+    const me = () => send({ method: "GET", url: `/v1/tenants/${S}/me`, tenant: S, principal: "owner:sam-owner", session: sid });
+    expect((await me()).statusCode).toBe(200);
+    // The same session id cannot be used for another principal.
+    expect((await send({ method: "GET", url: `/v1/tenants/${S}/me`, tenant: S, principal: "owner:second-owner", session: sid })).statusCode).toBe(401);
+    const creds = (await me().then(() => send({ method: "GET", url: `/v1/tenants/${S}/me/credentials`, tenant: S, principal: "owner:sam-owner" }))).json();
+    expect(creds).toHaveLength(1);
+    // Another owner (members.manage) may revoke it; see the next test for someone who may not.
+    expect((await send({ method: "POST", url: `/v1/tenants/${S}/credentials/${creds[0].credentialId}/revoke`, tenant: S, principal: "owner:second-owner", payload: {} })).statusCode).toBe(204);
+    const ended = await me();
+    expect(ended.statusCode).toBe(401);
+    expect(ended.json().error).toBe("session_revoked");
+    const o3 = (await ceremony(S, "authentication/options")).json();
+    expect((await ceremony(S, "authentication/verify", { response: key.get(o3) })).statusCode).toBe(401);
+    expect((await send({ method: "GET", url: `/v1/tenants/${S}/me/credentials`, tenant: S, principal: "owner:sam-owner" })).json()[0].revokedAt).not.toBeNull();
+    // The whole story is in the identity stream, sealed like every event.
+    expect((await cell.store.readStream(S, identityStream(S))).map((e) => e.type)).toEqual([
+      "MemberAdded", "CredentialRegistered", "InvitationIssued", "InvitationRedeemed", "MemberAdded", "CredentialRegistered", "CredentialRevoked",
+    ]);
+  });
+
+  it("a member may revoke only their own passkeys unless they manage members", async () => {
+    const [c] = await cell.identity.credentials(W, "owner:priya-rao");
+    expect((await as("auditor:ca-firm", "POST", `/v1/tenants/${W}/credentials/${c!.credentialId}/revoke`, {}, W)).statusCode).toBe(404);
+    expect((await cell.identity.credentials(W, "owner:priya-rao"))[0]!.revokedAt).toBeNull();
   });
 
   it("crypto-shredding a workspace removes its members, passkeys, invitations and settings", async () => {

@@ -25,6 +25,8 @@ const say = (s: string) => console.log(`\n${s}`);
 
 try {
   say(`1. Open a freelancer book for tenant ${T} and declare opening balances`);
+  // Modules check membership in-process too: the demo's owner is a member of the workspace.
+  await cell.identity.addMember(T, "operator:demo", { principal: OWNER, displayName: "Laksh" });
   await cell.gl.openBook(T, B, "laksh", "freelancer", OWNER);
   for (const [acc, amt] of [["BANK", 12500000n], ["CASH", 500000n], ["LOANS", -240000000n]] as const) {
     await cell.gl.execute(T, B, { kind: "PostJournal", journalId: uuid(), txnDate: "2026-09-30", narration: `Opening ${acc}`, voucherType: "opening",

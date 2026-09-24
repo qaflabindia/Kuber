@@ -140,15 +140,29 @@ async function sealColumnRows(t: TransactionSql, c: SealedColumn, tenant: string
  * Crypto-shredded tenants are skipped (their rows are purged, not sealed). Returns values sealed.
  */
 export async function sealColumnsOnce(owner: Sql, keyring: Keyring, id: string, columns: SealedColumn[]): Promise<number> {
+  const [done] = await owner`SELECT 1 FROM public.schema_migrations WHERE id = ${id}`;
+  if (done) return 0;
+  // Keys first, outside the transaction: the keyring may share the owner's (single-connection) pool.
+  const shredded = new Set((await owner<{ tenant_id: string }[]>`SELECT tenant_id FROM keys.shredded`).map((r) => r.tenant_id));
+  const keys = new Map<string, TenantKeys>();
+  for (const c of columns) {
+    for (const r of await owner.unsafe(`SELECT DISTINCT tenant_id FROM ${c.table}`) as { tenant_id: string }[]) {
+      if (!shredded.has(r.tenant_id) && !keys.has(r.tenant_id)) keys.set(r.tenant_id, await keyring.forTenant(r.tenant_id));
+    }
+  }
   return owner.begin(async (t) => {
-    await t`SELECT pg_advisory_xact_lock(7337002)`;
-    const [done] = await t`SELECT 1 FROM public.schema_migrations WHERE id = ${id}`;
-    if (done) return 0;
-    const shredded = new Set((await t<{ tenant_id: string }[]>`SELECT tenant_id FROM keys.shredded`).map((r) => r.tenant_id));
+    await t`SELECT pg_advisory_xact_lock(7337003)`;
+    const [again] = await t`SELECT 1 FROM public.schema_migrations WHERE id = ${id}`;
+    if (again) return 0;
     let n = 0;
     for (const c of columns) {
       const tenants = (await t.unsafe(`SELECT DISTINCT tenant_id FROM ${c.table} ORDER BY 1`) as { tenant_id: string }[]).map((r) => r.tenant_id);
-      for (const tenant of tenants) if (!shredded.has(tenant)) n += await sealColumnRows(t, c, tenant, await keyring.forTenant(tenant), "legacy");
+      for (const tenant of tenants) {
+        if (shredded.has(tenant)) continue;
+        const k = keys.get(tenant);
+        // A tenant whose first rows arrived after the key pass: left for the next `keys encrypt-legacy`.
+        if (k) n += await sealColumnRows(t, c, tenant, k, "legacy");
+      }
     }
     await t`INSERT INTO public.schema_migrations (id) VALUES (${id})`;
     return n;

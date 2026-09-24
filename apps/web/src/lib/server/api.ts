@@ -23,14 +23,17 @@ export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string) { super(message); }
 }
 
-/** One signed call. `principal` is null only for sign-in ceremonies, before anyone is signed in. */
-async function call<T>(s: { tenant: string; principal: string | null }, method: string, path: string, body?: unknown, contentType = "application/json"): Promise<T> {
+/**
+ * One signed call. `principal` is null only for sign-in ceremonies, before anyone is signed in.
+ * `sid` is the web session the call is made for (a ceremony: the session it is about to start).
+ */
+async function call<T>(s: { tenant: string; principal: string | null; sid?: string | null }, method: string, path: string, body?: unknown, contentType = "application/json"): Promise<T> {
   const target = `/v1/tenants/${encodeURIComponent(s.tenant)}${path}`;
   const payload = body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body);
   const res = await fetch(`${CORE}${target}`, {
     method,
     headers: {
-      [AUTH_HEADER]: signRequest(coreKey(), { method, path: target, body: payload, tenant: s.tenant, principal: s.principal }),
+      [AUTH_HEADER]: signRequest(coreKey(), { method, path: target, body: payload, tenant: s.tenant, principal: s.principal, session: s.sid ?? null }),
       ...(payload !== undefined ? { "content-type": contentType } : {}),
     },
     body: payload,
@@ -70,7 +73,9 @@ export interface Plan {
 }
 export interface CopilotReply { reply: string; cards: Plan[]; suggestions?: string[]; engine: string; trace: { tool: string; ok: boolean }[] }
 
-export const api = (s: Pick<Session, "tenant" | "principal">) => ({
+export const api = (s: Pick<Session, "tenant" | "principal" | "sid">) => ({
+  /** Sign-out: the core revokes this session id, so a copied cookie stops working too. */
+  signOut: () => call<void>(s, "POST", "/sessions/revoke", {}),
   books: () => call<{ book_id: string; accounts: number }[]>(s, "GET", "/books"),
   openBook: (bookId: string, entityId: string, entityType: string) => call(s, "POST", "/books", { bookId, entityId, entityType }),
   accounts: (book: string) => call<Account[]>(s, "GET", `/books/${book}/accounts`),
@@ -105,9 +110,12 @@ export interface Member { tenant: string; principal: string; role: string; books
 /** WebAuthn options as JSON, passed through to the browser unchanged. */
 export type CeremonyOptions = Record<string, unknown> & { challenge: string };
 
-/** Sign-in ceremonies: signed by the BFF without a principal; the core verifies the passkey. */
-export const identity = (tenant: string) => {
-  const c = { tenant, principal: null };
+/**
+ * Sign-in ceremonies: signed by the BFF without a principal; the core verifies the passkey.
+ * `sid`: the session the ceremony will start, which the core binds to the verified passkey.
+ */
+export const identity = (tenant: string, sid: string | null = null) => {
+  const c = { tenant, principal: null, sid };
   return {
     registrationOptions: (displayName: string, enrolment?: string) => call<CeremonyOptions>(c, "POST", "/identity/registration/options", { displayName, ...(enrolment ? { enrolment } : {}) }),
     register: (displayName: string, response: unknown, enrolment?: string) => call<Member>(c, "POST", "/identity/registration/verify", { displayName, response, ...(enrolment ? { enrolment } : {}) }),
