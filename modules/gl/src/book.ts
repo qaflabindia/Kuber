@@ -17,7 +17,11 @@ export class DomainError extends Error {
   constructor(public code: string, message: string) { super(message); }
 }
 
-export interface JournalRecord { lines: Line[]; txnDate: string; narration: string; voucherType: string; provisional: boolean; reversedBy?: string; createdBy: string }
+export interface JournalRecord {
+  lines: Line[]; txnDate: string; narration: string; voucherType: string; provisional: boolean; reversedBy?: string; createdBy: string;
+  /** Source that confirmed a provisional journal (JournalConfirmed); the journal is then no longer provisional. */
+  confirmedBy?: string;
+}
 
 export interface BookState {
   exists: boolean;
@@ -41,7 +45,8 @@ export type BookCommand =
       provisional?: boolean; source?: { stream: string; eventId?: string }; autonomy?: "L0" | "L1" | "L2" | "L3" | "L4" | "human"; confidence?: number }
   | { kind: "ReverseJournal"; journalId: string; reversalJournalId: string; reason: string; onDate?: string }
   | { kind: "CorrectJournal"; journalId: string; fromAccount: string; toAccount: string; reversalJournalId: string; newJournalId: string }
-  | { kind: "LockPeriod"; periodEnd: string; level: "soft" | "hard" };
+  | { kind: "LockPeriod"; periodEnd: string; level: "soft" | "hard" }
+  | { kind: "ConfirmJournal"; journalId: string; source: string; basis?: string };
 
 const PRIVILEGED = new Set(["owner", "controller"]);
 const roleOf = (principal: string) => principal.split(":")[0] ?? "";
@@ -69,6 +74,13 @@ export function evolve(s: BookState, e: Envelope): BookState {
       const journals = new Map(s.journals);
       const j = journals.get(d.journalId);
       if (j) journals.set(d.journalId, { ...j, reversedBy: d.reversalJournalId });
+      return { ...s, journals };
+    }
+    case "JournalConfirmed": {
+      const d = e.data as EventData<"JournalConfirmed">;
+      const journals = new Map(s.journals);
+      const j = journals.get(d.journalId);
+      if (j) journals.set(d.journalId, { ...j, provisional: false, confirmedBy: d.source });
       return { ...s, journals };
     }
     case "PeriodLocked": {
@@ -122,6 +134,15 @@ export function decide(s: BookState, c: BookCommand, principal: string): NewEven
       const repost = journalEvent(s, r.seq + 1, r.hash, c.newJournalId, orig.txnDate, orig.narration, orig.voucherType, lines,
         { provisional: orig.provisional, autonomy: "human" });
       return [...r.events, repost];
+    }
+    case "ConfirmJournal": {
+      // Confirmation changes no amount, account or date: it records that an authoritative source
+      // line evidences the journal, so it is allowed in locked periods and the journal is not rewritten.
+      const j = s.journals.get(c.journalId);
+      if (!j) throw new DomainError("no_journal", `no journal ${c.journalId}`);
+      if (!j.provisional) return [];                                  // idempotent (already confirmed, or never provisional)
+      if (j.reversedBy) throw new DomainError("already_reversed", `${c.journalId} is reversed; it cannot be confirmed`);
+      return [{ type: "JournalConfirmed", data: { bookId: s.bookId, journalId: c.journalId, source: c.source, ...(c.basis ? { basis: c.basis } : {}) } }];
     }
     case "LockPeriod": {
       if (!PRIVILEGED.has(roleOf(principal))) throw new DomainError("forbidden", "only an owner or controller can lock a period");

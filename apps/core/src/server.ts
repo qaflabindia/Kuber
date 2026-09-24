@@ -13,6 +13,7 @@ import { ConcurrencyError } from "@kuber/eventstore";
 import { DomainError } from "@kuber/gl";
 import { AgentError } from "@kuber/agent";
 import { OpsError } from "@kuber/ops";
+import { IngestionError } from "@kuber/channels";
 import type { Cell } from "./cell.ts";
 import { Copilot } from "./copilot/index.ts";
 import { HELP } from "./copilot/router.ts";
@@ -52,6 +53,7 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     if (err instanceof ZodError) return reply.code(400).send({ error: "invalid_request", issues: err.issues });
     if (err instanceof DomainError) return reply.code(422).send({ error: err.code, message: err.message });
     if (err instanceof AgentError) return reply.code(err.code === "not_found" ? 404 : 409).send({ error: err.code, message: err.message });
+    if (err instanceof IngestionError) return reply.code(422).send({ error: err.code, message: err.message, detail: err.detail });
     if (err instanceof OpsError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof ConcurrencyError) return reply.code(409).send({ error: "conflict", message: err.message });
     const status = (err as { statusCode?: number }).statusCode ?? 500;
@@ -110,9 +112,11 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
 
   app.post<P>("/v1/tenants/:tenant/books/:book/statements", async (req, reply) => {
     const { tenant, principal } = who(req);
-    const csv = typeof req.body === "string" ? req.body : z.object({ csv: z.string() }).parse(req.body).csv;
+    const b = typeof req.body === "string" ? { csv: req.body } : z.object({ csv: z.string(),
+      declared: z.object({ opening: z.string(), closing: z.string(), debits: z.string(), credits: z.string(), count: z.number().int() }).partial().optional(),
+      allowUnreconciled: z.boolean().optional() }).parse(req.body);
     const instrument = (req.query as { instrument?: string }).instrument ?? "BANK";
-    const r = await cell.channels.submitStatement(tenant, req.params.book, csv, principal, instrument);
+    const r = await cell.channels.submitStatement(tenant, req.params.book, b.csv, principal, { instrument, declared: b.declared, allowUnreconciled: b.allowUnreconciled });
     return reply.code(r.duplicate ? 200 : 202).send(r);
   });
 
@@ -136,6 +140,19 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     const b = z.object({ reason: z.string().min(1) }).parse(req.body);
     await cell.agent.rejectDraft(tenant, req.params.id, principal, b.reason);
     return reply.code(204).send();
+  });
+  // Source originals (F18): the retained, sealed upload behind a signal, with its hash re-verified.
+  app.get<T>("/v1/tenants/:tenant/signals/:id/original", async (req, reply) => {
+    const { tenant } = who(req);
+    const o = await cell.channels.original(tenant, req.params.id);
+    return o ? reply.send(o) : reply.code(404).send({ error: "not_found", message: `no signal ${req.params.id}` });
+  });
+  // Statement lines that may be a provisional entry already in the books: a person links or separates them.
+  app.get<P>("/v1/tenants/:tenant/match-reviews", async (req) => { const { tenant } = who(req); return cell.agent.openMatchReviews(tenant); });
+  app.post<T>("/v1/tenants/:tenant/match-reviews/:id/resolve", async (req, reply) => {
+    const { tenant, principal } = who(req);
+    const b = z.object({ journalId: z.string().nullable() }).parse(req.body);
+    return reply.code(202).send(await cell.agent.resolveMatch(tenant, req.params.id, principal, b.journalId));
   });
   // Evidence (design 14.7): look up by any id or hash a record cites, or fetch one record.
   app.get<{ Params: { tenant: string }; Querystring: { q?: string } }>("/v1/tenants/:tenant/evidence", async (req, reply) => {

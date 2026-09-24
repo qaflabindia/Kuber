@@ -11,7 +11,8 @@ import type { Sql, TransactionSql } from "postgres";
 import { isToken, type Keyring, type TenantKeys } from "@kuber/crypto";
 import { GENESIS_LINK, eventContext, isSealed, linkOf, sealEvent, type EventStore } from "@kuber/eventstore";
 import { narrationCtx } from "@kuber/reporting";
-import { accountNameCtx } from "@kuber/agent";
+import { accountNameCtx, matchReviewCtx, provisionalSourceCtx } from "@kuber/agent";
+import { signalDetailCtx, signalOriginalCtx } from "@kuber/channels";
 
 interface SealedColumn {
   table: string; column: string; kind: "text" | "json"; keyCols: string[];
@@ -28,12 +29,17 @@ export const SEALED_COLUMNS: SealedColumn[] = [
   { table: "reporting.lines", column: "narration", kind: "text", keyCols: ["journal_id", "line_no"], ctx: (r) => narrationCtx(r.journal_id!) },
   { table: "ops.plans", column: "plan", kind: "json", keyCols: ["plan_id"], ctx: (r) => `ops.plans.plan|${r.plan_id}` },
   { table: "ops.plans", column: "actions", kind: "json", keyCols: ["plan_id"], ctx: (r) => `ops.plans.actions|${r.plan_id}` },
+  { table: "agent.provisional_sources", column: "detail", kind: "text", keyCols: ["txn_id"], ctx: (r) => provisionalSourceCtx(r.txn_id!) },
+  { table: "agent.match_reviews", column: "detail", kind: "text", keyCols: ["review_id"], ctx: (r) => matchReviewCtx(r.review_id!) },
+  { table: "channels.signals", column: "original", kind: "text", keyCols: ["signal_id"], ctx: (r) => signalOriginalCtx(r.signal_id!) },
+  { table: "channels.signals", column: "detail", kind: "text", keyCols: ["signal_id"], ctx: (r) => signalDetailCtx(r.signal_id!) },
 ];
 
 /** Tables holding readable projections of a tenant's data, purged when the tenant is shredded. */
 const PROJECTION_TABLES = ["reporting.lines", "reporting.daily", "reporting.accounts", "reporting.checkpoints",
   "agent.parties", "agent.rules", "agent.party_accounts", "agent.journal_index", "agent.drafts", "agent.ratifications",
-  "agent.accounts", "agent.overrides", "ops.plans", "es.outbox", "es.snapshots"];
+  "agent.accounts", "agent.overrides", "agent.provisional_sources", "agent.match_reviews", "reporting.confirmations",
+  "channels.signals", "ops.plans", "es.outbox", "es.snapshots"];
 
 const tokenOf = (kind: "text" | "json", v: unknown): string | null =>
   kind === "text" ? (isToken(v) ? v : null) : (isToken((v as { $c?: unknown } | null)?.$c) ? (v as { $c: string }).$c : null);

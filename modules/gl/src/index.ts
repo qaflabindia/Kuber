@@ -79,7 +79,7 @@ export class GeneralLedger {
 
   /** Event handler: postings and corrections requested by other modules. */
   handler = async (env: Envelope): Promise<void> => {
-    if (env.type !== "PostingRequested" && env.type !== "CorrectionRequested") return;
+    if (env.type !== "PostingRequested" && env.type !== "CorrectionRequested" && env.type !== "ProvisionalConfirmed") return;
     await once(this.store, "gl", env, async () => {
       const tenant = env.meta.tenantId;
       const meta: MetaInput = { principal: env.meta.principal, correlationId: env.meta.correlationId, causationId: env.eventId,
@@ -95,6 +95,12 @@ export class GeneralLedger {
             narration: d.narration, voucherType: d.voucherType, lines: d.lines, provisional: d.provisional,
             source: { stream: d.sourceStream, eventId: env.eventId }, autonomy: d.autonomy, confidence: d.confidence,
           }, meta);
+        } else if (env.type === "ProvisionalConfirmed") {
+          // the agent matched a statement line to a provisional journal: record it in the book
+          const d = env.data as EventData<"ProvisionalConfirmed">;
+          if (!d.bookId) return;                                   // pre-propagation event: see Agent.backfillConfirmations
+          bookId = d.bookId; requestId = `confirm-${d.txnId}`;
+          await this.execute(tenant, d.bookId, { kind: "ConfirmJournal", journalId: d.journalId, source: env.streamId, basis: d.basis }, meta);
         } else {
           const d = env.data as EventData<"CorrectionRequested">;
           bookId = d.bookId; requestId = d.requestId;
