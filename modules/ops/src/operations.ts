@@ -11,13 +11,12 @@
  *   insight   - report, simulate, dashboard
  */
 import { z } from "zod";
-import { parseAmount, stableId, type Line } from "@kuber/contracts";
+import { IsoDate, parseAmount, stableId, type Line } from "@kuber/contracts";
 import { validateJournal, type BookState } from "@kuber/gl";
 import { balancesFromState, financialYear, latestTxnDate, openProvisional, pctToBp, rebalanceTransfers, splitByWeights } from "./math.ts";
 import type { Action, Check, Draft, OpContext, OpDef, Section } from "./types.ts";
 
 // ---------------------------------------------------------------- shared helpers
-const IsoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "use YYYY-MM-DD");
 const Rupees = z.union([z.string(), z.number()]).transform((v, c) => {
   try { const p = parseAmount(String(v)); if (p <= 0n) throw new Error(); return p; }
   catch { c.addIssue({ code: "custom", message: `not a positive amount: ${v}` }); return z.NEVER; }
@@ -195,6 +194,11 @@ export const reconcile: OpDef<z.infer<typeof ReconcileInput>> = {
     const drafts = (await ctx.svc.agent.queue(ctx.tenant, { bookId: ctx.book }) as unknown as DraftRow[]).filter((d) => d.proposal.txnDate <= i.asOf)
       .map((d) => ({ d, amt: natural(s, i.account, d.proposal.lines.filter((l) => l.accountId === i.account).reduce((a, l) => a + BigInt(l.amount), 0n)) }))
       .filter((x) => x.amt !== 0n);
+    // Also on the statement, not yet in the books: lines waiting for a person to say whether they are a provisional entry.
+    const matches = (await ctx.svc.agent.openMatchReviews(ctx.tenant)).filter((m) => m.book_id === ctx.book && m.detail.instrument === i.account && m.detail.txnDate <= i.asOf)
+      .map((m) => ({ d: { proposal: { txnDate: m.detail.txnDate, narration: `${m.detail.narration} (match review)` } } as DraftRow,
+        amt: natural(s, i.account, BigInt(m.detail.amount) * (m.detail.direction === "in" ? 1n : -1n)) }));
+    drafts.push(...matches);
     const expected = books - inBooks.reduce((a, x) => a + x.amt, 0n) + drafts.reduce((a, x) => a + x.amt, 0n);
     const diff = i.statementBalance - expected;
     const actions: Action[] = [];
@@ -339,6 +343,9 @@ export const close: OpDef<z.infer<typeof CloseInput>> = {
     checks.push({ label: "Nothing in suspense", ok: (b.get("SUSPENSE") ?? 0n) === 0n, blocking: true, detail: b.get("SUSPENSE") ? rs(b.get("SUSPENSE")!) : undefined });
     const drafts = (await ctx.svc.agent.queue(ctx.tenant, { bookId: ctx.book }) as unknown as DraftRow[]).filter((d) => d.proposal.txnDate <= i.periodEnd);
     checks.push({ label: "No drafts dated in the period", ok: drafts.length === 0, blocking: true, detail: drafts.length ? `${drafts.length} to decide first` : undefined });
+    // Approved drafts the GL has not answered yet would land in (or be refused by) the closed period.
+    const inFlight = (await ctx.svc.agent.inFlight(ctx.tenant, ctx.book)).length;
+    checks.push({ label: "No postings in flight", ok: inFlight === 0, blocking: true, detail: inFlight ? `${inFlight} approved, awaiting the ledger` : undefined });
     const prov = [...openProvisional(s)].filter(([, j]) => j.txnDate <= i.periodEnd).length;
     checks.push({ label: "No entries awaiting a statement", ok: prov === 0, blocking: false, detail: prov ? `${prov} provisional; they will be frozen as entered` : undefined });
 

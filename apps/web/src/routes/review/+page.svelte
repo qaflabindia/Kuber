@@ -64,7 +64,8 @@
       onfocusin={() => (focused = i)} aria-label={p.title}>
       <div class="meta">
         <span class="faint num">{date(d.proposal.txnDate)}</span>
-        {#if d.status === "awaiting_approval"}<span class="pill clay"><span class="dot"></span>Needs approval</span>
+        {#if d.status === "rejected_by_gl"}<span class="pill clay"><span class="dot"></span>Not posted</span>
+        {:else if d.status === "awaiting_approval"}<span class="pill clay"><span class="dot"></span>Needs approval</span>
         {:else}<span class="pill brass"><span class="dot"></span>{levelLabel(d.decision.level)}</span>{/if}
         {#if d.proposal.provisional}<span class="pill">Awaiting statement</span>{/if}
       </div>
@@ -80,6 +81,7 @@
       </div>
 
       <div class="why">
+        {#if d.gl_rejection}<p><Icon name="alert" size={15} /> The ledger refused this entry: {d.gl_rejection}</p>{/if}
         {#if unknown}
           <p><Icon name="alert" size={15} /> Kuber hasn't seen this counterparty before and found no rule for it.</p>
         {:else}

@@ -12,7 +12,7 @@ import type { Cell } from "@kuber/core";
 import { MemoryBus, NatsBus, partitionOf, type Bus } from "@kuber/bus";
 import { GeneralLedger, JournalMap, SnapshotStore, verifyChain, type BookState } from "@kuber/gl";
 import { OPERATIONS, type OpContext } from "@kuber/ops";
-import { emptyBook, evolve } from "../modules/gl/src/book.ts";
+import { FOLD_SOURCE, emptyBook, evolve } from "../modules/gl/src/book.ts";
 import { PMap, addAt, rangeAgg, type DateNode } from "../modules/gl/src/pmap.ts";
 import { serialize, deserialize } from "../modules/gl/src/snapshot.ts";
 import { balancesByScan, balancesFromState, latestTxnDate, openProvisional } from "../modules/ops/src/math.ts";
@@ -26,11 +26,12 @@ const DATES = ["2025-03-31", "2025-04-01", "2025-12-31", "2026-02-31", "2026-03-
 const VOUCHERS = ["journal", "closing", "payment", "receipt", "opening"];
 const acc = (accountId: string): Account => ({ accountId, name: accountId, nature: "asset", taxonomyTag: "BS.cash", isControl: false, isCashLike: false, requiredDims: [] });
 
-type Step = { kind: "post"; date: number; voucher: number; provisional: boolean; lines: [number, number][] } | { kind: "reverse"; target: number };
+type Step = { kind: "post"; date: number; voucher: number; provisional: boolean; lines: [number, number][] } | { kind: "reverse" | "confirm"; target: number };
 const stepArb: fc.Arbitrary<Step> = fc.oneof(
   { weight: 5, arbitrary: fc.record({ kind: fc.constant("post" as const), date: fc.nat(DATES.length - 1), voucher: fc.nat(VOUCHERS.length - 1),
     provisional: fc.boolean(), lines: fc.array(fc.tuple(fc.nat(ACCOUNTS.length - 1), fc.integer({ min: -100000, max: 100000 })), { minLength: 1, maxLength: 5 }) }) },
   { weight: 1, arbitrary: fc.record({ kind: fc.constant("reverse" as const), target: fc.nat(1000) }) },
+  { weight: 1, arbitrary: fc.record({ kind: fc.constant("confirm" as const), target: fc.nat(1000) }) },
 );
 
 function eventsOf(steps: Step[]): Envelope[] {
@@ -44,6 +45,8 @@ function eventsOf(steps: Step[]): Envelope[] {
       posted.push(id);
       out.push(env("JournalPosted", { bookId: "b", journalId: id, seq: posted.length, txnDate: DATES[s.date], narration: `n${i}`, voucherType: VOUCHERS[s.voucher],
         provisional: s.provisional, prevHash: "", hash: "", lines: s.lines.map(([a, amt]) => ({ accountId: ACCOUNTS[a]!, amount: String(amt), dimensions: {} })) }, out.length + 1));
+    } else if (posted.length && s.kind === "confirm") {
+      out.push(env("JournalConfirmed", { bookId: "b", journalId: posted[s.target % posted.length]!, source: `t/txn/${i}` }, out.length + 1));
     } else if (posted.length) {
       out.push(env("JournalReversed", { bookId: "b", journalId: posted[s.target % posted.length]!, reversalJournalId: `r${i}`, reason: "x" }, out.length + 1));
     }
@@ -124,6 +127,15 @@ describe("persistent book state (F10)", () => {
       expect(json(serialize(r, "L"))).toBe(json(serialize(s, "L")));
       for (const f of filters) expect([...balancesFromState(r, f).entries()]).toEqual([...balancesFromState(s, f).entries()]);
     }));
+  });
+
+  it("the snapshot schema fingerprints the whole fold, including confirmations and the event version", () => {
+    expect(FOLD_SOURCE()).toContain("JournalConfirmed");
+    expect(FOLD_SOURCE()).toContain("streamVersion");
+    const s = eventsOf([{ kind: "post", date: 0, voucher: 0, provisional: true, lines: [[0, 5], [1, -5]] }, { kind: "confirm", target: 0 }]).reduce(evolve, emptyBook());
+    expect(s.version).toBe(3);
+    expect([...openProvisional(s)]).toHaveLength(0);
+    expect(deserialize(JSON.parse(JSON.stringify(serialize(s, "L")))).version).toBe(3);
   });
 
   it("folding is no longer quadratic in the number of journals", () => {

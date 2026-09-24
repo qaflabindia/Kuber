@@ -10,7 +10,7 @@ import type { Envelope } from "@kuber/contracts";
 import { MemoryBus, NatsBus, busPartitions, type Bus } from "@kuber/bus";
 import { GeneralLedger } from "@kuber/gl";
 import { PolicyEngine } from "@kuber/policy";
-import { Channels } from "@kuber/channels";
+import { CHANNELS_MIGRATIONS, Channels, channelsGrants } from "@kuber/channels";
 import { AGENT_MIGRATIONS, Agent, type LlmClassifier } from "@kuber/agent";
 import { REPORTING_MIGRATIONS, Reporting } from "@kuber/reporting";
 import { OPS_MIGRATIONS, Operations } from "@kuber/ops";
@@ -45,7 +45,7 @@ export interface CellOptions {
   classifier?: LlmClassifier;
 }
 
-const SCHEMAS = ["es", "agent", "reporting", "ops", "keys", "evidence"];
+const SCHEMAS = ["es", "agent", "reporting", "ops", "keys", "evidence", "channels"];
 const ident = (role: string) => { if (!/^[a-z_][a-z0-9_]*$/.test(role)) throw new Error(`invalid role name ${role}`); return role; };
 
 /**
@@ -55,9 +55,10 @@ const ident = (role: string) => { if (!/^[a-z_][a-z0-9_]*$/.test(role)) throw ne
 export async function migrateCell(ownerUrl: string, appRole?: string, systemRole?: CellOptions["systemRole"]) {
   const owner = postgres(ownerUrl, { max: 1, onnotice: () => undefined });
   try {
-    await migrate(owner, [...EVENTSTORE_MIGRATIONS, ...AGENT_MIGRATIONS, ...REPORTING_MIGRATIONS, ...OPS_MIGRATIONS, ...EVIDENCE_MIGRATIONS]);
+    await migrate(owner, [...EVENTSTORE_MIGRATIONS, ...AGENT_MIGRATIONS, ...REPORTING_MIGRATIONS, ...OPS_MIGRATIONS, ...EVIDENCE_MIGRATIONS, ...CHANNELS_MIGRATIONS]);
     if (appRole) {
       await owner.unsafe(appGrants(ident(appRole), SCHEMAS));
+      await owner.unsafe(channelsGrants(ident(appRole)));
       // A tenant request role that could see every tenant would defeat row-level security.
       await owner.unsafe(`REVOKE ${SYSTEM_SCOPE_ROLE} FROM ${appRole}`);
     }
@@ -71,6 +72,7 @@ export async function migrateCell(ownerUrl: string, appRole?: string, systemRole
         await owner.unsafe(`ALTER ROLE ${name} PASSWORD '${systemRole.password.replace(/'/g, "''")}'`);
       }
       await owner.unsafe(systemGrants(name, SCHEMAS));
+      await owner.unsafe(channelsGrants(name));
     }
   } finally { await owner.end(); }
 }
@@ -112,11 +114,11 @@ export class Cell {
     const s = (module: string, type: string) => `kuber.${cellId}.${module}.${type}.*`;
     // The broker carries sealed payloads; decrypt just before the module's handler runs.
     const opened = (h: (e: Envelope) => Promise<void>) => async (e: Envelope) => h(await openEnvelope(keyring, e, o.legacy ?? "reject"));
-    await bus.subscribe({ name: "gl", filter: [s("agent", "PostingRequested"), s("agent", "CorrectionRequested")], handler: opened(gl.handler) });
+    await bus.subscribe({ name: "gl", filter: [s("agent", "PostingRequested"), s("agent", "CorrectionRequested"), s("agent", "ProvisionalConfirmed")], handler: opened(gl.handler) });
     await bus.subscribe({ name: "agent", filter: [s("channels", "TransactionExtracted"), s("gl", "BookOpened"), s("gl", "AccountAdded"),
-      s("gl", "JournalPosted"), s("gl", "JournalReversed")], handler: opened(agent.handler) });
+      s("gl", "JournalPosted"), s("gl", "JournalReversed"), s("gl", "PostingRejected")], handler: opened(agent.handler) });
     await bus.subscribe({ name: "evidence", filter: [s("gl", "JournalPosted"), s("gl", "PeriodLocked")], handler: opened(evidence.handler) });
-    await bus.subscribe({ name: "reporting", filter: [s("gl", "BookOpened"), s("gl", "AccountAdded"), s("gl", "JournalPosted")], handler: opened(reporting.handler) });
+    await bus.subscribe({ name: "reporting", filter: [s("gl", "BookOpened"), s("gl", "AccountAdded"), s("gl", "JournalPosted"), s("gl", "JournalConfirmed")], handler: opened(reporting.handler) });
     return new Cell(cellId, sql, systemSql, store, bus, relay, gl, channels, agent, reporting, policies, ops, keyring, evidence);
   }
 

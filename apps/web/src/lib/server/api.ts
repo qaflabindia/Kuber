@@ -33,7 +33,9 @@ export interface Account { account_id: string; name: string; nature: "asset" | "
 export interface Line { accountId: string; amount: string; partyId?: string | null }
 export interface Journal { journal_id: string; seq: number; txn_date: string; narration: string; provisional: boolean; reverses: string | null; principal: string; lines: Line[] }
 export interface Draft {
-  draft_id: string; txn_id: string; book_id: string; status: "queued" | "awaiting_approval"; created_at: string;
+  draft_id: string; txn_id: string; book_id: string; status: "queued" | "awaiting_approval" | "rejected_by_gl"; created_at: string;
+  /** Why the ledger refused the posting, when status is rejected_by_gl. */
+  gl_rejection: string | null;
   proposal: { txnDate: string; narration: string; accountId: string; confidence: number; classifiedBy: string; partyName?: string | null;
     amount: string; direction: "in" | "out"; lines: Line[]; provisional: boolean };
   decision: { level: string; action: string; reasons: string[]; policyIds: string[]; approver: string };

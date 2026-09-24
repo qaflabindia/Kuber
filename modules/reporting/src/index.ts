@@ -51,6 +51,20 @@ ALTER TABLE reporting.lines ADD COLUMN voucher_type TEXT NOT NULL DEFAULT 'journ
 CREATE INDEX lines_closing ON reporting.lines (tenant_id, book_id, txn_date) WHERE voucher_type = 'closing';
 `,
 }, {
+  id: "reporting-004-confirmations",
+  sql: `
+-- Provisional journals confirmed by a statement line (JournalConfirmed). Kept separately as well as
+-- applied to lines, so a confirmation projected before its journal still takes effect.
+CREATE TABLE reporting.confirmations (
+  tenant_id TEXT NOT NULL, book_id TEXT NOT NULL, journal_id TEXT NOT NULL, source TEXT NOT NULL,
+  PRIMARY KEY (tenant_id, journal_id));
+ALTER TABLE reporting.confirmations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE reporting.confirmations FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON reporting.confirmations
+  USING (tenant_id = current_setting('kuber.tenant', true)) WITH CHECK (tenant_id = current_setting('kuber.tenant', true));
+CREATE POLICY system_scope ON reporting.confirmations TO kuber_system_scope USING (true) WITH CHECK (true);
+`,
+}, {
   id: "reporting-scale-001-journal-heads",
   // Recent journals are chosen from one row per journal (its first line) by seq, then only their
   // lines are read (F11); drill-through pages follow the (txn_date, seq, line_no) order.
@@ -76,7 +90,7 @@ export class Reporting {
   constructor(private sql: Sql, private store: EventStore) {}
 
   handler = async (env: Envelope): Promise<void> => {
-    if (!["BookOpened", "AccountAdded", "JournalPosted"].includes(env.type)) return;
+    if (!["BookOpened", "AccountAdded", "JournalPosted", "JournalConfirmed"].includes(env.type)) return;
     await once(this.store, "reporting", env, (tx) => this.project(tx, env));
   };
 
@@ -91,14 +105,23 @@ export class Reporting {
       }
       return;
     }
+    if (env.type === "JournalConfirmed") {
+      const c = env.data as EventData<"JournalConfirmed">;
+      await tx`INSERT INTO reporting.confirmations VALUES (${t}, ${c.bookId}, ${c.journalId}, ${c.source}) ON CONFLICT DO NOTHING`;
+      await tx`UPDATE reporting.lines SET provisional = false WHERE tenant_id = ${t} AND journal_id = ${c.journalId}`;
+      return;
+    }
     const d = env.data as EventData<"JournalPosted">;
+    const [conf] = d.provisional
+      ? await tx`SELECT 1 FROM reporting.confirmations WHERE tenant_id = ${t} AND journal_id = ${d.journalId}` : [];
+    const provisional = d.provisional && !conf;
     // Narrations are sealed; amounts, dates and account codes stay queryable for statements.
     const narration = (await this.store.keys(t)).seal(d.narration, narrationCtx(d.journalId));
     let i = 0;
     for (const l of d.lines) {
       i++;
       const ins = await tx`INSERT INTO reporting.lines VALUES (${t}, ${d.bookId}, ${d.journalId}, ${i}, ${d.seq}, ${d.txnDate}, ${l.accountId},
-               ${l.amount}, ${l.partyId ?? null}, ${tx.json(l.dimensions as never)}, ${narration}, ${d.provisional}, ${d.reverses ?? null},
+               ${l.amount}, ${l.partyId ?? null}, ${tx.json(l.dimensions as never)}, ${narration}, ${provisional}, ${d.reverses ?? null},
                ${env.meta.principal}, ${d.voucherType ?? "journal"}) ON CONFLICT DO NOTHING RETURNING 1`;
       if (!ins.length) continue;
       const amt = BigInt(l.amount);

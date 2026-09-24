@@ -16,27 +16,28 @@
 import type { TransactionSql } from "postgres";
 import { sha256, type Account } from "@kuber/contracts";
 import type { EventStore } from "@kuber/eventstore";
-import { emptyBook, evolve, type BookState, type JournalRecord } from "./book.ts";
+import { FOLD_SOURCE, type BookState, type JournalRecord } from "./book.ts";
 import { JournalMap } from "./journals.ts";
 
-const FORMAT = 1;
-export const BOOK_SNAPSHOT_SCHEMA = `book.${FORMAT}.${sha256(`${FORMAT}|${evolve.toString()}|${emptyBook.toString()}`).slice(0, 16)}`;
+/** Bump when the stored shape changes; the fingerprint covers changes to the fold code itself. */
+const FORMAT = 2;
+export const BOOK_SNAPSHOT_SCHEMA = `book.${FORMAT}.${sha256(`${FORMAT}|${FOLD_SOURCE()}`).slice(0, 16)}`;
 
 interface Stored {
   exists: boolean; bookId: string; entityId: string; accounts: Account[]; locks: BookState["locks"];
-  seq: number; lastHash: string; journals: [string, JournalRecord][]; link: string | null;
+  seq: number; version: number; lastHash: string; journals: [string, JournalRecord][]; link: string | null;
 }
 
 const ctxOf = (stream: string, version: number, schema: string) => `es.snapshots|${stream}|${version}|${schema}`;
 
 export function serialize(s: BookState, link: string | null): Stored {
   return { exists: s.exists, bookId: s.bookId, entityId: s.entityId, accounts: [...s.accounts.values()], locks: s.locks,
-    seq: s.seq, lastHash: s.lastHash, journals: [...s.journals.entries()], link };
+    seq: s.seq, version: s.version, lastHash: s.lastHash, journals: [...s.journals.entries()], link };
 }
 
 export function deserialize(d: Stored): BookState {
   return { exists: d.exists, bookId: d.bookId, entityId: d.entityId, accounts: new Map(d.accounts.map((a) => [a.accountId, a])),
-    locks: d.locks, seq: d.seq, lastHash: d.lastHash, journals: JournalMap.from(d.journals) };
+    locks: d.locks, seq: d.seq, version: d.version, lastHash: d.lastHash, journals: JournalMap.from(d.journals) };
 }
 
 /** Rough in-memory size of a state, for the byte-bounded cache. */
@@ -61,7 +62,7 @@ export class SnapshotStore {
     if (!r || r.schema !== this.schema || typeof r.state?.$c !== "string" || r.link === null) return null;
     try {
       const d = (await this.store.keys(tenantId)).openJson<Stored>(r.state.$c, ctxOf(stream, r.stream_version, this.schema));
-      if (d.link !== r.link) return null;
+      if (d.link !== r.link || d.version !== r.stream_version) return null;
       return { version: r.stream_version, state: deserialize(d) };
     } catch (e) {
       console.warn(JSON.stringify({ snapshot: "unusable", stream, error: (e as Error).message }));

@@ -5,6 +5,11 @@
  *   commit(id, hash) -> re-verify hash and book version, check authority, execute
  *   discard(id)      -> withdraw a proposal
  *
+ * Consistency (F03): commit checks the book version, claims the plan, records the approval and
+ * runs every action in ONE transaction under the book lock, so a plan is applied entirely or not
+ * at all, and nothing can land between the check and the effects. A retry after a failure finds
+ * the plan still proposed; a retry after success returns the recorded outcome (F04).
+ *
  * Authority: a person (any non-agent principal) may commit what they have seen. An agent may
  * commit only when the operation's gate is "policy" and the policy grants L3 or higher; everything
  * else waits for a person. Period operations (allocate, rebalance, close, carry-forward) are
@@ -14,6 +19,7 @@ import type { Sql } from "postgres";
 import { canonical, sha256, uuid, type EventData, type Line } from "@kuber/contracts";
 import { tenantRlsFor, type EventStore, type Migration } from "@kuber/eventstore";
 import { DomainError, type BookState } from "@kuber/gl";
+import { AgentError } from "@kuber/agent";
 import { isToken, type TenantKeys } from "@kuber/crypto";
 import { balancesFromState } from "./math.ts";
 import { OPERATIONS } from "./operations.ts";
@@ -36,6 +42,11 @@ CREATE TABLE ops.plans (
   PRIMARY KEY (tenant_id, plan_id));
 CREATE INDEX plans_open ON ops.plans (tenant_id, book_id, created_at DESC) WHERE status = 'proposed';
 ` + tenantRlsFor("ops"),
+}, {
+  id: "ops-002-basis-version",
+  // Plans are fenced on the book's full event version, not only its journal count: an account
+  // or lock added after simulation also invalidates the plan. NULL for plans made before this.
+  sql: `ALTER TABLE ops.plans ADD COLUMN basis_version INT;`,
 }, {
   id: "ops-scale-001-plan-pages",
   // Keyset pages of open plans (F11): newest first, plan id breaks ties.
@@ -78,18 +89,18 @@ export class Operations {
       planId: uuid(), op: def.name, bookId: book, kind: def.kind, gate: def.gate, title: d.title, summary: d.summary,
       policy: decision ? { ids: decision.policyIds, level: decision.level, approver: decision.approver, reasons: decision.reasons } : null,
       checks, journals, effects, sections: d.sections ?? [], data: d.data, notes: d.notes ?? [], links: d.links ?? [],
-      basisSeq: state.seq, createdAt: new Date().toISOString(), createdBy: principal, hash: "",
+      basisSeq: state.seq, basisVersion: state.version, createdAt: new Date().toISOString(), createdBy: principal, hash: "",
       status: committable ? "proposed" : "preview", blocked,
       needsPerson: def.gate === "human" || !decision || RANK[decision.level]! < 3,
     };
-    plan.hash = sha256(canonical({ op: plan.op, book, basisSeq: plan.basisSeq, actions: d.actions }));
+    plan.hash = sha256(canonical({ op: plan.op, book, basisSeq: plan.basisSeq, basisVersion: plan.basisVersion, actions: d.actions }));
     if (committable) {
       // Plans and their actions contain narrations and amounts: stored sealed, bound to the plan id.
       const keys = await this.store.keys(tenant);
       await this.store.tenantTx(tenant, (tx) => tx`
-        INSERT INTO ops.plans (tenant_id, plan_id, book_id, op, status, plan, actions, hash, basis_seq, created_by)
+        INSERT INTO ops.plans (tenant_id, plan_id, book_id, op, status, plan, actions, hash, basis_seq, basis_version, created_by)
         VALUES (${tenant}, ${plan.planId}, ${book}, ${plan.op}, 'proposed', ${tx.json(seal(keys, plan.planId, "plan", plan) as never)},
-                ${tx.json(seal(keys, plan.planId, "actions", d.actions) as never)}, ${plan.hash}, ${plan.basisSeq}, ${principal})`);
+                ${tx.json(seal(keys, plan.planId, "actions", d.actions) as never)}, ${plan.hash}, ${plan.basisSeq}, ${plan.basisVersion!}, ${principal})`);
     }
     return plan;
   }
@@ -140,52 +151,74 @@ export class Operations {
 
   /**
    * Commit exactly what was simulated. Returns awaiting_person when the caller lacks authority;
-   * marks the plan stale (and refuses) when the book moved since the simulation.
+   * marks the plan stale (and refuses) when the book moved since the simulation. Committing a plan
+   * that is already committed, with the same hash, returns its recorded outcome (a lost response
+   * can be retried safely).
    */
   async commit(tenant: string, planId: string, principal: string, hash: string) {
-    const [stored] = await this.store.tenantTx(tenant, (tx) => tx<{ plan: unknown; actions: unknown; status: string; hash: string; basis_seq: number; book_id: string }[]>`
-      SELECT plan, actions, status, hash, basis_seq, book_id FROM ops.plans WHERE tenant_id = ${tenant} AND plan_id = ${planId}`);
+    const [stored] = await this.store.tenantTx(tenant, (tx) => tx<{ plan: unknown; actions: unknown; status: string; hash: string; basis_seq: number; basis_version: number | null; book_id: string; result: { done?: string[] } | null }[]>`
+      SELECT plan, actions, status, hash, basis_seq, basis_version, book_id, result FROM ops.plans WHERE tenant_id = ${tenant} AND plan_id = ${planId}`);
     if (!stored) throw new OpsError("no_plan", `no plan ${planId}`, 404);
     const keys = await this.store.keys(tenant);
     const row = { ...stored, plan: open<Plan>(keys, planId, "plan", stored.plan), actions: open<Action[]>(keys, planId, "actions", stored.actions) };
+    if (row.status === "committed" && row.hash === hash) return { planId, status: "committed" as const, steps: row.result?.done ?? [], replayed: true };
     if (row.status !== "proposed") throw new OpsError("not_open", `plan is ${row.status}`);
     if (row.hash !== hash) throw new OpsError("hash_mismatch", "the plan you approved is not the plan on record; simulate again");
     if (row.plan.blocked) throw new OpsError("blocked", "a blocking check failed; resolve it and simulate again");
     if (isAgent(principal) && row.plan.needsPerson) {
       return { planId, status: "awaiting_person" as const, message: `A person must approve this ${row.plan.gate === "human" ? "period operation" : "plan"} in Kuber.` };
     }
-    const state = await this.svc.gl.state(tenant, row.book_id);
-    if (state.seq !== row.basis_seq) {
-      await this.store.tenantTx(tenant, (tx) => tx`UPDATE ops.plans SET status = 'stale' WHERE tenant_id = ${tenant} AND plan_id = ${planId} AND status = 'proposed'`);
-      throw new OpsError("stale", `the books changed since this was simulated (journal ${row.basis_seq} → ${state.seq}); simulate again`);
-    }
-    // The approval is a fact before anything runs: who committed which hash. Every action carries
-    // the plan id as its command id, so the journals it posts link back here (evidence, 14.7).
     const p = row.plan;
-    await this.store.append("ops", tenant, { streamId: `${tenant}/plan/${planId}`, expected: "any", events: [{ type: "PlanApproved", data: {
-      planId, bookId: row.book_id, op: p.op, hash: row.hash, basisSeq: row.basis_seq, gate: p.gate, needsPerson: p.needsPerson,
-      actions: row.actions.length, preparedBy: p.createdBy, policy: p.policy as EventData<"PlanApproved">["policy"] } }] }, { principal, commandId: planId, policyIds: p.policy?.ids });
-    const done: string[] = [];
+    let out: { steps: string[]; replayed?: true };
     try {
-      for (const a of row.actions) {
-        if (a.type === "gl") {
-          await this.svc.gl.execute(tenant, row.book_id, a.command, { principal, commandId: planId });
-          done.push(a.command.kind === "PostJournal" ? `posted ${a.command.journalId}` : a.command.kind === "LockPeriod" ? `locked ${a.command.level} to ${a.command.periodEnd}` : `added ${a.command.account.accountId}`);
-        } else {
-          await this.svc.agent.approveDraft(tenant, a.draftId, principal, a.accountId, planId);
-          done.push(`approved ${a.draftId}`);
+      out = await this.svc.gl.transact(tenant, row.book_id, async (b) => {
+        // Claim the plan first, under the book lock and a row lock: a concurrent commit or discard
+        // waits here, then finds it resolved (a commit that raced this one returns its outcome).
+        const [cur] = await b.tx<{ status: string; result: { done?: string[] } | null }[]>`
+          SELECT status, result FROM ops.plans WHERE tenant_id = ${tenant} AND plan_id = ${planId} FOR UPDATE`;
+        if (cur!.status === "committed") return { steps: cur!.result?.done ?? [], replayed: true as const };
+        if (cur!.status !== "proposed") throw new OpsError("not_open", `plan is ${cur!.status}`);
+        // Nothing can post between this check and the actions below.
+        const moved = row.basis_version !== null ? b.version !== row.basis_version : b.state.seq !== row.basis_seq;
+        if (moved) throw new OpsError("stale", row.basis_version !== null
+          ? `the books changed since this was simulated (version ${row.basis_version} → ${b.version}); simulate again`
+          : `the books changed since this was simulated (journal ${row.basis_seq} → ${b.state.seq}); simulate again`);
+        await b.tx`UPDATE ops.plans SET status = 'committed', resolved_by = ${principal}, resolved_at = now()
+          WHERE tenant_id = ${tenant} AND plan_id = ${planId}`;
+        // The approval is a fact alongside its effects: who committed which hash. Every action carries
+        // the plan id as its command id, so the journals it posts link back here (evidence, 14.7).
+        await this.store.append("ops", tenant, { streamId: `${tenant}/plan/${planId}`, expected: "any", events: [{ type: "PlanApproved", data: {
+          planId, bookId: row.book_id, op: p.op, hash: row.hash, basisSeq: row.basis_seq, ...(row.basis_version !== null ? { basisVersion: row.basis_version } : {}),
+          gate: p.gate, needsPerson: p.needsPerson, actions: row.actions.length, preparedBy: p.createdBy, policy: p.policy as EventData<"PlanApproved">["policy"] } }] },
+          { principal, commandId: planId, policyIds: p.policy?.ids }, b.tx);
+        const steps: string[] = [];
+        for (const a of row.actions) {
+          if (a.type === "gl") {
+            await b.execute(a.command, { principal, commandId: planId });
+            steps.push(a.command.kind === "PostJournal" ? `posted ${a.command.journalId}` : a.command.kind === "LockPeriod" ? `locked ${a.command.level} to ${a.command.periodEnd}` : `added ${a.command.account.accountId}`);
+          } else {
+            // Draft approvals are atomic with the plan; the posting itself is the GL's decision and
+            // shows on the draft (approved -> posted, or back to review with the GL's reason).
+            await this.svc.agent.approveDraft(tenant, a.draftId, principal, a.accountId, planId, b.tx);
+            steps.push(`requested posting of ${a.draftId}`);
+          }
         }
-      }
+        await b.tx`UPDATE ops.plans SET result = ${b.tx.json({ done: steps } as never)} WHERE tenant_id = ${tenant} AND plan_id = ${planId}`;
+        return { steps };
+      });
     } catch (e) {
-      // Actions are idempotent (deterministic ids), so a retry after a fix resumes safely.
+      if (e instanceof OpsError && e.code === "stale") {
+        await this.store.tenantTx(tenant, (tx) => tx`UPDATE ops.plans SET status = 'stale' WHERE tenant_id = ${tenant} AND plan_id = ${planId} AND status = 'proposed'`);
+        throw e;
+      }
+      if (e instanceof OpsError) throw e;
+      // Nothing was applied: the plan is still proposed, and committing it again is safe.
       const msg = e instanceof Error ? e.message : String(e);
-      await this.store.tenantTx(tenant, (tx) => tx`UPDATE ops.plans SET result = ${tx.json({ done, error: msg } as never)} WHERE tenant_id = ${tenant} AND plan_id = ${planId}`);
-      throw new OpsError(e instanceof DomainError ? e.code : "commit_failed", `${msg} (after ${done.length} of ${row.actions.length} steps)`);
+      await this.store.tenantTx(tenant, (tx) => tx`UPDATE ops.plans SET result = ${tx.json({ error: msg } as never)}
+        WHERE tenant_id = ${tenant} AND plan_id = ${planId} AND status = 'proposed'`);
+      throw new OpsError(e instanceof DomainError || e instanceof AgentError ? e.code : "commit_failed", `${msg} (nothing was applied; the plan is still open)`);
     }
-    await this.store.tenantTx(tenant, (tx) => tx`
-      UPDATE ops.plans SET status = 'committed', resolved_by = ${principal}, resolved_at = now(), result = ${tx.json({ done } as never)}
-      WHERE tenant_id = ${tenant} AND plan_id = ${planId}`);
-    return { planId, status: "committed" as const, steps: done };
+    return { planId, status: "committed" as const, steps: out.steps, ...(out.replayed ? { replayed: true as const } : {}) };
   }
 }
 
