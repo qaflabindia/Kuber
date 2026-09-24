@@ -6,7 +6,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DIR="${KUBER_HOME:-$HOME/.kuber}"
-[ -f "$DIR/secrets.env" ] || ./scripts/secure-setup.sh
+# Always: idempotent, and adds secrets introduced after the first setup (e.g. SYSTEM_DB_PASSWORD).
+./scripts/secure-setup.sh >/dev/null
 set -a; . "$DIR/secrets.env"; set +a
 export KUBER_HOME="$DIR"
 
