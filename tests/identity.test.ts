@@ -83,8 +83,9 @@ describe("role permissions", () => {
   const expected: Record<Role, Action[]> = {
     owner: [...ACTIONS],
     controller: ACTIONS.filter((a) => a !== "members.manage" && a !== "settings.manage"),
-    preparer: ["read", "capture", "plan.prepare", "copilot"],
-    approver: ["read", "draft.decide", "journal.ratify", "plan.prepare", "plan.approve", "plan.discard", "copilot"],
+    // FIN-MDM-03: a preparer is the maker of party changes; an approver verifies and releases them.
+    preparer: ["read", "capture", "plan.prepare", "copilot", "party.manage"],
+    approver: ["read", "draft.decide", "journal.ratify", "plan.prepare", "plan.approve", "plan.discard", "copilot", "party.bank.verify", "party.bank.release"],
     auditor: ["read", "members.read"],
     member: ["read", "capture", "plan.prepare", "copilot"],
   };

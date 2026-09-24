@@ -13,10 +13,13 @@
 import { z } from "zod";
 import { IsoDate, parseAmount, stableId, type Line } from "@kuber/contracts";
 import { validateJournal, type BookState } from "@kuber/gl";
-import { balancesFromState, financialYear, latestTxnDate, openProvisional, pctToBp, rebalanceTransfers, splitByWeights } from "./math.ts";
+import { balancesFromState, financialYear as fyOf, fiscalStart, latestTxnDate, openProvisional, pctToBp, rebalanceTransfers, splitByWeights } from "./math.ts";
 import type { Action, Check, Draft, OpContext, OpDef, Section } from "./types.ts";
 
 // ---------------------------------------------------------------- shared helpers
+/** The fiscal year containing `iso` under the book's configured start month (FIN-MDM-01). */
+const fyFor = (s: BookState, iso: string) => fyOf(iso, fiscalStart(s));
+const dayAfter = (iso: string) => { const d = new Date(`${iso}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); };
 const Rupees = z.union([z.string(), z.number()]).transform((v, c) => {
   try { const p = parseAmount(String(v)); if (p <= 0n) throw new Error(); return p; }
   catch { c.addIssue({ code: "custom", message: `not a positive amount: ${v}` }); return z.NEVER; }
@@ -63,6 +66,7 @@ const RecordInput = z.object({
   account: AccountId.describe("where it belongs, e.g. LIVING, BIZEXP, SALARY, LOANS"),
   via: AccountId.default("BANK").describe("the money account: BANK, CASH or CARD"),
   dimensions: z.record(z.string(), z.string()).optional(),
+  party: z.string().min(1).max(200).optional().describe("the vendor or customer (party master id), e.g. to pay a supplier through CREDITORS"),
 });
 
 export const record: OpDef<z.infer<typeof RecordInput>> = {
@@ -75,14 +79,15 @@ export const record: OpDef<z.infer<typeof RecordInput>> = {
     requireAccount(s, i.account, checks, "Category"); requireAccount(s, i.via, checks, "Money account");
     checks.push({ label: "Not the suspense account", ok: i.account !== "SUSPENSE", blocking: true });
     const dims = i.dimensions ?? {};
+    const party = i.party ? { partyId: i.party } : {};
     const lines: Line[] = i.direction === "out"
-      ? [{ accountId: i.account, amount: i.amount.toString(), dimensions: dims }, { accountId: i.via, amount: (-i.amount).toString(), dimensions: {} }]
-      : [{ accountId: i.via, amount: i.amount.toString(), dimensions: {} }, { accountId: i.account, amount: (-i.amount).toString(), dimensions: dims }];
+      ? [{ accountId: i.account, amount: i.amount.toString(), ...party, dimensions: dims }, { accountId: i.via, amount: (-i.amount).toString(), dimensions: {} }]
+      : [{ accountId: i.via, amount: i.amount.toString(), dimensions: {} }, { accountId: i.account, amount: (-i.amount).toString(), ...party, dimensions: dims }];
     if (checks.every((c) => c.ok)) validates(s, date, lines, checks);
     return {
       title: `${i.direction === "out" ? "Pay" : "Receive"} ${rs(i.amount)}`,
       summary: `${i.narration}: ${rs(i.amount)} ${i.direction === "out" ? "out of" : "into"} ${name(s, i.via)}, recorded as ${name(s, i.account)} on ${date}.`,
-      actions: [post(jid(ctx, `record/${date}/${i.narration}/${i.amount}/${i.direction}/${i.account}/${i.via}`, 0), date, i.narration, lines)],
+      actions: [post(jid(ctx, `record/${date}/${i.narration}/${i.amount}/${i.direction}/${i.account}/${i.via}${i.party ? `/${i.party}` : ""}`, 0), date, i.narration, lines)],
       checks, amountPaise: i.amount,
     };
   },
@@ -161,6 +166,10 @@ export const balance: OpDef<{ asOf?: string }> = {
       { label: "No automatic postings to confirm", ok: ratifs === 0, blocking: false, detail: ratifs ? `${ratifs} to confirm` : undefined },
       { label: "No entries awaiting a statement", ok: provisional === 0, blocking: false, detail: provisional ? `${provisional} provisional` : undefined },
     ];
+    // FIN-MDM-02: every account maps to a statement line; an unmapped one is an exception to fix.
+    const unmapped = [...s.accounts.values()].filter((a) => !a.taxonomyTag?.trim()).map((a) => a.accountId).sort();
+    checks.push({ label: "Every account maps to a statement line", ok: unmapped.length === 0, blocking: false,
+      detail: unmapped.length ? `unmapped: ${unmapped.join(", ")}` : undefined });
     const allOk = checks.every((c) => c.ok);
     return {
       title: allOk ? "Books are in order" : checks.some((c) => !c.ok && c.blocking) ? "Books are out of balance" : "Books balance; some items are open",
@@ -325,7 +334,7 @@ export const rebalance: OpDef<z.infer<typeof RebalanceInput>> = {
 };
 
 // ---------------------------------------------------------------- period
-const CloseInput = z.object({ periodEnd: IsoDate.describe("last day of the period; a 31 March end also closes the financial year") });
+const CloseInput = z.object({ periodEnd: IsoDate.describe("last day of the period; the last day of the book's fiscal year (31 March by default) also closes the year") });
 
 export const close: OpDef<z.infer<typeof CloseInput>> = {
   name: "close", title: "Close a period", kind: "write", gate: "human", event: "EVT-PERIOD-END",
@@ -333,8 +342,8 @@ export const close: OpDef<z.infer<typeof CloseInput>> = {
   input: CloseInput,
   async plan(ctx, i) {
     const s = ctx.state, checks: Check[] = [], actions: Action[] = [];
-    const yearEnd = i.periodEnd.slice(5) === "03-31";
-    const fy = financialYear(i.periodEnd);
+    const fy = fyFor(s, i.periodEnd);
+    const yearEnd = i.periodEnd === fy.to;
     const hard = s.locks.filter((l) => l.level === "hard").map((l) => l.periodEnd).sort().at(-1);
     checks.push({ label: "Period has ended", ok: i.periodEnd < ctx.today, blocking: true, detail: i.periodEnd < ctx.today ? undefined : `ends ${i.periodEnd}; today is ${ctx.today}` });
     checks.push({ label: "Not already closed", ok: !hard || hard < i.periodEnd, blocking: true, detail: hard ? `closed up to ${hard}` : undefined });
@@ -386,10 +395,12 @@ export const close: OpDef<z.infer<typeof CloseInput>> = {
 export const carryForward: OpDef<{ yearEnd: string }> = {
   name: "carry_forward", title: "Carry forward to the new year", kind: "write", gate: "human", event: "EVT-PERIOD-END",
   description: "Open the next financial year from a closed one: verifies the closing voucher emptied income and expenses, and that the new year's opening balance sheet equals the closed year's closing balance sheet, then records the sign-off. The ledger is continuous, so balances are not re-posted.",
-  input: z.object({ yearEnd: IsoDate.refine((d) => d.slice(5) === "03-31", "a financial year ends on 31 March") }),
+  input: z.object({ yearEnd: IsoDate }),
   async plan(ctx, i) {
     const s = ctx.state, checks: Check[] = [];
-    const fy = financialYear(i.yearEnd), next = financialYear(`${Number(i.yearEnd.slice(0, 4))}-04-01`);
+    const fy = fyFor(s, i.yearEnd), next = fyFor(s, dayAfter(i.yearEnd));
+    // FIN-MDM-01: the year end is the book's configured fiscal year end (31 March unless configured).
+    checks.push({ label: "Date is the fiscal year end", ok: i.yearEnd === fy.to, blocking: true, detail: i.yearEnd === fy.to ? undefined : `${fy.label} ends ${fy.to}` });
     const closed = s.locks.some((l) => l.level === "hard" && l.periodEnd >= i.yearEnd);
     const voucher = [...s.journals.values()].some((j) => j.voucherType === "closing" && j.txnDate === i.yearEnd);
     checks.push({ label: `${fy.label} is closed and locked`, ok: closed, blocking: true, detail: closed ? undefined : `close ${fy.label} first` });
@@ -419,7 +430,7 @@ export const report: OpDef<z.infer<typeof ReportInput>> = {
   description: "Income and expenses, balance sheet, trial balance or statement of affairs for a period. Figures are in paise.",
   input: ReportInput,
   async plan(ctx, i) {
-    const fy = financialYear(ctx.today);
+    const fy = fyFor(ctx.state, ctx.today);
     const from = i.from ?? fy.from, to = i.to ?? fy.to;
     const r = ctx.svc.reporting;
     const st = i.kind === "profit-and-loss" ? await r.profitAndLoss(ctx.tenant, ctx.book, from, to)
@@ -439,7 +450,7 @@ export const report: OpDef<z.infer<typeof ReportInput>> = {
 
 /** Figures shared by dashboard and simulate, computed from a book state. */
 function figures(s: BookState, today: string) {
-  const fy = financialYear(today);
+  const fy = fyFor(s, today);
   const all = balancesFromState(s);
   const year = balancesFromState(s, { from: fy.from, to: fy.to, excludeVoucher: "closing" });
   const sum = (m: Map<string, bigint>, pred: (n: string, id: string) => boolean) =>
@@ -511,7 +522,7 @@ export const simulate: OpDef<z.infer<typeof SimInput>> = {
     const after = figures({ ...s, journals: hypo }, ctx.today);
     const mi = i.monthlyChange?.income ? parseAmount(String(i.monthlyChange.income)) : 0n;
     const me = i.monthlyChange?.expenses ? parseAmount(String(i.monthlyChange.expenses)) : 0n;
-    const monthly = await ctx.svc.reporting.monthly(ctx.tenant, ctx.book, financialYear(ctx.today).from, "9999-12-31");
+    const monthly = await ctx.svc.reporting.monthly(ctx.tenant, ctx.book, fyFor(s, ctx.today).from, "9999-12-31");
     const months = new Set(monthly.map((m) => m.month)).size || 1;
     const baseNet = monthly.reduce((a, m) => a + (m.nature === "income" ? -m.net : m.nature === "expense" ? -m.net : 0n), 0n) / BigInt(months);
     const projNet = baseNet + mi - me;

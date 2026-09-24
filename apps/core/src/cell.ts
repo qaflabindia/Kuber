@@ -8,7 +8,7 @@ import { DeadLetterStore, EVENTSTORE_MIGRATIONS, EventStore, LIFECYCLE_MIGRATION
 import { Keyring, type Kms } from "@kuber/crypto";
 import type { Envelope } from "@kuber/contracts";
 import { MemoryBus, NatsBus, busPartitions, type Bus } from "@kuber/bus";
-import { GeneralLedger } from "@kuber/gl";
+import { GeneralLedger, PARTY_MIGRATIONS, PartyMaster } from "@kuber/gl";
 import { PolicyEngine } from "@kuber/policy";
 import { CHANNELS_MIGRATIONS, Channels, channelsGrants } from "@kuber/channels";
 import { AGENT_MIGRATIONS, Agent, type LlmClassifier } from "@kuber/agent";
@@ -49,7 +49,7 @@ export interface CellOptions {
   identity?: Partial<IdentityOptions>;
 }
 
-const SCHEMAS = ["es", "agent", "reporting", "ops", "keys", "evidence", "channels", "identity"];
+const SCHEMAS = ["es", "agent", "reporting", "ops", "keys", "evidence", "channels", "identity", "mdm"];
 const ident = (role: string) => { if (!/^[a-z_][a-z0-9_]*$/.test(role)) throw new Error(`invalid role name ${role}`); return role; };
 
 /**
@@ -59,7 +59,7 @@ const ident = (role: string) => { if (!/^[a-z_][a-z0-9_]*$/.test(role)) throw ne
 export async function migrateCell(ownerUrl: string, appRole?: string, systemRole?: CellOptions["systemRole"]) {
   const owner = postgres(ownerUrl, { max: 1, onnotice: () => undefined });
   try {
-    await migrate(owner, [...EVENTSTORE_MIGRATIONS, ...LIFECYCLE_MIGRATIONS, ...AGENT_MIGRATIONS, ...REPORTING_MIGRATIONS, ...OPS_MIGRATIONS, ...EVIDENCE_MIGRATIONS, ...CHANNELS_MIGRATIONS, ...IDENTITY_MIGRATIONS]);
+    await migrate(owner, [...EVENTSTORE_MIGRATIONS, ...LIFECYCLE_MIGRATIONS, ...AGENT_MIGRATIONS, ...REPORTING_MIGRATIONS, ...OPS_MIGRATIONS, ...EVIDENCE_MIGRATIONS, ...CHANNELS_MIGRATIONS, ...IDENTITY_MIGRATIONS, ...PARTY_MIGRATIONS]);
     if (appRole) {
       await owner.unsafe(appGrants(ident(appRole), SCHEMAS));
       await owner.unsafe(channelsGrants(ident(appRole)));
@@ -85,6 +85,8 @@ export class Cell {
   /** Module handlers by consumer name (plaintext envelopes), for dead-letter retry. */
   consumers: Record<string, (e: Envelope) => Promise<void>> = {};
   deadLetters!: DeadLetterStore;
+  /** Party master (FIN-MDM-03): vendors and customers, bank-detail changes and payment holds. */
+  parties!: PartyMaster;
 
   private constructor(
     public readonly cellId: string, public readonly sql: Sql, private readonly systemSql: Sql, public readonly store: EventStore, public readonly bus: Bus,
@@ -122,11 +124,15 @@ export class Cell {
     // Memberships, passkeys and the authorization guard every operation passes through (F01/F02).
     // It also guards the agent's decisions and channel submissions at the module boundary.
     const identity = new Identity(store, policies, { rpId: "localhost", origins: ["http://localhost:3000"], ...o.identity });
-    const gl = new GeneralLedger(store);
+    // Parties are master data of the GL: a journal may not name another legal entity's party (FIN-MDM-01).
+    const parties = new PartyMaster(store, identity, policies, o.clock);
+    const gl = new GeneralLedger(store, { partyEntities: (t, ids, tx) => parties.entities(t, ids, tx) });
     const channels = new Channels(store, identity);
     const agent = new Agent(sql, store, policies, o.clock, o.classifier, identity);
     const reporting = new Reporting(sql, store);
-    const ops = new Operations(sql, store, { gl, reporting, agent, policies }, o.clock, identity);
+    // Payments to a party with an unreleased bank-detail change are held (POL-501), in plans and in drafts.
+    agent.paymentHolds = (t, ids, tx) => parties.holds(t, ids, tx);
+    const ops = new Operations(sql, store, { gl, reporting, agent, policies, parties }, o.clock, identity);
     const evidence = new EvidenceService(store);
 
     const s = (module: string, type: string) => `kuber.${cellId}.${module}.${type}.*`;
@@ -136,10 +142,11 @@ export class Cell {
     await bus.subscribe({ name: "agent", filter: [s("channels", "TransactionExtracted"), s("gl", "BookOpened"), s("gl", "AccountAdded"),
       s("gl", "JournalPosted"), s("gl", "JournalReversed"), s("gl", "PostingRejected")], handler: opened(agent.handler) });
     await bus.subscribe({ name: "evidence", filter: [s("gl", "JournalPosted"), s("gl", "PeriodLocked")], handler: opened(evidence.handler) });
-    await bus.subscribe({ name: "reporting", filter: [s("gl", "BookOpened"), s("gl", "AccountAdded"), s("gl", "JournalPosted"), s("gl", "JournalConfirmed")], handler: opened(reporting.handler) });
+    await bus.subscribe({ name: "reporting", filter: [s("gl", "BookOpened"), s("gl", "AccountAdded"), s("gl", "AccountControlsChanged"), s("gl", "JournalPosted"), s("gl", "JournalConfirmed")], handler: opened(reporting.handler) });
     const cell = new Cell(cellId, sql, systemSql, store, bus, relay, gl, channels, agent, reporting, policies, ops, keyring, evidence, identity);
     cell.consumers = { gl: gl.handler, agent: agent.handler, evidence: evidence.handler, reporting: reporting.handler };
     cell.deadLetters = deadLetters;
+    cell.parties = parties;
     return cell;
   }
 
