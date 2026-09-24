@@ -13,6 +13,7 @@ const TYPES = ["individual", "household", "freelancer", "company"];
 export const actions: Actions = {
   default: async ({ request, locals, cookies }) => {
     const s = locals.session!;
+    if (s.role !== "owner" && s.role !== "controller") return fail(403, { message: "Only an owner or controller can open books. Ask your workspace owner." });
     const f = await request.formData();
     const entityType = String(f.get("type") ?? "");
     if (!TYPES.includes(entityType)) return fail(400, { message: "Choose who these books are for." });

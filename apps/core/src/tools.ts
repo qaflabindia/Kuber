@@ -7,7 +7,8 @@ import { z } from "zod";
 import type { Plan } from "@kuber/ops";
 import type { Cell } from "./cell.ts";
 
-export interface Who { tenant: string; book: string; principal: string }
+/** Who a tool acts as. `book` bounds every call (an MCP grant is for one book); `onBehalfOf` is the person the copilot works for. */
+export interface Who { tenant: string; book: string; principal: string; onBehalfOf?: string }
 export interface ToolResult { text: string; plan?: Plan; data?: unknown; isError?: boolean }
 export interface ToolSpec {
   name: string; title: string; description: string; inputSchema: Record<string, unknown>; readOnly: boolean;
@@ -46,7 +47,7 @@ export function kuberTools(cell: Cell, who: Who): ToolSpec[] {
       description: o.description + (o.kind === "write" ? WRITE_SUFFIX : "") + (o.gate === "human" ? " Always needs a person's approval." : ""),
       inputSchema: z.toJSONSchema(def.input as z.ZodType, { io: "input", unrepresentable: "any" }) as Record<string, unknown>,
       async run(args) {
-        const p = await cell.ops.plan(who.tenant, who.book, who.principal, o.name, args);
+        const p = await cell.ops.plan(who.tenant, who.book, who.principal, o.name, args, { onBehalfOf: who.onBehalfOf });
         return { text: planText(p), plan: p };
       },
     };
@@ -68,6 +69,9 @@ export function kuberTools(cell: Cell, who: Who): ToolSpec[] {
       inputSchema: { type: "object", properties: { planId: { type: "string" }, hash: { type: "string" } }, required: ["planId", "hash"] },
       async run(args) {
         const b = z.object({ planId: z.string(), hash: z.string() }).parse(args);
+        // A grant is for one book: a plan of another book is refused even with its id and hash (A12).
+        const p = await cell.ops.get(who.tenant, b.planId);
+        if (p.bookId !== who.book) throw new Error(`plan ${b.planId} is not in book ${who.book}`);
         const r = await cell.ops.commit(who.tenant, b.planId, who.principal, b.hash);
         return { text: r.status === "committed" ? `Committed: ${r.steps.join(", ")}` : r.message, data: r };
       },

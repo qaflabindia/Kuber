@@ -92,6 +92,14 @@ services:
       KUBER_MCP_TOKENS: ${KUBER_MCP_TOKENS:-}
       # External MCP servers the copilot may read from (optional): [{"name": "...", "url": "...", "allow": [...]}]
       KUBER_MCP_SERVERS: ${KUBER_MCP_SERVERS:-}
+      # The web tier signs every request with this secret; the core refuses unsigned requests (F01).
+      CORE_AUTH_SECRET: ${CORE_AUTH_SECRET:?run ./scripts/secure-setup.sh to add it}
+      # Passkeys: the relying party is the web origin the browser sees.
+      WEBAUTHN_ORIGIN: ${WEBAUTHN_ORIGIN:-http://localhost:3000}
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
+      # Development sign-in without a passkey: off unless set to "true" (and refused in production).
+      KUBER_DEV_SIGNIN: ${KUBER_DEV_SIGNIN:-false}
+      NODE_ENV: production
     volumes:
       - ${KUBER_HOME:?missing}/master.keys:/kuber/master.keys:ro
       - ${KUBER_HOME:?missing}/certs:/certs:ro
@@ -109,6 +117,8 @@ services:
       NODE_EXTRA_CA_CERTS: /certs/ca.crt
       ORIGIN: http://localhost:3000
       SESSION_SECRET: ${SESSION_SECRET:?missing}
+      CORE_AUTH_SECRET: ${CORE_AUTH_SECRET:?run ./scripts/secure-setup.sh to add it}
+      KUBER_DEV_SIGNIN: "false"
     volumes: ["${KUBER_HOME:?missing}/certs/ca.crt:/certs/ca.crt:ro"]
     ports: ["127.0.0.1:3000:3000"]
     depends_on:

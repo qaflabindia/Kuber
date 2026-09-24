@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 DIR="${KUBER_HOME:-$HOME/.kuber}"
 [ -f "$DIR/secrets.env" ] || { echo "No secrets yet. Run: ./scripts/secure-setup.sh"; exit 1; }
-# Secrets introduced after setup (for example SYSTEM_DB_PASSWORD) are added in place.
-grep -q "^SYSTEM_DB_PASSWORD=" "$DIR/secrets.env" || ./scripts/secure-setup.sh >/dev/null
+# Secrets introduced after setup (SYSTEM_DB_PASSWORD, CORE_AUTH_SECRET) are added in place.
+{ grep -q "^SYSTEM_DB_PASSWORD=" "$DIR/secrets.env" && grep -q "^CORE_AUTH_SECRET=" "$DIR/secrets.env"; } || ./scripts/secure-setup.sh >/dev/null
 export KUBER_HOME="$DIR"
 exec docker compose --env-file "$DIR/secrets.env" "$@"

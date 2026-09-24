@@ -59,3 +59,32 @@ export async function startCell(clockDate: { value: string }, extra: Partial<Par
     clock: () => clockDate.value, kms: new MemoryKms(), ...extra });
   return { cell, db, stop: async () => { await cell.close(); await db.drop(); } };
 }
+
+// ---------------------------------------------------------------- identity (F01/F02)
+import type { FastifyInstance, InjectOptions } from "fastify";
+import { AUTH_HEADER, authKey, signRequest } from "@kuber/auth";
+
+/** Shared BFF-core secret for tests: pass as buildServer(cell, { auth: { secret: CORE_AUTH_SECRET } }). */
+export const CORE_AUTH_SECRET = "test-core-auth-secret-0123456789abcdef";
+
+/** Make principals active members of a tenant (owner, controller, ... or agent:<name>), optionally book-scoped. */
+export async function enrol(cell: Cell, tenant: string, principals: string[], books: string[] | null = null) {
+  for (const principal of principals) await cell.identity.addMember(tenant, "operator:test", { principal, books });
+}
+
+export interface SignedRequest {
+  method: "GET" | "POST" | "PUT" | "DELETE"; url: string; tenant: string | null; principal: string | null;
+  payload?: unknown; contentType?: string; headers?: Record<string, string>;
+}
+/** app.inject, signed the way the BFF signs requests to the core. */
+export function signedInject(app: FastifyInstance, secret = CORE_AUTH_SECRET) {
+  const key = authKey(secret);
+  return (r: SignedRequest) => {
+    const body = r.payload === undefined ? undefined : typeof r.payload === "string" ? r.payload : JSON.stringify(r.payload);
+    const headers: Record<string, string> = {
+      [AUTH_HEADER]: signRequest(key, { method: r.method, path: r.url, body, tenant: r.tenant, principal: r.principal }),
+      ...(body !== undefined ? { "content-type": r.contentType ?? "application/json" } : {}), ...r.headers,
+    };
+    return app.inject({ method: r.method, url: r.url, headers, ...(body !== undefined ? { payload: body } : {}) } as InjectOptions);
+  };
+}

@@ -10,7 +10,7 @@ import { uuid, type EventData } from "@kuber/contracts";
 import { KeyAdmin, type Cell } from "@kuber/core";
 import type { Evidence } from "@kuber/evidence";
 import type { Plan } from "@kuber/ops";
-import { ROOT, startCell } from "./helpers.ts";
+import { ROOT, enrol, startCell } from "./helpers.ts";
 
 const T = "meera", B = "main", OWNER = "owner:meera";
 const clock = { value: "2026-10-25" };
@@ -29,6 +29,8 @@ let postPlan: Plan, recordPlan: Plan, closePlan: Plan;
 beforeAll(async () => {
   let db: { ownerUrl: string };
   ({ cell, stop, db } = await startCell(clock));
+  await enrol(cell, T, [OWNER]);                                   // the only person: explicit single-owner exception
+  await cell.identity.setSettings(T, OWNER, { soloOwner: true, sodLimitPaise: null });
   ownerUrl = db.ownerUrl;
   await cell.gl.openBook(T, B, "meera", "freelancer", OWNER);
   await cell.gl.execute(T, B, { kind: "PostJournal", journalId: uuid(), txnDate: "2026-09-30", narration: "Opening BANK", voucherType: "opening",

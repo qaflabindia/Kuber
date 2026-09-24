@@ -63,6 +63,8 @@ export interface Plan {
   checks: Check[]; journals: PlanJournal[]; effects: Effect[]; sections: Section[]; data?: unknown;
   notes: string[]; links: [string, string][];
   basisSeq: number; createdAt: string; createdBy: string; hash: string;
+  /** The person on whose instruction an agent (the copilot) prepared this plan; used for separation of duties. */
+  requestedBy?: string;
   status: "preview" | "proposed" | "committed" | "discarded" | "stale";
   blocked: boolean;
   /** Who may commit: a person always; an agent only when policy grants L3+ and the gate is "policy". */
@@ -82,3 +84,20 @@ export interface OpDef<I = unknown> {
 }
 
 export type Accounts = Map<string, Account>;
+
+/**
+ * Authorization for the operations service (finding F02). Every plan, commit and discard is
+ * checked before anything is read or written; the implementation (the identity module) resolves
+ * the principal's membership, role and book scope and enforces separation of duties. Throws when
+ * the step is not allowed.
+ */
+export type OpsStep = "plan" | "commit" | "discard";
+export interface OpsGuardQuery {
+  step: OpsStep; tenant: string; book: string; principal: string;
+  op: Pick<OpDef, "name" | "kind" | "gate">;
+  /** The stored plan (commit and discard). */
+  plan?: Plan;
+  /** When an agent acts for a person (the copilot), that person's principal. */
+  onBehalfOf?: string;
+}
+export interface OpsGuard { check(q: OpsGuardQuery): Promise<void> }

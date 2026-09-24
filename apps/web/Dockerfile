@@ -4,8 +4,10 @@ WORKDIR /app
 RUN corepack enable
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
 COPY apps/web/package.json apps/web/
+COPY packages/auth/package.json packages/auth/
 RUN pnpm install --frozen-lockfile --filter @kuber/web...
 COPY apps/web apps/web
+COPY packages/auth packages/auth
 # adapter-node bundles server code; fonts are compiled into client assets, so the runtime needs no node_modules.
 RUN cd apps/web && npx svelte-kit sync && npx vite build && mkdir -p /out && cp -r build package.json /out/
 

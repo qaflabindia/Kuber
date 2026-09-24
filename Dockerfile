@@ -7,6 +7,7 @@ COPY packages/contracts/package.json packages/contracts/
 COPY packages/eventstore/package.json packages/eventstore/
 COPY packages/bus/package.json packages/bus/
 COPY packages/crypto/package.json packages/crypto/
+COPY packages/auth/package.json packages/auth/
 COPY modules/gl/package.json modules/gl/
 COPY modules/policy/package.json modules/policy/
 COPY modules/channels/package.json modules/channels/
@@ -14,6 +15,7 @@ COPY modules/agent/package.json modules/agent/
 COPY modules/reporting/package.json modules/reporting/
 COPY modules/ops/package.json modules/ops/
 COPY modules/evidence/package.json modules/evidence/
+COPY modules/identity/package.json modules/identity/
 COPY apps/core/package.json apps/core/
 COPY apps/web/package.json apps/web/
 RUN pnpm install --frozen-lockfile

@@ -15,7 +15,7 @@ import { uuid } from "@kuber/contracts";
 import { CryptoError, Keyring, LocalFileKms, MemoryKms, decryptStream, encryptStream, openWith, sealWith } from "@kuber/crypto";
 import { EventStore } from "@kuber/eventstore";
 import { KeyAdmin, type Cell } from "@kuber/core";
-import { ROOT, startCell } from "./helpers.ts";
+import { ROOT, enrol, startCell } from "./helpers.ts";
 
 // ---------------------------------------------------------------- primitives
 describe("field encryption", () => {
@@ -130,6 +130,8 @@ async function dumpText(sql: postgres.Sql, tenant?: string) {
 beforeAll(async () => {
   let db: { ownerUrl: string; url: string };
   ({ cell, stop, db } = await startCell(clock, { kms }) as never);
+  await enrol(cell, T, [OWNER]);                                   // the only person: explicit single-owner exception
+  await cell.identity.setSettings(T, OWNER, { soloOwner: true, sodLimitPaise: null });
   ownerUrl = db.ownerUrl; appUrl = db.url;
   owner = postgres(ownerUrl, { max: 2, onnotice: () => undefined });
   // Operator actions run with the owner role, exactly as the keys CLI does; the app role cannot.

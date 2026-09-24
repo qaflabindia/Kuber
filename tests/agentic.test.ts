@@ -10,7 +10,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { uuid } from "@kuber/contracts";
 import { Copilot, amountIn, buildServer, dateIn, parseGrants, route, type Cell, type LlmProvider, type Turn } from "@kuber/core";
-import { ROOT, startCell } from "./helpers.ts";
+import { ROOT, enrol, startCell } from "./helpers.ts";
 
 const T = "laksh", B = "main", OWNER = "owner:laksh";
 const TOKEN = "test-token-0123456789abcdefghij";
@@ -19,6 +19,7 @@ let cell: Cell, app: FastifyInstance, stop: () => Promise<void>, url: string;
 
 beforeAll(async () => {
   ({ cell, stop } = await startCell(clock));
+  await enrol(cell, T, [OWNER]);
   await cell.gl.openBook(T, B, "laksh", "freelancer", OWNER);
   await cell.gl.execute(T, B, { kind: "PostJournal", journalId: uuid(), txnDate: "2026-09-30", narration: "Opening BANK", voucherType: "opening",
     lines: [{ accountId: "BANK", amount: "12500000", dimensions: {} }, { accountId: "OPENING", amount: "-12500000", dimensions: {} }] }, { principal: OWNER });
@@ -104,6 +105,7 @@ describe("copilot, deterministic router", () => {
     const r = await new Copilot(cell, null, null, () => clock.value).ask({ tenant: T, book: B, principal: OWNER }, "Reconcile bank to 1,30,206.50 as of 31 Oct 2026");
     expect(r.cards[0]!.op).toBe("reconcile");
     expect(r.cards[0]!.createdBy).toBe("agent:copilot");
+    expect(r.cards[0]!.requestedBy).toBe(OWNER);                                // for separation of duties
     expect(r.cards[0]!.status).toBe("proposed");
   });
 });

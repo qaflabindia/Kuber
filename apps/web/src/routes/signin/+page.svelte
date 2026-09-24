@@ -1,7 +1,35 @@
 <script lang="ts">
   import { enhance } from "$app/forms";
-  let { form } = $props();
+  import { goto } from "$app/navigation";
+  import { page } from "$app/state";
+  import { startAuthentication, startRegistration, browserSupportsWebAuthn } from "@simplewebauthn/browser";
+  let { form, data } = $props();
   let busy = $state(false);
+  let mode = $state<"signin" | "register">("signin");
+  let message = $state("");
+  let workspace = $state(""), name = $state(""), code = $state("");
+
+  /** Passkey ceremony: options from the core (via the BFF), the browser's authenticator, then verification by the core. */
+  async function passkey(e: SubmitEvent) {
+    e.preventDefault();
+    message = "";
+    if (!browserSupportsWebAuthn()) { message = "This browser does not support passkeys."; return; }
+    busy = true;
+    try {
+      const next = page.url.searchParams.get("next");
+      const q = next ? `?next=${encodeURIComponent(next)}` : "";
+      const r = await fetch(`/signin/passkey/options`, { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode, workspace, name, code }) });
+      if (!r.ok) { message = (await r.json().catch(() => null))?.message ?? "Could not start sign-in."; return; }
+      const { options } = await r.json();
+      const response = mode === "register" ? await startRegistration({ optionsJSON: options }) : await startAuthentication({ optionsJSON: options });
+      const v = await fetch(`/signin/passkey/verify${q}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ response }) });
+      if (!v.ok) { message = (await v.json().catch(() => null))?.message ?? "That passkey was not accepted."; return; }
+      await goto((await v.json()).redirect, { invalidateAll: true });
+    } catch (err) {
+      message = err instanceof Error && err.name === "NotAllowedError" ? "Passkey request was cancelled." : err instanceof Error ? err.message : "Sign-in failed.";
+    } finally { busy = false; }
+  }
 </script>
 
 <svelte:head><title>Sign in · Kuber</title></svelte:head>
@@ -22,22 +50,46 @@
   </section>
 
   <section class="card panel">
-    <div class="eyebrow">Sign in</div>
-    <h2>Welcome</h2>
-    <form method="POST" action="?/signin" use:enhance={() => { busy = true; return async ({ update }) => { busy = false; await update(); }; }}>
+    <div class="eyebrow">{mode === "signin" ? "Sign in" : "Create or join a workspace"}</div>
+    <h2>{mode === "signin" ? "Welcome back" : "Welcome"}</h2>
+    <form class="pk" onsubmit={passkey}>
       <div class="field">
-        <label for="name">Your name</label>
-        <input id="name" name="name" autocomplete="name" value={form?.name ?? ""} required minlength="2" placeholder="Laksh" />
+        <label for="pk-workspace">Workspace</label>
+        <input id="pk-workspace" bind:value={workspace} required placeholder="laksh-personal" autocomplete="organization" />
       </div>
-      <div class="field">
-        <label for="workspace">Workspace</label>
-        <input id="workspace" name="workspace" value={form?.workspace ?? ""} placeholder="laksh-personal" />
-        <span class="hint faint">Your books live in a workspace. Use the same name to come back to them.</span>
-      </div>
-      {#if form?.message}<p class="error" role="alert">{form.message}</p>{/if}
-      <button class="btn primary full" disabled={busy}>{busy ? "Opening…" : "Continue"}</button>
+      {#if mode === "register"}
+        <div class="field">
+          <label for="pk-name">Your name</label>
+          <input id="pk-name" bind:value={name} required minlength="2" autocomplete="name" placeholder="Laksh" />
+        </div>
+        <div class="field">
+          <label for="pk-code">Invitation code</label>
+          <input id="pk-code" bind:value={code} placeholder="Leave empty to create a new workspace" autocomplete="off" />
+          <span class="hint faint">Joining someone's books? Use the code they sent you. Otherwise you become the owner of a new workspace.</span>
+        </div>
+      {/if}
+      {#if message}<p class="error" role="alert">{message}</p>{/if}
+      <button class="btn primary full" disabled={busy}>{busy ? "Waiting for your passkey…" : mode === "signin" ? "Sign in with a passkey" : "Create a passkey"}</button>
     </form>
-    <p class="dev faint">Development sign-in. Passkeys replace this before launch.</p>
+    <button class="btn quiet full switch" type="button" onclick={() => { mode = mode === "signin" ? "register" : "signin"; message = ""; }}>
+      {mode === "signin" ? "New here, or invited? Create a passkey" : "Already have a passkey? Sign in"}
+    </button>
+
+    {#if data.devSignIn}
+      <form method="POST" action="?/dev" class="dev-form" use:enhance={() => { busy = true; return async ({ update }) => { busy = false; await update(); }; }}>
+        <div class="eyebrow dev-label">Development sign-in · KUBER_DEV_SIGNIN=true · not secure</div>
+        <div class="field">
+          <label for="name">Your name</label>
+          <input id="name" name="name" autocomplete="name" value={form?.name ?? ""} required minlength="2" placeholder="Laksh" />
+        </div>
+        <div class="field">
+          <label for="workspace">Workspace</label>
+          <input id="workspace" name="workspace" value={form?.workspace ?? ""} placeholder="laksh-personal" />
+        </div>
+        {#if form?.message}<p class="error" role="alert">{form.message}</p>{/if}
+        <button class="btn primary full" disabled={busy}>Continue without a passkey</button>
+      </form>
+    {/if}
   </section>
 </div>
 
@@ -57,6 +109,8 @@
   .hint { font-size: 12px; }
   .full { width: 100%; height: 44px; margin-top: 4px; }
   .error { color: var(--clay); margin: 0; font-size: 14px; }
-  .dev { font-size: 12px; margin: 20px 0 0; text-align: center; }
+  .switch { margin-top: 12px; }
+  .dev-form { display: grid; gap: 14px; margin-top: 28px; padding-top: 20px; border-top: 1px dashed var(--clay); }
+  .dev-label { color: var(--clay); }
   @media (max-width: 900px) { .wrap { grid-template-columns: 1fr; gap: 32px; } .brand { margin-bottom: 24px; } }
 </style>

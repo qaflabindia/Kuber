@@ -33,6 +33,24 @@ if (requireTls) {
   if (problems.length) { console.error(`KUBER_REQUIRE_TLS: refusing to start:\n  ${problems.join("\n  ")}`); process.exit(1); }
 }
 
+/**
+ * Identity (F01). The BFF signs every request with CORE_AUTH_SECRET (or the file named by
+ * CORE_AUTH_SECRET_FILE); without it the core would authenticate nobody, so it does not start.
+ * Development sign-in needs KUBER_DEV_SIGNIN=true and is refused when NODE_ENV=production.
+ */
+const coreAuthSecret = process.env.CORE_AUTH_SECRET_FILE ? readFileSync(process.env.CORE_AUTH_SECRET_FILE, "utf8").trim() : process.env.CORE_AUTH_SECRET;
+if (!coreAuthSecret || coreAuthSecret.length < 32) {
+  console.error("refusing to start: CORE_AUTH_SECRET (or CORE_AUTH_SECRET_FILE) must hold a secret of at least 32 characters shared with the web tier; run ./scripts/secure-setup.sh");
+  process.exit(1);
+}
+const devSignIn = process.env.KUBER_DEV_SIGNIN === "true";
+if (devSignIn && process.env.NODE_ENV === "production") {
+  console.error("refusing to start: KUBER_DEV_SIGNIN=true is for development only and is not allowed with NODE_ENV=production");
+  process.exit(1);
+}
+const origins = env("WEBAUTHN_ORIGIN", "http://localhost:3000").split(",").map((o) => o.trim()).filter(Boolean);
+const rpId = env("WEBAUTHN_RP_ID", new URL(origins[0]!).hostname);
+
 const classifier = classifierFromEnv();
 const cell = await Cell.start({
   databaseUrl: env("DATABASE_URL"),
@@ -48,14 +66,16 @@ const cell = await Cell.start({
   legacy: process.env.KUBER_LEGACY_PLAINTEXT === "allow" ? "allow" : "reject",
   poolSize: Number(env("DB_POOL", "20")),
   classifier,
+  identity: { rpId, origins, rpName: env("WEBAUTHN_RP_NAME", "Kuber"), devSignIn },
 });
 const relay = cell.relay.run();
 const clock = () => new Date().toISOString().slice(0, 10);
 const external = new ExternalTools(parseServers(process.env.KUBER_MCP_SERVERS));
 const copilot = new Copilot(cell, providerFromEnv(), external, clock);
 const mcpGrants = parseGrants(process.env.KUBER_MCP_TOKENS);
-const app = buildServer(cell, { copilot, mcpGrants, clock, https: httpsCfg });
+const app = buildServer(cell, { copilot, mcpGrants, clock, https: httpsCfg, auth: { secret: coreAuthSecret } });
 console.log(`classifier: ${classifier ? classifier.name : "rules, history and keywords (set KUBER_LLM_CLASSIFY=on for the LLM step)"}`);
+console.log(`sign-in: passkeys (relying party ${rpId}, origins ${origins.join(", ")})${devSignIn ? "; DEVELOPMENT SIGN-IN ENABLED (KUBER_DEV_SIGNIN=true): anyone can claim an empty workspace by name" : ""}`);
 console.log(`copilot: ${copilot.engine}; MCP server: ${mcpGrants.size ? `/mcp (${mcpGrants.size} token(s))` : "off (set KUBER_MCP_TOKENS)"}`);
 await app.listen({ port: Number(env("PORT", "8080")), host: "0.0.0.0" });
 console.log(`kuber core: cell ${cell.cellId} listening (${httpsCfg ? "https" : "http"}; data encrypted with ${cell.keyring.kms.name} KMS)`);

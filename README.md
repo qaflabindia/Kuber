@@ -132,6 +132,15 @@ The core creates `kuber_system` on start with `SYSTEM_DB_PASSWORD`; `./kuber` an
   - one tenant reading another's data.
 - **Not protected against:** a compromised running core process or a compromised host. Both hold keys in memory. That is the limit of any server-side encryption that still lets agents work unattended.
 
+**Identity and authorization**
+- **Sign-in is by passkey (WebAuthn).** The core holds the credentials (`identity` schema, row-level security by tenant) and verifies every registration and sign-in; the web tier only relays the ceremony and then issues an encrypted session cookie.
+  - The first passkey for a new, empty workspace makes its owner. A workspace that has members or data cannot be claimed; others join with a one-time invitation code from an owner.
+  - Development sign-in (name only, no proof) exists only with `KUBER_DEV_SIGNIN=true` on both core and web, and both refuse it when `NODE_ENV=production`.
+- **The core does not trust identity headers.** The web tier signs each request (HMAC-SHA256 with `CORE_AUTH_SECRET` over method, path, body hash, tenant, principal, time and nonce, valid for 60 seconds, accepted once). Unsigned, altered, stale or replayed requests get 401 before any handler runs. Only `/healthz` and `/readyz` are open; MCP uses its own bearer tokens.
+- **Every request is authorized** against the tenant's membership, re-read each time (revocation is immediate): roles owner, controller, preparer, approver, auditor, member, each optionally limited to some books. Auditors are read-only. The same check guards every plan, commit and discard, whether it came from the web, the copilot or MCP.
+- **Maker-checker.** Period operations, and plans above the policy's amount limit (or a tenant limit), need an approver other than their preparer; a plan the copilot prepared counts as prepared by the person who asked. A single-owner exception must be switched on by the owner and lapses when a second person joins.
+- **MCP tokens are limited to their book**, at commit as well as when planning.
+
 **Encryption at rest (application-level, AES-256-GCM)**
 - **Envelope encryption.** A master key in a key-management service (KMS) unlocks per-tenant data keys; those keys encrypt the data.
   - Locally, the KMS is `~/.kuber/master.keys` (permissions 0600, outside the repository).
@@ -161,6 +170,7 @@ The core creates `kuber_system` on start with `SYSTEM_DB_PASSWORD`; `./kuber` an
 - **First install:**
   1. `./scripts/secure-setup.sh` creates the master key, certificates and passwords.
   2. `./kuber up -d --build` starts the stack.
+- **Existing install (before passkeys):** run `./scripts/secure-setup.sh` (adds `CORE_AUTH_SECRET`) and rebuild. Existing workspaces have data but no members, so each owner needs an invitation that keeps their principal: `./kuber run --rm --entrypoint "npx tsx apps/core/src/identity-cli.ts" tools invite <workspace> owner:<name>`, then "Create a passkey" with that code. Everyone is signed out once.
 - **Existing plaintext install:** `./scripts/secure-migrate.sh`. It rotates the database passwords, turns on TLS, encrypts every legacy row, purges the broker, verifies, then takes a backup.
 - **Keys** (`./kuber run --rm tools <command>`):
 
@@ -192,6 +202,8 @@ This folder is the source of truth; there is no other working copy.
 - Native with reload:
   - Run `./scripts/dev.sh`. Postgres, NATS and Valkey run in Docker; core and web run from source (core on 8080, web on 3000).
   - `pnpm` 10.28 is required: `corepack enable`.
+  - Passkeys work on http://localhost:3000. `KUBER_DEV_SIGNIN=true ./scripts/dev.sh` adds the labelled, insecure name-only sign-in (needed by `pnpm e2e`).
+  - Members from the command line: `pnpm identity invite|members|revoke …` (see `apps/core/src/identity-cli.ts`).
 - Tests:
   - Start the database with `./kuber up -d postgres`, then run `pnpm test:docker`. It connects over TLS with the generated owner password.
   - Each test file gets its own database, dropped afterwards.
@@ -214,9 +226,11 @@ Each test file creates and drops its own database.
 
 ## API (phase 0)
 
-Headers: `x-kuber-tenant` (must match the path) and `x-kuber-principal` (`role:name`). In
-production these come only from the SvelteKit backend-for-frontend over mutual TLS, after passkey
-sign-in; signed high-risk commands are verified there (design 16.4).
+Every `/v1` request carries `x-kuber-auth: KH1 <claims>.<mac>`, made by `signRequest` in
+`packages/auth` with `CORE_AUTH_SECRET` (tenant must match the path; principal `role:name` must be an
+active member). Identity: `POST /v1/tenants/:t/identity/{registration,authentication}/{options,verify}`,
+`GET /v1/tenants/:t/me`, `GET|POST /v1/tenants/:t/members[/invitations]`,
+`POST /v1/tenants/:t/members/:principal/revoke`, `GET|PUT /v1/tenants/:t/settings/separation`.
 
 | Method and path | Purpose |
 | --- | --- |

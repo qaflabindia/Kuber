@@ -33,7 +33,9 @@ export class Copilot {
   get engine() { return this.provider?.name ?? "rules"; }
 
   async ask(who: Who, text: string, history: HistoryItem[] = []): Promise<CopilotReply> {
-    const principalWho = { ...who, principal: "agent:copilot" };           // the copilot never acts as the person
+    // The copilot never acts as the person: it prepares plans as agent:copilot on their behalf,
+    // within their role and book scope, and the person (or another approver) commits them.
+    const principalWho = { ...who, principal: "agent:copilot", onBehalfOf: who.principal };
     return this.provider ? this.withModel(principalWho, text, history) : this.withRules(principalWho, who, text);
   }
 
@@ -44,6 +46,7 @@ export class Copilot {
     if (r.kind === "help") return { reply: r.text, cards: [], suggestions: HELP, engine: "rules", trace: [] };
     if (r.kind === "chat") {
       // Capture path: channels parse it, the agent classifies it, policy decides whether it posts.
+      await this.cell.identity.authorize(person.tenant, person.principal, "capture", { book: person.book });
       const res = await this.cell.channels.submitChat(person.tenant, person.book, text, person.principal, this.clock());
       if (!res) return { reply: "I couldn't read an amount and direction from that. Try \"Paid 450 to the plumber in cash\".", cards: [], engine: "rules", trace: [] };
       return { reply: "Captured. Kuber will classify it; if policy doesn't let it post on its own, it will wait for you in Review.", cards: [], engine: "rules", trace: [{ tool: "capture", ok: true }] };
@@ -51,7 +54,7 @@ export class Copilot {
     const cards: Plan[] = [], trace: CopilotReply["trace"] = [];
     const errors: string[] = [];
     for (const i of r.intents) {
-      try { cards.push(await this.cell.ops.plan(who.tenant, who.book, who.principal, i.op, i.input)); trace.push({ tool: `kuber_${i.op}`, ok: true }); }
+      try { cards.push(await this.cell.ops.plan(who.tenant, who.book, who.principal, i.op, i.input, { onBehalfOf: person.principal })); trace.push({ tool: `kuber_${i.op}`, ok: true }); }
       catch (e) { errors.push(e instanceof Error ? e.message : String(e)); trace.push({ tool: `kuber_${i.op}`, ok: false }); }
     }
     const writes = cards.filter((c) => c.kind === "write");

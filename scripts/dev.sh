@@ -20,6 +20,9 @@ export NATS_URL=tls://localhost:4222 NATS_TLS_CA="$DIR/certs/ca.crt"
 export TLS_CERT_FILE="$DIR/certs/server.crt" TLS_KEY_FILE="$DIR/certs/server.key" KUBER_REQUIRE_TLS=true
 export KUBER_MASTER_KEY_FILE="$DIR/master.keys"
 export APP_ROLE=kuber_app SYSTEM_ROLE=kuber_system CELL_ID=dev POLICY_DIR=./policies PORT=8080
+# CORE_AUTH_SECRET and SESSION_SECRET come from secrets.env (both processes). Passkeys work on
+# http://localhost; KUBER_DEV_SIGNIN=true ./scripts/dev.sh adds the insecure name-only sign-in.
+export WEBAUTHN_ORIGIN=http://localhost:3000 WEBAUTHN_RP_ID=localhost KUBER_DEV_SIGNIN="${KUBER_DEV_SIGNIN:-false}"
 
 pnpm dev & CORE=$!
 (cd apps/web && CORE_URL=https://localhost:8080 pnpm dev) & WEB=$!

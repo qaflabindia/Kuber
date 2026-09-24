@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { uuid } from "@kuber/contracts";
 import type { Cell } from "@kuber/core";
 import { rebalanceTransfers, splitByWeights, balancesFromState, type Plan } from "@kuber/ops";
-import { ROOT, startCell } from "./helpers.ts";
+import { ROOT, enrol, startCell } from "./helpers.ts";
 
 describe("allocation arithmetic", () => {
   it("parts always sum exactly to the total, whatever the weights", () => {
@@ -34,7 +34,7 @@ describe("allocation arithmetic", () => {
   });
 });
 
-const T = "laksh", B = "main", OWNER = "owner:laksh", AGENT = "agent:copilot";
+const T = "laksh", B = "main", OWNER = "owner:laksh", AGENT = "agent:assistant";
 const clock = { value: "2026-10-25" };
 let cell: Cell, stop: () => Promise<void>;
 const plan = (op: string, input: unknown, who = OWNER) => cell.ops.plan(T, B, who, op, input);
@@ -42,6 +42,11 @@ const commit = (p: Plan, who = OWNER) => cell.ops.commit(T, p.planId, who, p.has
 
 beforeAll(async () => {
   ({ cell, stop } = await startCell(clock));
+  // A freelancer keeping their own books: the only person, with the explicit single-owner
+  // exception to maker-checker (separation of duties is covered in identity.test.ts).
+  await enrol(cell, T, [OWNER]);
+  await enrol(cell, T, [AGENT], [B]);
+  await cell.identity.setSettings(T, OWNER, { soloOwner: true, sodLimitPaise: null });
   await cell.gl.openBook(T, B, "laksh", "freelancer", OWNER);
   await cell.gl.execute(T, B, { kind: "PostJournal", journalId: uuid(), txnDate: "2026-09-30", narration: "Opening BANK", voucherType: "opening",
     lines: [{ accountId: "BANK", amount: "12500000", dimensions: {} }, { accountId: "OPENING", amount: "-12500000", dimensions: {} }] }, { principal: OWNER });

@@ -9,6 +9,9 @@
  * commit only when the operation's gate is "policy" and the policy grants L3 or higher; everything
  * else waits for a person. Period operations (allocate, rebalance, close, carry-forward) are
  * gated "human" and always wait.
+ *
+ * Authorization (F02): every plan, commit and discard first passes the OpsGuard (the identity
+ * module): membership, role, book scope and separation of duties. Without a guard, nothing passes.
  */
 import type { Sql } from "postgres";
 import { canonical, sha256, uuid, type EventData, type Line } from "@kuber/contracts";
@@ -17,7 +20,7 @@ import { DomainError, type BookState } from "@kuber/gl";
 import { isToken, type TenantKeys } from "@kuber/crypto";
 import { balancesFromState } from "./math.ts";
 import { OPERATIONS } from "./operations.ts";
-import type { Action, Effect, OpContext, OpDef, OpName, Plan, PlanJournal, Services } from "./types.ts";
+import type { Action, Effect, OpContext, OpDef, OpName, OpsGuard, Plan, PlanJournal, Services } from "./types.ts";
 
 export * from "./types.ts";
 export { OPERATIONS } from "./operations.ts";
@@ -44,18 +47,22 @@ export class OpsError extends Error {
 
 const RANK: Record<string, number> = { L0: 0, L1: 1, L2: 2, L3: 3, L4: 4 };
 export const isAgent = (principal: string) => /^(agent|system):/.test(principal);
+/** Deny by default: an Operations service built without a guard refuses every step. */
+export const DENY_ALL: OpsGuard = { check: async () => { throw new OpsError("forbidden", "no authorization service configured", 403); } };
 
 export class Operations {
   readonly defs = new Map<OpName, OpDef<any>>(OPERATIONS.map((d) => [d.name, d]));
-  constructor(private sql: Sql, private store: EventStore, private svc: Services, private clock: () => string = () => new Date().toISOString().slice(0, 10)) {}
+  constructor(private sql: Sql, private store: EventStore, private svc: Services, private clock: () => string = () => new Date().toISOString().slice(0, 10),
+    private guard: OpsGuard = DENY_ALL) {}
 
   list() {
     return [...this.defs.values()].map(({ name, title, description, kind, gate, event }) => ({ name, title, description, kind, gate, event: event ?? null }));
   }
 
-  async plan(tenant: string, book: string, principal: string, op: string, rawInput: unknown): Promise<Plan> {
+  async plan(tenant: string, book: string, principal: string, op: string, rawInput: unknown, opts: { onBehalfOf?: string } = {}): Promise<Plan> {
     const def = this.defs.get(op as OpName);
     if (!def) throw new OpsError("unknown_op", `no operation ${op}`, 404);
+    await this.guard.check({ step: "plan", tenant, book, principal, op: def, onBehalfOf: opts.onBehalfOf });
     const parsed = def.input.safeParse(rawInput ?? {});
     if (!parsed.success) throw new OpsError("bad_input", parsed.error.issues.map((i) => `${i.path.join(".") || "input"}: ${i.message}`).join("; "), 400);
     const state = await this.svc.gl.state(tenant, book);
@@ -75,6 +82,7 @@ export class Operations {
       policy: decision ? { ids: decision.policyIds, level: decision.level, approver: decision.approver, reasons: decision.reasons } : null,
       checks, journals, effects, sections: d.sections ?? [], data: d.data, notes: d.notes ?? [], links: d.links ?? [],
       basisSeq: state.seq, createdAt: new Date().toISOString(), createdBy: principal, hash: "",
+      ...(opts.onBehalfOf ? { requestedBy: opts.onBehalfOf } : {}),
       status: committable ? "proposed" : "preview", blocked,
       needsPerson: def.gate === "human" || !decision || RANK[decision.level]! < 3,
     };
@@ -106,6 +114,8 @@ export class Operations {
   }
 
   async discard(tenant: string, planId: string, principal: string) {
+    const p = await this.get(tenant, planId);
+    await this.guard.check({ step: "discard", tenant, book: p.bookId, principal, op: { name: p.op, kind: p.kind, gate: p.gate }, plan: p });
     const n = await this.store.tenantTx(tenant, (tx) => tx`
       UPDATE ops.plans SET status = 'discarded', resolved_by = ${principal}, resolved_at = now()
       WHERE tenant_id = ${tenant} AND plan_id = ${planId} AND status = 'proposed' RETURNING 1`);
@@ -123,6 +133,7 @@ export class Operations {
     if (!stored) throw new OpsError("no_plan", `no plan ${planId}`, 404);
     const keys = await this.store.keys(tenant);
     const row = { ...stored, plan: open<Plan>(keys, planId, "plan", stored.plan), actions: open<Action[]>(keys, planId, "actions", stored.actions) };
+    await this.guard.check({ step: "commit", tenant, book: row.book_id, principal, op: { name: row.plan.op, kind: row.plan.kind, gate: row.plan.gate }, plan: row.plan });
     if (row.status !== "proposed") throw new OpsError("not_open", `plan is ${row.status}`);
     if (row.hash !== hash) throw new OpsError("hash_mismatch", "the plan you approved is not the plan on record; simulate again");
     if (row.plan.blocked) throw new OpsError("blocked", "a blocking check failed; resolve it and simulate again");

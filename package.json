@@ -16,22 +16,24 @@
     "migrate": "tsx packages/eventstore/src/migrate-cli.ts",
     "demo": "tsx apps/core/src/demo.ts",
     "keys": "tsx apps/core/src/keys-cli.ts",
-    "test:llm": "bash scripts/test-llm.sh"
+    "test:llm": "bash scripts/test-llm.sh",
+    "identity": "tsx apps/core/src/identity-cli.ts"
   },
   "devDependencies": {
+    "@kuber/crypto": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@types/node": "^22.0.0",
     "fast-check": "^4.3.0",
-    "playwright": "^1.56.0",
     "fastify": "^5.6.0",
+    "playwright": "^1.56.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
     "vitest": "^3.2.0",
-    "zod": "^4.1.0",
-    "@kuber/crypto": "workspace:*"
+    "zod": "^4.1.0"
   },
   "dependencies": {
     "@kuber/agent": "workspace:*",
+    "@kuber/auth": "workspace:*",
     "@kuber/bus": "workspace:*",
     "@kuber/channels": "workspace:*",
     "@kuber/contracts": "workspace:*",
@@ -39,6 +41,7 @@
     "@kuber/eventstore": "workspace:*",
     "@kuber/evidence": "workspace:*",
     "@kuber/gl": "workspace:*",
+    "@kuber/identity": "workspace:*",
     "@kuber/ops": "workspace:*",
     "@kuber/policy": "workspace:*",
     "@kuber/reporting": "workspace:*",

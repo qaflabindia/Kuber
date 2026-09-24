@@ -15,6 +15,7 @@ import { AGENT_MIGRATIONS, Agent, type LlmClassifier } from "@kuber/agent";
 import { REPORTING_MIGRATIONS, Reporting } from "@kuber/reporting";
 import { OPS_MIGRATIONS, Operations } from "@kuber/ops";
 import { EVIDENCE_MIGRATIONS, EvidenceService } from "@kuber/evidence";
+import { IDENTITY_MIGRATIONS, Identity, type IdentityOptions } from "@kuber/identity";
 
 export interface CellOptions {
   /** Application connection: must be a role without SUPERUSER or BYPASSRLS, or tenant isolation does not apply. */
@@ -41,9 +42,11 @@ export interface CellOptions {
   poolSize?: number;
   /** Optional LLM step in classification; without it unmatched transactions go to suspense. */
   classifier?: LlmClassifier;
+  /** Passkey relying party and development sign-in (identity module). Defaults suit local development. */
+  identity?: Partial<IdentityOptions>;
 }
 
-const SCHEMAS = ["es", "agent", "reporting", "ops", "keys", "evidence"];
+const SCHEMAS = ["es", "agent", "reporting", "ops", "keys", "evidence", "identity"];
 const ident = (role: string) => { if (!/^[a-z_][a-z0-9_]*$/.test(role)) throw new Error(`invalid role name ${role}`); return role; };
 
 /**
@@ -53,7 +56,7 @@ const ident = (role: string) => { if (!/^[a-z_][a-z0-9_]*$/.test(role)) throw ne
 export async function migrateCell(ownerUrl: string, appRole?: string, systemRole?: CellOptions["systemRole"]) {
   const owner = postgres(ownerUrl, { max: 1, onnotice: () => undefined });
   try {
-    await migrate(owner, [...EVENTSTORE_MIGRATIONS, ...AGENT_MIGRATIONS, ...REPORTING_MIGRATIONS, ...OPS_MIGRATIONS, ...EVIDENCE_MIGRATIONS]);
+    await migrate(owner, [...EVENTSTORE_MIGRATIONS, ...AGENT_MIGRATIONS, ...REPORTING_MIGRATIONS, ...OPS_MIGRATIONS, ...EVIDENCE_MIGRATIONS, ...IDENTITY_MIGRATIONS]);
     if (appRole) {
       await owner.unsafe(appGrants(ident(appRole), SCHEMAS));
       // A tenant request role that could see every tenant would defeat row-level security.
@@ -79,6 +82,7 @@ export class Cell {
     public readonly relay: OutboxRelay, public readonly gl: GeneralLedger, public readonly channels: Channels,
     public readonly agent: Agent, public readonly reporting: Reporting, public readonly policies: PolicyEngine,
     public readonly ops: Operations, public readonly keyring: Keyring, public readonly evidence: EvidenceService,
+    public readonly identity: Identity,
   ) {}
 
   static async start(o: CellOptions): Promise<Cell> {
@@ -102,7 +106,9 @@ export class Cell {
     const channels = new Channels(store);
     const agent = new Agent(sql, store, policies, o.clock, o.classifier);
     const reporting = new Reporting(sql, store);
-    const ops = new Operations(sql, store, { gl, reporting, agent, policies }, o.clock);
+    // Memberships, passkeys and the authorization guard every operation passes through (F01/F02).
+    const identity = new Identity(store, policies, { rpId: "localhost", origins: ["http://localhost:3000"], ...o.identity });
+    const ops = new Operations(sql, store, { gl, reporting, agent, policies }, o.clock, identity);
     const evidence = new EvidenceService(store);
 
     const s = (module: string, type: string) => `kuber.${cellId}.${module}.${type}.*`;
@@ -113,7 +119,7 @@ export class Cell {
       s("gl", "JournalPosted"), s("gl", "JournalReversed")], handler: opened(agent.handler) });
     await bus.subscribe({ name: "evidence", filter: [s("gl", "JournalPosted"), s("gl", "PeriodLocked")], handler: opened(evidence.handler) });
     await bus.subscribe({ name: "reporting", filter: [s("gl", "BookOpened"), s("gl", "AccountAdded"), s("gl", "JournalPosted")], handler: opened(reporting.handler) });
-    return new Cell(cellId, sql, systemSql, store, bus, relay, gl, channels, agent, reporting, policies, ops, keyring, evidence);
+    return new Cell(cellId, sql, systemSql, store, bus, relay, gl, channels, agent, reporting, policies, ops, keyring, evidence, identity);
   }
 
   /** In-process runs: publish everything pending and wait until every module has caught up. */

@@ -1,24 +1,39 @@
 /**
  * Server-side client for the Kuber core API. The browser never talks to the core directly:
- * this backend-for-frontend adds the tenant and principal from the signed session.
+ * this backend-for-frontend signs each request (tenant and principal from the encrypted session,
+ * method, path, body hash, time, nonce) with CORE_AUTH_SECRET, which the core verifies (F01).
  */
+import { readFileSync } from "node:fs";
 import { env } from "$env/dynamic/private";
+import { AUTH_HEADER, authKey, signRequest } from "@kuber/auth";
 import type { Session } from "./session";
 
 const CORE = env.CORE_URL ?? "http://localhost:8080";
+
+// Read lazily: the build imports this module without runtime secrets.
+let key: Buffer | null = null;
+function coreKey(): Buffer {
+  if (key) return key;
+  const secret = env.CORE_AUTH_SECRET_FILE ? readFileSync(env.CORE_AUTH_SECRET_FILE, "utf8").trim() : env.CORE_AUTH_SECRET;
+  if (!secret || secret.length < 32) throw new Error("CORE_AUTH_SECRET is not set: the web tier cannot authenticate to the core (run ./scripts/secure-setup.sh)");
+  return (key = authKey(secret));
+}
 
 export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string) { super(message); }
 }
 
-async function call<T>(s: Pick<Session, "tenant" | "principal">, method: string, path: string, body?: unknown, contentType = "application/json"): Promise<T> {
-  const res = await fetch(`${CORE}/v1/tenants/${encodeURIComponent(s.tenant)}${path}`, {
+/** One signed call. `principal` is null only for sign-in ceremonies, before anyone is signed in. */
+async function call<T>(s: { tenant: string; principal: string | null }, method: string, path: string, body?: unknown, contentType = "application/json"): Promise<T> {
+  const target = `/v1/tenants/${encodeURIComponent(s.tenant)}${path}`;
+  const payload = body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body);
+  const res = await fetch(`${CORE}${target}`, {
     method,
     headers: {
-      "x-kuber-tenant": s.tenant, "x-kuber-principal": s.principal,
-      ...(body !== undefined ? { "content-type": contentType } : {}),
+      [AUTH_HEADER]: signRequest(coreKey(), { method, path: target, body: payload, tenant: s.tenant, principal: s.principal }),
+      ...(payload !== undefined ? { "content-type": contentType } : {}),
     },
-    body: body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body),
+    body: payload,
   });
   if (res.status === 204) return undefined as T;
   const text = await res.text();
@@ -80,3 +95,20 @@ export const api = (s: Pick<Session, "tenant" | "principal">) => ({
   discard: (id: string) => call(s, "POST", `/plans/${id}/discard`, {}),
   verify: (book: string) => call<{ intact: boolean; firstBrokenJournal: string | null }>(s, "GET", `/books/${book}/verify`),
 });
+
+// ---------------------------------------------------------------- identity (passkeys, members)
+export interface Member { tenant: string; principal: string; role: string; books: string[] | null; displayName: string; status: string; source: string }
+/** WebAuthn options as JSON, passed through to the browser unchanged. */
+export type CeremonyOptions = Record<string, unknown> & { challenge: string };
+
+/** Sign-in ceremonies: signed by the BFF without a principal; the core verifies the passkey. */
+export const identity = (tenant: string) => {
+  const c = { tenant, principal: null };
+  return {
+    registrationOptions: (displayName: string, enrolment?: string) => call<CeremonyOptions>(c, "POST", "/identity/registration/options", { displayName, ...(enrolment ? { enrolment } : {}) }),
+    register: (displayName: string, response: unknown, enrolment?: string) => call<Member>(c, "POST", "/identity/registration/verify", { displayName, response, ...(enrolment ? { enrolment } : {}) }),
+    authenticationOptions: () => call<CeremonyOptions>(c, "POST", "/identity/authentication/options", {}),
+    authenticate: (response: unknown) => call<Member>(c, "POST", "/identity/authentication/verify", { response }),
+    devSignIn: (name: string) => call<Member>(c, "POST", "/identity/dev-signin", { name }),
+  };
+};

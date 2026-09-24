@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Creates what Kuber needs to run encrypted and over TLS, OUTSIDE the repository:
 #   ~/.kuber/master.keys    master key (AES-256), mode 0600: unlocks every tenant's data keys
-#   ~/.kuber/secrets.env    database (owner, app, system), broker and cache passwords, session secret, mode 0600
+#   ~/.kuber/secrets.env    database (owner, app, system), broker and cache passwords, session secret,
+#                           CORE_AUTH_SECRET (web signs every request to the core with it), mode 0600
 #   ~/.kuber/certs/         local CA and one service certificate (postgres, nats, core, valkey, web)
 # Idempotent: existing files are kept. `--rotate-certs` issues new certificates.
 # Back up master.keys separately from database backups: one without the other is useless.
@@ -31,7 +32,7 @@ if [ ! -f "$DIR/secrets.env" ]; then
   echo "created secrets.env"
 fi
 # Secrets added in later versions: appended to an existing secrets.env, never overwritten.
-for k in SYSTEM_DB_PASSWORD; do
+for k in SYSTEM_DB_PASSWORD CORE_AUTH_SECRET; do
   grep -q "^$k=" "$DIR/secrets.env" || { echo "$k=$(openssl rand -hex 24)" >> "$DIR/secrets.env"; echo "added $k to secrets.env"; }
 done
 

@@ -1,0 +1,19 @@
+{
+  "name": "@kuber/identity",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@kuber/auth": "workspace:*",
+    "@kuber/contracts": "workspace:*",
+    "@kuber/eventstore": "workspace:*",
+    "@kuber/ops": "workspace:*",
+    "@kuber/policy": "workspace:*",
+    "@simplewebauthn/server": "^14.0.2",
+    "postgres": "^3.4.7",
+    "zod": "^4.1.0"
+  }
+}

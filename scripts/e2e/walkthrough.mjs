@@ -3,7 +3,7 @@
  *   pnpm e2e                          (against http://localhost:3000, a fresh workspace)
  *   BASE=http://localhost:3000 SHOTS=./e2e-shots pnpm e2e
  * First run only: npx playwright install chromium
- * Use a fresh database: it opens a book, imports samples/hdfc_2026_10.csv and posts entries.
+ * Start core and web with KUBER_DEV_SIGNIN=true. Use a fresh database: it opens a book, imports samples/hdfc_2026_10.csv and posts entries.
  */
 import { chromium } from "playwright";
 import { mkdirSync } from "node:fs";
@@ -31,8 +31,9 @@ async function ask(text) {
 
 try {
   await p.goto(`${BASE}/signin`);
+  // Development sign-in: needs KUBER_DEV_SIGNIN=true for both core and web (passkeys need a real authenticator).
   await p.fill("#name", "E2E Tester"); await p.fill("#workspace", WORKSPACE);
-  await p.click("form button.primary");
+  await p.click("form.dev-form button.primary");
   await p.waitForURL(/setup/);
   await p.click("text=Freelancer").catch(() => {});
   await p.fill("#bank", "1,25,000"); await p.fill("#asOf", "2026-09-30");

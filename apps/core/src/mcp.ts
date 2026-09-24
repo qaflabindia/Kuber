@@ -1,7 +1,9 @@
 /**
  * Kuber as an MCP server (Streamable HTTP, stateless). External agents authenticate with a bearer
  * token that maps to one tenant, one book and an agent principal. An agent principal can simulate
- * anything and commit only what policy lets agents do; everything else waits for a person.
+ * anything in its book and commit only what policy lets agents do; everything else waits for a
+ * person. The book limit holds at commit too: tools check it, and the grant is registered as an
+ * agent membership scoped to that book, which the operations guard enforces.
  *
  * KUBER_MCP_TOKENS='{"<token>": {"tenant": "laksh-personal", "book": "main", "principal": "agent:claude-desktop"}}'
  */
@@ -56,9 +58,14 @@ export function mcpServer(cell: Cell, who: Who): Server {
 }
 
 export function registerMcp(app: FastifyInstance, cell: Cell, grants: Map<string, Who>) {
+  // Each grant becomes an agent member limited to its book, so the ops guard enforces the same
+  // scope for plans and commits (A12). Registered once, on the first MCP request.
+  let synced: Promise<void> | null = null;
   app.post("/mcp", async (req, reply) => {
     const who = authenticate(grants, req.headers.authorization);
     if (!who) return reply.code(401).header("www-authenticate", 'Bearer realm="kuber"').send({ error: "unauthorized", message: "MCP needs a Kuber agent token" });
+    synced ??= cell.identity.syncAgentGrants([...grants.values()]).catch((e) => { synced = null; throw e; });
+    await synced;
     const server = mcpServer(cell, who);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     reply.hijack();
