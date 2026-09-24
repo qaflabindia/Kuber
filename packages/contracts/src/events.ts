@@ -81,6 +81,11 @@ export const GL = {
     prevHash: z.string().length(64), hash: z.string().length(64),
   }),
   JournalReversed: z.object({ bookId: Id, journalId: Id, reversalJournalId: Id, reason: z.string() }),
+  /**
+   * A provisional journal was matched to an authoritative source line (bank statement). The
+   * original JournalPosted is not rewritten; state and read models stop treating it as provisional.
+   */
+  JournalConfirmed: z.object({ bookId: Id, journalId: Id, source: z.string(), basis: z.string().optional() }),
   PostingRejected: z.object({ bookId: Id, requestId: Id, reason: z.string(), source: z.string().optional() }),
   PeriodLocked: z.object({ bookId: Id, periodEnd: IsoDate, level: z.enum(["soft", "hard"]) }),
 } as const;
@@ -90,11 +95,26 @@ export const RawTxn = z.object({
   txnDate: IsoDate, amount: MinorString, direction: z.enum(["in", "out"]),
   narration: z.string(), instrument: Id, reference: z.string().optional(),
   counterpartyHint: z.string().optional(), purposeHint: z.string().optional(),
+  /** Running balance after this line, when the source provides one (signed paise; negative = overdrawn). */
+  balance: MinorString.optional(),
+  /** 1-based data row in the source file (row lineage for evidence). */
+  sourceRow: z.number().int().positive().optional(),
 });
 export type RawTxn = z.infer<typeof RawTxn>;
 
 export const CHANNELS = {
-  SignalReceived: z.object({ signalId: Id, bookId: Id, channel: z.string(), trust: Trust, contentHash: z.string(), lines: z.number().int() }),
+  SignalReceived: z.object({ signalId: Id, bookId: Id, channel: z.string(), trust: Trust, contentHash: z.string(), lines: z.number().int(),
+    /** Disposition of every source row: rows = accepted + duplicates + skipped. */
+    rows: z.number().int().optional(), accepted: z.number().int().optional(), duplicates: z.number().int().optional(),
+    skipped: z.number().int().optional(),
+    /** sha256 of the retained original bytes (channels.signals), and the parser that read them. */
+    originalHash: z.string().optional(), parser: z.string().optional(),
+    controls: z.object({
+      status: z.enum(["reconciled", "unverifiable", "mismatch"]),
+      debits: MinorString, credits: MinorString, opening: MinorString.optional(), closing: MinorString.optional(),
+      problems: z.array(z.string()),
+    }).optional(),
+  }),
   TransactionExtracted: z.object({ txnId: Id, signalId: Id, bookId: Id, trust: Trust, channel: z.string(), txn: RawTxn }),
 } as const;
 
@@ -108,7 +128,13 @@ export type Decision = z.infer<typeof Decision>;
 
 export const AGENT = {
   PartyResolved: z.object({ txnId: Id, partyId: Id, partyName: z.string(), isNew: z.boolean() }),
-  ProvisionalConfirmed: z.object({ txnId: Id, journalId: Id }),
+  ProvisionalConfirmed: z.object({ txnId: Id, journalId: Id, bookId: Id.optional(),
+    /** Why the lines match: a shared reference, a shared counterparty, or a person linked them. */
+    basis: z.enum(["reference", "counterparty", "user"]).optional() }),
+  /** A statement line could be (or could not be told apart from) a provisional entry: a person decides. */
+  MatchReviewQueued: z.object({ txnId: Id, reviewId: Id, bookId: Id, candidates: z.array(Id), reason: z.string() }),
+  /** `journalId` null: the line is a different transaction and is processed as new. */
+  MatchReviewResolved: z.object({ reviewId: Id, txnId: Id, journalId: Id.nullable() }),
   TransactionClassified: z.object({ txnId: Id, accountId: Id, confidence: z.number(), source: z.string() }),
   PolicyDecisionMade: z.object({ txnId: Id, decision: Decision }),
   PostingRequested: z.object({

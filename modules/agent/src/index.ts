@@ -3,7 +3,7 @@
  *
  * Reacts to:  TransactionExtracted (channels), BookOpened / AccountAdded / JournalPosted /
  *             JournalReversed / PostingRejected (gl)
- * Emits:      PartyResolved, ProvisionalConfirmed, TransactionClassified, PolicyDecisionMade,
+ * Emits:      PartyResolved, ProvisionalConfirmed, MatchReviewQueued, MatchReviewResolved, TransactionClassified, PolicyDecisionMade,
  *             PostingRequested, DraftQueued, DraftApproved, DraftRejected, RatificationRequested,
  *             Ratified, CorrectionRequested, RuleLearned, AutonomyLimited
  *
@@ -15,7 +15,7 @@
 import type { Sql, TransactionSql } from "postgres";
 import {
   addDays, journalIdForRequest, stableId, uuid,
-  type Decision, type Envelope, type EventData, type Line,
+  type Decision, type Envelope, type EventData, type Line, type RawTxn,
 } from "@kuber/contracts";
 import { once, type EventStore, type MetaInput, type NewEvent } from "@kuber/eventstore";
 import { isToken, type TenantKeys } from "@kuber/crypto";
@@ -126,7 +126,7 @@ export class Agent {
     }
   }
 
-  private async onExtracted(tx: TransactionSql, env: Envelope) {
+  private async onExtracted(tx: TransactionSql, env: Envelope, opts: { skipMatch?: boolean } = {}) {
     const t = env.meta.tenantId;
     const d = env.data as EventData<"TransactionExtracted">;
     const txn = d.txn;
@@ -138,19 +138,26 @@ export class Agent {
 
     // 1. party
     const { partyId, partyName, isNew } = await this.resolveParty(tx, t, txn.counterpartyHint ?? narrationKey(txn.narration), keys);
-    if (partyId) events.push({ type: "PartyResolved", data: { txnId: d.txnId, partyId, partyName: partyName!, isNew } });
+    if (partyId && !opts.skipMatch) events.push({ type: "PartyResolved", data: { txnId: d.txnId, partyId, partyName: partyName!, isNew } });
 
-    // 2. an authoritative line may confirm an earlier provisional entry instead of posting again
-    if (d.trust === "authoritative") {
-      const lo = addDays(txn.txnDate, -DEDUPE_WINDOW_DAYS), hi = addDays(txn.txnDate, DEDUPE_WINDOW_DAYS);
-      const [m] = await tx<{ journal_id: string }[]>`
-        SELECT journal_id FROM agent.journal_index
-        WHERE tenant_id = ${t} AND book_id = ${d.bookId} AND provisional AND NOT confirmed AND NOT reversed
-          AND instrument = ${txn.instrument} AND amount = ${signed.toString()} AND txn_date BETWEEN ${lo} AND ${hi}
-        ORDER BY abs(txn_date - ${txn.txnDate}::date) LIMIT 1 FOR UPDATE`;
-      if (m) {
-        await tx`UPDATE agent.journal_index SET confirmed = true WHERE tenant_id = ${t} AND journal_id = ${m.journal_id}`;
-        events.push({ type: "ProvisionalConfirmed", data: { txnId: d.txnId, journalId: m.journal_id } });
+    // 2. an authoritative line may confirm an earlier provisional entry instead of posting again,
+    //    but only on real evidence (see matchProvisional); anything ambiguous waits for a person
+    if (d.trust === "authoritative" && !opts.skipMatch) {
+      const m = await this.matchProvisional(tx, t, d.bookId, txn, keys);
+      if (m.kind === "confirm") {
+        await tx`UPDATE agent.journal_index SET confirmed = true WHERE tenant_id = ${t} AND journal_id = ${m.journalId}`;
+        events.push({ type: "ProvisionalConfirmed", data: { txnId: d.txnId, journalId: m.journalId, bookId: d.bookId, basis: m.basis } });
+        await this.store.append("agent", t, { streamId: stream, expected: "any", events }, baseMeta, tx);
+        return;
+      }
+      if (m.kind === "review") {
+        const reviewId = stableId("match-review", `${t}/${d.txnId}`);
+        await tx`INSERT INTO agent.match_reviews (tenant_id, review_id, txn_id, book_id, status, candidates, detail)
+                 VALUES (${t}, ${reviewId}, ${d.txnId}, ${d.bookId}, 'open', ${tx.json(m.candidates as never)},
+                         ${keys.sealJson({ txnDate: txn.txnDate, narration: txn.narration, amount: txn.amount, direction: txn.direction,
+                           instrument: txn.instrument, reference: txn.reference ?? null, reason: m.reason }, matchReviewCtx(reviewId))})
+                 ON CONFLICT DO NOTHING`;
+        events.push({ type: "MatchReviewQueued", data: { txnId: d.txnId, reviewId, bookId: d.bookId, candidates: m.candidates, reason: m.reason } });
         await this.store.append("agent", t, { streamId: stream, expected: "any", events }, baseMeta, tx);
         return;
       }
@@ -169,6 +176,7 @@ export class Agent {
     ];
     const proposal = { txnDate: txn.txnDate, narration: txn.narration, voucherType: txn.direction === "in" ? "receipt" : "payment", lines, provisional };
     const requestId = `req-${d.txnId}`;
+    if (provisional) await this.rememberProvisional(tx, t, d.txnId, journalIdForRequest(t, requestId), txn, keys);
 
     // 4. a person typed it: their statement is the approval
     if (d.trust === "user") {
@@ -251,6 +259,74 @@ export class Agent {
     });
   }
 
+  /** Statement lines waiting for a person to say whether they are a provisional entry already in the books. */
+  async openMatchReviews(tenantId: string) {
+    const keys = await this.store.keys(tenantId);
+    const rows = await this.store.tenantTx(tenantId, (tx) => tx<{ review_id: string; txn_id: string; book_id: string; candidates: string[]; detail: string; created_at: Date }[]>`
+      SELECT review_id, txn_id, book_id, candidates, detail, created_at FROM agent.match_reviews
+      WHERE tenant_id = ${tenantId} AND status = 'open' ORDER BY created_at, review_id`);
+    return rows.map((r) => ({ ...r, detail: keys.openJson<MatchReviewDetail>(r.detail, matchReviewCtx(r.review_id)) }));
+  }
+
+  /**
+   * Resolve a match review. `journalId`: the statement line is that provisional entry (it is confirmed,
+   * which the GL records). null: it is a different transaction and is classified and posted or drafted as new.
+   */
+  async resolveMatch(tenantId: string, reviewId: string, principal: string, journalId: string | null) {
+    return this.store.tenantTx(tenantId, async (tx) => {
+      const keys = await this.store.keys(tenantId);
+      const [r] = await tx<{ txn_id: string; book_id: string; detail: string }[]>`
+        SELECT txn_id, book_id, detail FROM agent.match_reviews WHERE tenant_id = ${tenantId} AND review_id = ${reviewId} AND status = 'open' FOR UPDATE`;
+      if (!r) throw new AgentError("not_open", `no open match review ${reviewId}`);
+      const det = keys.openJson<MatchReviewDetail>(r.detail, matchReviewCtx(reviewId));
+      const stream = `${tenantId}/txn/${r.txn_id}`;
+      if (journalId) {
+        const signed = BigInt(det.amount) * (det.direction === "in" ? 1n : -1n);
+        const [j] = await tx<{ journal_id: string }[]>`
+          SELECT journal_id FROM agent.journal_index WHERE tenant_id = ${tenantId} AND journal_id = ${journalId} AND book_id = ${r.book_id}
+            AND provisional AND NOT confirmed AND NOT reversed AND instrument = ${det.instrument} AND amount = ${signed.toString()} FOR UPDATE`;
+        if (!j) throw new AgentError("not_matchable", `${journalId} is not an open provisional entry of the same account and amount`);
+        await tx`UPDATE agent.journal_index SET confirmed = true WHERE tenant_id = ${tenantId} AND journal_id = ${journalId}`;
+        await tx`UPDATE agent.match_reviews SET status = 'linked', journal_id = ${journalId}, resolved_by = ${principal}, resolved_at = now()
+                 WHERE tenant_id = ${tenantId} AND review_id = ${reviewId}`;
+        await this.store.append("agent", tenantId, { streamId: stream, expected: "any", events: [
+          { type: "MatchReviewResolved", data: { reviewId, txnId: r.txn_id, journalId } },
+          { type: "ProvisionalConfirmed", data: { txnId: r.txn_id, journalId, bookId: r.book_id, basis: "user" } },
+        ] }, { principal }, tx);
+        return { status: "linked" as const, journalId };
+      }
+      await tx`UPDATE agent.match_reviews SET status = 'separate', resolved_by = ${principal}, resolved_at = now()
+               WHERE tenant_id = ${tenantId} AND review_id = ${reviewId}`;
+      const [resolved] = await this.store.append("agent", tenantId, { streamId: stream, expected: "any",
+        events: [{ type: "MatchReviewResolved", data: { reviewId, txnId: r.txn_id, journalId: null } }] }, { principal }, tx);
+      const extracted = (await this.store.readStream(tenantId, stream, 0, tx)).find((e) => e.type === "TransactionExtracted");
+      if (!extracted) throw new AgentError("not_found", `no extracted transaction for ${r.txn_id}`);
+      await this.onExtracted(tx, { ...extracted, meta: { ...extracted.meta, correlationId: resolved!.meta.correlationId } }, { skipMatch: true });
+      return { status: "separate" as const, journalId: null };
+    });
+  }
+
+  /**
+   * Existing databases: confirmations recorded only in agent.journal_index before confirmation was
+   * propagated. Emits ProvisionalConfirmed (with the book) once per such journal so the GL records it.
+   */
+  async backfillConfirmations(tenantId: string, principal = AGENT_PRINCIPAL) {
+    return this.store.tenantTx(tenantId, async (tx) => {
+      const rows = await tx<{ journal_id: string; book_id: string }[]>`
+        SELECT journal_id, book_id FROM agent.journal_index WHERE tenant_id = ${tenantId} AND provisional AND confirmed AND NOT reversed`;
+      const done = await this.store.existingStreams(tenantId, rows.map((r) => `${tenantId}/confirmations/${r.journal_id}`));
+      let n = 0;
+      for (const r of rows) {
+        const streamId = `${tenantId}/confirmations/${r.journal_id}`;
+        if (done.has(streamId)) continue;
+        await this.store.append("agent", tenantId, { streamId, expected: "no_stream",
+          events: [{ type: "ProvisionalConfirmed", data: { txnId: "backfill", journalId: r.journal_id, bookId: r.book_id } }] }, { principal }, tx);
+        n++;
+      }
+      return { emitted: n };
+    });
+  }
+
   async ratify(tenantId: string, journalId: string, principal: string) {
     return this.store.tenantTx(tenantId, async (tx) => {
       const [r] = await tx<{ txn_id: string }[]>`
@@ -329,6 +405,56 @@ export class Agent {
     return rows.map((r) => ({ ...r, narration: openText(keys, r.narration, `agent.ratifications.narration|${r.request_id}`) }));
   }
 
+  // ------------------------------------------------------------------ provisional matching
+  /** Keep what the person said about a provisional entry (sealed), so a statement line can be matched on it later. */
+  private async rememberProvisional(tx: TransactionSql, tenantId: string, txnId: string, journalId: string, txn: RawTxn, keys: TenantKeys) {
+    await tx`INSERT INTO agent.provisional_sources (tenant_id, txn_id, journal_id, detail)
+             VALUES (${tenantId}, ${txnId}, ${journalId}, ${keys.sealJson({ hint: txn.counterpartyHint ?? null, narration: txn.narration,
+               reference: txn.reference ?? null }, provisionalSourceCtx(txnId))}) ON CONFLICT DO NOTHING`;
+  }
+
+  /**
+   * Does this authoritative line confirm an open provisional entry?
+   *
+   * Candidates: same book and instrument, same signed amount (so same direction), dated within
+   * DEDUPE_WINDOW_DAYS. Each candidate is then compared on evidence:
+   *   reference     a reference of the line (cheque/UTR) appears in what the person recorded
+   *   counterparty  the counterparty the person named shares a significant word with the line
+   *   different     both sides name a counterparty and they share nothing
+   *   unknown       the entry names no counterparty (or it predates this record): cannot be told
+   * Exactly one reference match, else exactly one counterparty match, confirms. Several matches,
+   * or only unknown candidates, go to a person as a match review. Only "different" candidates:
+   * the line is a new transaction. Amount and date alone never confirm.
+   */
+  private async matchProvisional(tx: TransactionSql, tenantId: string, bookId: string, txn: RawTxn, keys: TenantKeys): Promise<MatchOutcome> {
+    const signed = BigInt(txn.amount) * (txn.direction === "in" ? 1n : -1n);
+    const lo = addDays(txn.txnDate, -DEDUPE_WINDOW_DAYS), hi = addDays(txn.txnDate, DEDUPE_WINDOW_DAYS);
+    const cands = await tx<{ journal_id: string; txn_id: string | null; detail: string | null }[]>`
+      SELECT j.journal_id, s.txn_id, s.detail FROM agent.journal_index j
+      LEFT JOIN agent.provisional_sources s ON s.tenant_id = j.tenant_id AND s.journal_id = j.journal_id
+      WHERE j.tenant_id = ${tenantId} AND j.book_id = ${bookId} AND j.provisional AND NOT j.confirmed AND NOT j.reversed
+        AND j.instrument = ${txn.instrument} AND j.amount = ${signed.toString()} AND j.txn_date BETWEEN ${lo} AND ${hi}
+      ORDER BY abs(j.txn_date - ${txn.txnDate}::date), j.journal_id FOR UPDATE OF j`;
+    if (!cands.length) return { kind: "none" };
+    const lineWords = matchWords(txn.narration, txn.counterpartyHint);
+    const lineRefs = refsOf(txn.reference, txn.narration);
+    const judged = cands.map((c) => {
+      const src = c.detail && c.txn_id ? keys.openJson<{ hint: string | null; narration: string; reference: string | null }>(c.detail, provisionalSourceCtx(c.txn_id)) : null;
+      if (src && [...refsOf(src.reference ?? undefined, src.narration)].some((r) => lineRefs.has(r))) return { id: c.journal_id, v: "reference" as const };
+      const theirs = src?.hint ? matchWords(src.hint) : new Set<string>();
+      if (!theirs.size || !lineWords.size) return { id: c.journal_id, v: "unknown" as const };
+      return { id: c.journal_id, v: wordsOverlap(theirs, lineWords) ? "counterparty" as const : "different" as const };
+    });
+    for (const basis of ["reference", "counterparty"] as const) {
+      const hits = judged.filter((j) => j.v === basis);
+      if (hits.length === 1) return { kind: "confirm", journalId: hits[0]!.id, basis };
+      if (hits.length > 1) return { kind: "review", candidates: hits.map((h) => h.id), reason: `${hits.length} provisional entries match on ${basis}` };
+    }
+    const unknown = judged.filter((j) => j.v === "unknown");
+    if (unknown.length) return { kind: "review", candidates: unknown.map((u) => u.id), reason: "same amount and date as a provisional entry whose counterparty cannot be compared" };
+    return { kind: "none" };
+  }
+
   // ------------------------------------------------------------------ helpers
   private async learn(tx: TransactionSql, tenantId: string, pattern: string, accountId: string, principal: string, keys: TenantKeys): Promise<NewEvent[]> {
     const p = pattern.toLowerCase().trim();
@@ -402,4 +528,48 @@ function openText(keys: TenantKeys, v: string, ctx: string): string {
 function openProposal(keys: TenantKeys, draftId: string, v: unknown): Proposal {
   const c = (v as { $c?: unknown } | null)?.$c;
   return (isToken(c) ? keys.openJson(c, `agent.drafts.proposal|${draftId}`) : v) as Proposal;
+}
+
+// ------------------------------------------------------------------ matching helpers
+type MatchOutcome = { kind: "none" } | { kind: "confirm"; journalId: string; basis: "reference" | "counterparty" }
+  | { kind: "review"; candidates: string[]; reason: string };
+interface MatchReviewDetail { txnDate: string; narration: string; amount: string; direction: "in" | "out"; instrument: string; reference: string | null; reason: string }
+
+export const matchReviewCtx = (reviewId: string) => `agent.match_reviews.detail|${reviewId}`;
+export const provisionalSourceCtx = (txnId: string) => `agent.provisional_sources.detail|${txnId}`;
+
+/** Words that say nothing about who the counterparty is: rails, banks, verbs, units, document words. */
+const MATCH_STOP = new Set(["upi", "neft", "imps", "rtgs", "ach", "nach", "ecs", "txn", "ref", "reference", "the", "and", "paid", "payment",
+  "transfer", "transferred", "cash", "spent", "received", "sent", "gave", "got", "credited", "debited", "collected", "earned", "bought",
+  "via", "from", "for", "bank", "card", "pos", "atm", "p2m", "p2a", "lakh", "lakhs", "crore", "crores", "rupees", "inr", "using", "through",
+  "with", "yesterday", "today", "gpay", "phonepe", "paytm", "netbanking", "hdfc", "icici", "sbi", "axis", "kotak", "invoice", "inv", "bill",
+  "receipt", "order", "ltd", "pvt", "private", "limited", "llp", "inc", "mr", "mrs", "ms", "shri", "smt", "chq", "cheque", "online", "fund", "funds"]);
+
+function matchWords(...texts: (string | null | undefined)[]): Set<string> {
+  const out = new Set<string>();
+  for (const t of texts) {
+    for (const w of (t ?? "").toLowerCase().replace(/@[a-z0-9.\-]+/g, " ").split(/[^a-z0-9]+/)) {
+      if (w.length >= 3 && !/^\d+$/.test(w) && !MATCH_STOP.has(w)) out.add(w);
+    }
+  }
+  return out;
+}
+
+/** A shared word, or one word the start of the other (at least 4 letters: "acme" / "acmecorp"). */
+function wordsOverlap(a: Set<string>, b: Set<string>): boolean {
+  for (const x of a) for (const y of b) {
+    if (x === y) return true;
+    const [s, l] = x.length <= y.length ? [x, y] : [y, x];
+    if (s.length >= 4 && l.startsWith(s)) return true;
+  }
+  return false;
+}
+
+/** References worth matching: the reference column and long digit runs (UTR, cheque numbers). */
+function refsOf(reference: string | undefined, narration: string): Set<string> {
+  const out = new Set<string>();
+  const r = (reference ?? "").trim().toLowerCase();
+  if (r.length >= 6 && !/^0+$/.test(r)) out.add(r);
+  for (const m of narration.toLowerCase().match(/\b[a-z]*\d{6,}\b/g) ?? []) if (!/^0+$/.test(m)) out.add(m);
+  return out;
 }

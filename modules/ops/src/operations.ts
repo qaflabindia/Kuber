@@ -195,6 +195,11 @@ export const reconcile: OpDef<z.infer<typeof ReconcileInput>> = {
     const drafts = (await ctx.svc.agent.queue(ctx.tenant) as unknown as DraftRow[]).filter((d) => d.book_id === ctx.book && d.proposal.txnDate <= i.asOf)
       .map((d) => ({ d, amt: natural(s, i.account, d.proposal.lines.filter((l) => l.accountId === i.account).reduce((a, l) => a + BigInt(l.amount), 0n)) }))
       .filter((x) => x.amt !== 0n);
+    // Also on the statement, not yet in the books: lines waiting for a person to say whether they are a provisional entry.
+    const matches = (await ctx.svc.agent.openMatchReviews(ctx.tenant)).filter((m) => m.book_id === ctx.book && m.detail.instrument === i.account && m.detail.txnDate <= i.asOf)
+      .map((m) => ({ d: { proposal: { txnDate: m.detail.txnDate, narration: `${m.detail.narration} (match review)` } } as DraftRow,
+        amt: natural(s, i.account, BigInt(m.detail.amount) * (m.detail.direction === "in" ? 1n : -1n)) }));
+    drafts.push(...matches);
     const expected = books - inBooks.reduce((a, x) => a + x.amt, 0n) + drafts.reduce((a, x) => a + x.amt, 0n);
     const diff = i.statementBalance - expected;
     const actions: Action[] = [];
