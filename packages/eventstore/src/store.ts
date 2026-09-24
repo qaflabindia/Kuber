@@ -191,6 +191,22 @@ export class EventStore {
   }
 
   /**
+   * Events by tenant, type and/or position, oldest first (rebuilds, dead-letter retry). Runs in
+   * `tx` when given (which must see the rows), otherwise in system scope.
+   */
+  async readEvents(q: { tenantId?: string; types?: string[]; after?: string; positions?: string[]; limit?: number },
+                   tx?: TransactionSql): Promise<Envelope[]> {
+    const run = (t: TransactionSql) => t<Row[]>`
+      SELECT event_id, global_position::text, stream_id, stream_version, type, schema_version, data, meta, recorded_at
+      FROM es.events WHERE global_position > ${q.after ?? "0"}
+        ${q.tenantId ? t`AND tenant_id = ${q.tenantId}` : t``}
+        ${q.types ? t`AND type IN ${t(q.types.length ? q.types : [""])}` : t``}
+        ${q.positions ? t`AND global_position IN ${t(q.positions.length ? q.positions : ["0"])}` : t``}
+      ORDER BY global_position LIMIT ${q.limit ?? 1000}`;
+    return this.openRows(tx ? await run(tx) : await this.systemTx(run));
+  }
+
+  /**
    * Storage integrity: recompute every stream's link chain from stored digests (no keys needed)
    * and, with `deep`, decrypt each event and recompute its digest. Returns problems found.
    */

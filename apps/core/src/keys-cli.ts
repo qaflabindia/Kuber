@@ -8,14 +8,23 @@
  *   keys rotate-master                add a new master key, re-wrap every tenant key under it
  *   keys retire-master <kekId>        remove an old master key once nothing is wrapped with it
  *   keys rotate-tenant <tenant>       new data key for a tenant and re-encrypt under it
- *   keys drop-retired <tenant>        drop retired data keys (after a 5-minute grace, if unused)
- *   keys shred <tenant> --reason "…"  crypto-shred a tenant (irreversible)
- *   keys purge-bus                    drop broker messages (events live in PostgreSQL)
+ *   keys drop-retired <tenant>        drop retired data keys: after a 5-minute grace, when no stored value uses
+ *                                     them and no envelope sealed with them is within the bus retention window
+ *   keys shred <tenant> --reason "…"  crypto-shred a tenant (irreversible); also appended to the shred ledger
+ *   keys purge-shredded               purge readable rows of every shredded tenant again (run ~2 min after shred)
+ *   keys reapply-shreds [ledger]      after a restore: re-shred and purge every tenant in the shred ledger
+ *   keys prune-outbox                 delete published outbox rows the broker no longer retains
+ *   keys purge-bus                    drop broker messages (events live in PostgreSQL); recorded for drop-retired
+ *   keys ops <command>                operational commands (see ops-cli.ts: status, dead letters, rebuild, certify)
  *   keys backup-encrypt | backup-decrypt   stdin to stdout (used by scripts/backup.sh, restore.sh)
  *
- * Environment: KUBER_MASTER_KEY_FILE, MIGRATION_URL (owner), NATS_URL (purge-bus only).
+ * Environment: KUBER_MASTER_KEY_FILE, MIGRATION_URL (owner), NATS_URL (purge-bus only),
+ * KUBER_BUS_RETENTION_DAYS (default 7, must match the core), KUBER_SHRED_LEDGER (default
+ * shredded.jsonl next to the master key file: keep it with the key file, not with the backups).
  */
 import postgres from "postgres";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { LocalFileKms, Keyring, decryptStream, encryptStream } from "@kuber/crypto";
 import { EventStore } from "@kuber/eventstore";
@@ -24,6 +33,7 @@ import { KeyAdmin } from "./keys-admin.ts";
 import { migrateCell } from "./cell.ts";
 
 const [cmd, ...args] = process.argv.slice(2);
+if (cmd === "ops") { await import("./ops-cli.ts"); process.exit(process.exitCode ?? 0); }
 const need = (k: string) => { const v = process.env[k]; if (!v) { console.error(`missing ${k}`); process.exit(2); } return v; };
 const flag = (name: string) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
 
@@ -48,7 +58,10 @@ await migrateCell(need("MIGRATION_URL"), process.env.APP_ROLE);
 const sql = postgres(need("MIGRATION_URL"), { max: 2, onnotice: () => undefined });
 const keyring = new Keyring(sql, kms, 0);
 const store = new EventStore(sql, "admin", { keyring, legacy: "allow" });
-const admin = new KeyAdmin(sql, keyring, store);
+const busRetentionMs = Number(process.env.KUBER_BUS_RETENTION_DAYS ?? "7") * 86_400_000;
+const admin = new KeyAdmin(sql, keyring, store, undefined, { busRetentionMs });
+const ledger = process.env.KUBER_SHRED_LEDGER ?? join(dirname(need("KUBER_MASTER_KEY_FILE")), "shredded.jsonl");
+const operator = process.env.USER ? `operator:${process.env.USER}` : "operator";
 
 try {
   switch (cmd) {
@@ -65,7 +78,9 @@ try {
       console.log(`${v.events} events in ${v.streams} streams`);
       console.log(v.problems.length ? `PROBLEMS:\n  ${v.problems.join("\n  ")}` : "link chains intact; every digest matches its decrypted payload");
       console.log(Object.keys(v.plaintext).length ? `STILL PLAINTEXT: ${JSON.stringify(v.plaintext)} (run: keys encrypt-legacy)` : "no plaintext in events or sealed columns");
-      process.exitCode = v.problems.length || Object.keys(v.plaintext).length ? 1 : 0;
+      console.log(Object.keys(v.residue).length ? `READABLE AFTER SHRED: ${JSON.stringify(v.residue)} (run: keys purge-shredded)` : "nothing readable remains for shredded tenants");
+      if (v.unclassified.length) console.log(`TENANT TABLES MISSING FROM THE RETENTION INVENTORY: ${v.unclassified.join(", ")}`);
+      process.exitCode = v.problems.length || Object.keys(v.plaintext).length || Object.keys(v.residue).length || v.unclassified.length ? 1 : 0;
       break;
     }
     case "encrypt-legacy": console.log(await admin.encryptLegacy()); break;
@@ -96,12 +111,28 @@ try {
       const t = args[0], reason = flag("--reason");
       if (!t || !reason) throw new Error('usage: keys shred <tenant> --reason "why"');
       if (flag("--confirm") !== t) throw new Error(`irreversible. Repeat the tenant to confirm: keys shred ${t} --reason "${reason}" --confirm ${t}`);
-      console.log(`shredded ${t}`, await admin.shred(t, process.env.USER ? `operator:${process.env.USER}` : "operator", reason));
+      // Ledger first: if the shred is interrupted, reapply-shreds finishes it.
+      appendFileSync(ledger, JSON.stringify({ tenant: t, by: operator, reason, at: new Date().toISOString() }) + "\n", { mode: 0o600 });
+      console.log(`shredded ${t}`, await admin.shred(t, operator, reason));
+      console.log(`recorded in ${ledger}. Run "keys purge-shredded" again in 2 minutes (key caches), then "keys verify".`);
       break;
     }
-    case "purge-bus": console.log("purged", await purgeKuberStreams(need("NATS_URL"), process.env.NATS_TLS_CA, process.env.NATS_TOKEN)); break;
+    case "purge-shredded": console.log(await admin.purgeShredded()); break;
+    case "reapply-shreds": {
+      const file = args[0] ?? ledger;
+      if (!existsSync(file)) { console.log(`no shred ledger at ${file}; nothing to re-apply`); break; }
+      const entries = readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { tenant: string; by: string; reason: string });
+      console.log(await admin.reapplyShreds(entries));
+      break;
+    }
+    case "prune-outbox": console.log(`pruned ${await admin.pruneOutbox()} published outbox row(s)`); break;
+    case "purge-bus": {
+      console.log("purged", await purgeKuberStreams(need("NATS_URL"), process.env.NATS_TLS_CA, process.env.NATS_TOKEN));
+      await admin.recordBusPurge(operator);
+      break;
+    }
     default:
-      console.error("commands: init, status, verify, encrypt-legacy, rotate-master, retire-master, rotate-tenant, drop-retired, shred, purge-bus");
+      console.error("commands: init, status, verify, encrypt-legacy, rotate-master, retire-master, rotate-tenant, drop-retired, shred, purge-shredded, reapply-shreds, prune-outbox, purge-bus, ops <command>");
       process.exitCode = 2;
   }
 } finally {

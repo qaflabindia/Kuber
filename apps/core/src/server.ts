@@ -13,6 +13,7 @@ import { ConcurrencyError } from "@kuber/eventstore";
 import { DomainError } from "@kuber/gl";
 import { AgentError } from "@kuber/agent";
 import { OpsError } from "@kuber/ops";
+import { StaleReportError, type ReportBasis, type ReportOptions } from "@kuber/reporting";
 import type { Cell } from "./cell.ts";
 import { Copilot } from "./copilot/index.ts";
 import { HELP } from "./copilot/router.ts";
@@ -54,6 +55,7 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     if (err instanceof AgentError) return reply.code(err.code === "not_found" ? 404 : 409).send({ error: err.code, message: err.message });
     if (err instanceof OpsError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof ConcurrencyError) return reply.code(409).send({ error: "conflict", message: err.message });
+    if (err instanceof StaleReportError) return reply.code(409).send({ error: err.code, message: err.message, basis: err.basis });
     const status = (err as { statusCode?: number }).statusCode ?? 500;
     if (status >= 500) console.error(err);
     return reply.code(status).send({ error: status >= 500 ? "internal" : "bad_request", message: status >= 500 ? "internal error" : (err as Error).message });
@@ -166,17 +168,22 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     return reply.code(201).send(b);
   });
 
-  const money = (s: { title: string; rows: { label: string; amount: bigint; accountId?: string; section?: string }[]; totals: Record<string, bigint> }) => ({
+  const money = (s: { title: string; rows: { label: string; amount: bigint; accountId?: string; section?: string }[]; totals: Record<string, bigint>; basis?: ReportBasis }) => ({
     title: s.title, rows: s.rows.map((r) => ({ label: r.label, amount: r.amount.toString(), ...(r.accountId ? { accountId: r.accountId } : {}), ...(r.section ? { section: r.section } : {}) })),
-    totals: Object.fromEntries(Object.entries(s.totals).map(([k, v]) => [k, v.toString()])), unit: "paise",
+    totals: Object.fromEntries(Object.entries(s.totals).map(([k, v]) => [k, v.toString()])), unit: "paise", ...(s.basis ? { basis: s.basis } : {}),
   });
-  type R = { Params: { tenant: string; book: string }; Querystring: { asOf?: string; from?: string; to?: string; account?: string } };
-  app.get<R>("/v1/tenants/:tenant/books/:book/reports/trial-balance", async (req) => money(await cell.reporting.trialBalance(who(req).tenant, req.params.book, req.query.asOf ?? null)));
-  app.get<R>("/v1/tenants/:tenant/books/:book/reports/profit-and-loss", async (req) => money(await cell.reporting.profitAndLoss(who(req).tenant, req.params.book, req.query.from ?? null, req.query.to ?? null)));
-  app.get<R>("/v1/tenants/:tenant/books/:book/reports/balance-sheet", async (req) => money(await cell.reporting.balanceSheet(who(req).tenant, req.params.book, req.query.asOf ?? null)));
+  type R = { Params: { tenant: string; book: string }; Querystring: { asOf?: string; from?: string; to?: string; account?: string; fresh?: string; timeoutMs?: string } };
+  // ?fresh=require refuses a projection that is behind the ledger (409 with the basis); ?fresh=wait waits up to timeoutMs (max 30 s).
+  const fresh = (req: FastifyRequest<R>): ReportOptions => {
+    const q = z.object({ fresh: z.enum(["any", "require", "wait"]).optional(), timeoutMs: z.coerce.number().int().min(0).max(30_000).optional() }).parse(req.query);
+    return { freshness: q.fresh ?? "any", timeoutMs: q.timeoutMs ?? 5_000 };
+  };
+  app.get<R>("/v1/tenants/:tenant/books/:book/reports/trial-balance", async (req) => money(await cell.reporting.trialBalance(who(req).tenant, req.params.book, req.query.asOf ?? null, fresh(req))));
+  app.get<R>("/v1/tenants/:tenant/books/:book/reports/profit-and-loss", async (req) => money(await cell.reporting.profitAndLoss(who(req).tenant, req.params.book, req.query.from ?? null, req.query.to ?? null, fresh(req))));
+  app.get<R>("/v1/tenants/:tenant/books/:book/reports/balance-sheet", async (req) => money(await cell.reporting.balanceSheet(who(req).tenant, req.params.book, req.query.asOf ?? null, fresh(req))));
   app.get<R>("/v1/tenants/:tenant/books/:book/reports/statement-of-affairs", async (req) => {
     const q = z.object({ from: IsoDate, to: IsoDate }).parse(req.query);
-    return money(await cell.reporting.statementOfAffairs(who(req).tenant, req.params.book, q.from, q.to));
+    return money(await cell.reporting.statementOfAffairs(who(req).tenant, req.params.book, q.from, q.to, 0n, 0n, fresh(req)));
   });
   app.get<R>("/v1/tenants/:tenant/books/:book/accounts/:account/lines", async (req) => {
     const { account } = req.params as unknown as { account: string };

@@ -11,6 +11,13 @@ export type Handler = (env: Envelope) => Promise<void>;
 
 export interface Subscription { name: string; filter: string[]; handler: Handler }
 
+/**
+ * Called once when a delivery exhausts its retries, before the message is given up on. It should
+ * record the failure durably (the cell writes es.dead_letters); if it throws, the message is not
+ * acknowledged and delivery is retried as before.
+ */
+export type DeadLetterHook = (d: { consumer: string; env: Envelope; error: unknown; attempts: number }) => Promise<void>;
+
 export interface Bus {
   publish(subject: string, env: Envelope): Promise<void>;
   subscribe(sub: Subscription): Promise<void>;
@@ -36,7 +43,7 @@ export class MemoryBus implements Bus {
   private subs: (Subscription & { queue: Envelope[]; subjects: string[]; running: boolean })[] = [];
   private seen = new Set<string>();
   public deadLetters: { sub: string; env: Envelope; error: unknown }[] = [];
-  constructor(private maxRetries = 3) {}
+  constructor(private maxRetries = 3, private onDeadLetter?: DeadLetterHook) {}
 
   async publish(subject: string, env: Envelope) {
     if (this.seen.has(env.eventId)) return;           // publish de-duplication by event ID
@@ -56,7 +63,12 @@ export class MemoryBus implements Bus {
         for (;;) {
           try { await s.handler(env); break; }
           catch (e) {
-            if (++attempt > this.maxRetries) { this.deadLetters.push({ sub: s.name, env, error: e }); break; }
+            if (++attempt > this.maxRetries) {
+              this.deadLetters.push({ sub: s.name, env, error: e });
+              await this.onDeadLetter?.({ consumer: s.name, env, error: e, attempts: attempt })
+                .catch((x) => console.error(`[${s.name}] could not record dead letter`, x));
+              break;
+            }
           }
         }
         s.queue.shift();

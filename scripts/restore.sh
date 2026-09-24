@@ -16,5 +16,12 @@ else
 fi
 ./kuber run --rm -T tools backup-decrypt < "$FILE" \
   | ./kuber exec -T postgres pg_restore -U kuber -d "$DB" --no-owner --role=kuber $FLAGS --exit-on-error
-[ "$DB" = kuber ] && ./kuber start core web
+if [ "$DB" = kuber ]; then
+  # A backup taken before a crypto-shred still holds that tenant's wrapped keys: erase it again
+  # from the shred ledger (~/.kuber/shredded.jsonl) before anything can read it.
+  ./kuber run --rm -T tools reapply-shreds
+  ./kuber start core web
+else
+  echo "NOTE: before using $DB, run: keys reapply-shreds (with MIGRATION_URL pointing at $DB) so erased tenants stay erased"
+fi
 echo "restored into database $DB"

@@ -8,11 +8,17 @@
 import { connect, type NatsConnection } from "@nats-io/transport-node";
 import { AckPolicy, DeliverPolicy, jetstream, jetstreamManager, type JetStreamClient, type JetStreamManager } from "@nats-io/jetstream";
 import type { Envelope } from "@kuber/contracts";
-import type { Bus, Subscription } from "./index.ts";
+import type { Bus, DeadLetterHook, Subscription } from "./index.ts";
 
 const DUPLICATE_WINDOW_NS = 10 * 60 * 1_000_000_000; // 10 minutes
 
-export interface NatsOptions { streamName?: string; caFile?: string; retentionDays?: number; token?: string }
+export interface NatsOptions {
+  streamName?: string; caFile?: string; retentionDays?: number; token?: string;
+  /** Deliveries per message before it is dead-lettered (JetStream max_deliver). Default 10. */
+  maxDeliver?: number;
+  /** Records a message that failed its last delivery; the message is then terminated. */
+  onDeadLetter?: DeadLetterHook;
+}
 
 /** tls:// servers require TLS; with a CA file the server certificate is verified against it. */
 const tlsFor = (servers: string, caFile?: string) =>
@@ -32,7 +38,7 @@ export async function purgeKuberStreams(servers: string, caFile?: string, token?
 export class NatsBus implements Bus {
   private stopFns: (() => void)[] = [];
   private constructor(private nc: NatsConnection, private js: JetStreamClient,
-                      private jsm: JetStreamManager, private stream: string) {}
+                      private jsm: JetStreamManager, private stream: string, private opts: NatsOptions = {}) {}
 
   static async connect(servers: string, cellId: string, opts: NatsOptions = {}) {
     const streamName = opts.streamName ?? `KUBER_${cellId.replace(/\W/g, "_").toUpperCase()}`;
@@ -44,7 +50,7 @@ export class NatsBus implements Bus {
       max_age: (opts.retentionDays ?? 7) * 86_400 * 1_000_000_000 };
     try { await jsm.streams.info(streamName); await jsm.streams.update(streamName, cfg); }
     catch { await jsm.streams.add(cfg); }
-    return new NatsBus(nc, jetstream(nc), jsm, streamName);
+    return new NatsBus(nc, jetstream(nc), jsm, streamName, opts);
   }
 
   async publish(subject: string, env: Envelope) {
@@ -61,7 +67,7 @@ export class NatsBus implements Bus {
     } else {
       await this.jsm.consumers.add(this.stream, {
         durable_name: durable, ack_policy: AckPolicy.Explicit, deliver_policy: DeliverPolicy.All,
-        filter_subjects: sub.filter, max_ack_pending: 1, max_deliver: 10, ack_wait: 30 * 1_000_000_000,
+        filter_subjects: sub.filter, max_ack_pending: 1, max_deliver: this.opts.maxDeliver ?? 10, ack_wait: 30 * 1_000_000_000,
       });
     }
     const consumer = await this.js.consumers.get(this.stream, durable);
@@ -69,8 +75,16 @@ export class NatsBus implements Bus {
     this.stopFns.push(() => messages.stop());
     void (async () => {
       for await (const m of messages) {
-        try { await sub.handler(m.json<Envelope>()); m.ack(); }
-        catch (e) { console.error(`[${sub.name}] handler failed, will retry`, e); m.nak(1000); }
+        let env: Envelope | undefined;
+        try { env = m.json<Envelope>(); await sub.handler(env); m.ack(); }
+        catch (e) {
+          // Last delivery: record it durably, then terminate, instead of letting JetStream drop it silently.
+          if (env && this.opts.onDeadLetter && m.info.deliveryCount >= (this.opts.maxDeliver ?? 10)) {
+            try { await this.opts.onDeadLetter({ consumer: sub.name, env, error: e, attempts: m.info.deliveryCount }); m.term(); continue; }
+            catch (x) { console.error(`[${sub.name}] could not record dead letter`, x); }
+          }
+          console.error(`[${sub.name}] handler failed, will retry`, e); m.nak(1000);
+        }
       }
     })();
   }

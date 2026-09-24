@@ -171,18 +171,43 @@ The core creates `kuber_system` on start with `SYSTEM_DB_PASSWORD`; `./kuber` an
   | `rotate-master` | Adds a new master key and re-wraps every tenant key under it |
   | `retire-master <id>` | Removes an old master key once nothing is wrapped with it |
   | `rotate-tenant <t>` | Creates a new tenant data key and re-encrypts under it |
-  | `drop-retired <t>` | Drops old tenant data keys after a 5-minute grace, and only when unused |
-  | `shred <t> --reason … --confirm <t>` | Crypto-shreds a tenant (irreversible) |
-  | `purge-bus` | Drops broker messages |
+  | `drop-retired <t>` | Drops old tenant data keys after a 5-minute grace, only when no stored value uses them and no envelope sealed with them is still within the bus retention (`KUBER_BUS_RETENTION_DAYS`, default 7) |
+  | `shred <t> --reason … --confirm <t>` | Crypto-shreds a tenant (irreversible) and records it in the shred ledger |
+  | `purge-shredded` | Purges shredded tenants' readable rows again (run about 2 minutes after `shred`, when key caches have expired) |
+  | `reapply-shreds [ledger]` | After a restore: shreds again every tenant in the shred ledger (`restore.sh --replace` runs it) |
+  | `prune-outbox` | Deletes published outbox rows that the broker no longer retains |
+  | `purge-bus` | Drops broker messages and records the purge, so `drop-retired` stops waiting for them |
 
+- **Key lifecycle.** A data key is dropped only when nothing retained needs it. That covers events, unpublished outbox rows, sealed columns and certified report snapshots, which are all re-encrypted. It also covers envelopes already published to NATS: these keep their original ciphertext until the bus retention has passed or `purge-bus` has run. Cached aggregate snapshots under an old key are deleted, not re-encrypted.
 - **Crypto-shredding:**
-  - Deletes the tenant's keys and purges its readable projections.
+  - Deletes the tenant's keys. Purges every table listed in the retention inventory (`RETENTION` in `apps/core/src/keys-admin.ts`), including evidence balances, dead letters and report snapshots.
+  - A database trigger refuses new events for a shredded tenant, even from a process that still has its keys cached.
   - The encrypted events remain, unreadable, but their structure still verifies.
-  - Copies in backups become unreadable too.
+  - `keys verify` fails if anything readable remains for a shredded tenant, or if a table with a `tenant_id` column is missing from the inventory.
+- **Backups and erasure:**
+  - A backup holds the wrapped tenant keys and ciphertext as they were when it was taken. If a backup predates a shred and the master key still exists, the backup can bring the erased tenant back.
+  - The shred ledger (`~/.kuber/shredded.jsonl`, next to `master.keys`, not with the backups) records every shred. `keys reapply-shreds` erases those tenants again after a restore.
+  - Erasure is complete in backups only when every backup older than the shred has expired, or when the master keys that wrapped those backups' tenant keys have been rotated out and destroyed (`rotate-master`, then `retire-master`). Set the backup retention with that in mind.
+  - Dropped data keys also survive in older backups. That is intended: those backups must remain restorable.
 - **Backups:**
   - `./scripts/backup.sh` streams `pg_dump` through chunked AES-256-GCM under a fresh file key, then verifies the result.
   - `./scripts/restore.sh <file>` restores into a new database; `--replace` restores over the live one.
   - Keep `master.keys` and the backups in different places. Either one alone is useless.
+
+**Operations** (`pnpm ops <command>`, or `./kuber run --rm tools ops <command>`; see `apps/core/src/ops-cli.ts`):
+
+| Command | What it does |
+| --- | --- |
+| `status` | Shows the outbox backlog, open dead letters, unprocessed events per consumer, and report lag per book |
+| `dead-letters [--all]` | Lists deliveries that failed their last retry (JetStream `max_deliver`), with the event reference and the error |
+| `retry <id\|all>` / `discard <id> --reason …` | Re-runs the handler on the event read from PostgreSQL (idempotent), or closes the dead letter |
+| `gaps` | Lists events that a consumer has no inbox record for. Unlike a checkpoint, this shows every missed event |
+| `check <reporting\|agent\|evidence>` | Compares the projection with the event store: exact balances, journal counts, contiguity, gaps |
+| `rebuild <reporting\|agent\|evidence> [--tenant t]` | Deletes the projection and replays it from the event store in one transaction. Inbox rows are rewritten, and no side effects run (evidence is rebuilt from its own records). Then runs `check`; the result is deterministic |
+| `certify <t> <book> <kind>` | Waits until the projection has caught up, then stores a certified statement with its ledger position and hash, encrypted |
+| `reproduce <t> <snapshotId>` | Recomputes a certified statement at its ledger position and compares hashes |
+
+Every report states its basis: the journals projected, the ledger position, the lag, and whether any journal is missing. The API and statements accept `fresh=require` (refuse with 409) or `fresh=wait&timeoutMs=…`. All the figures in one statement come from a single database snapshot.
 
 ## Develop on this machine
 

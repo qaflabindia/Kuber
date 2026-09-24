@@ -15,7 +15,7 @@ import {
   addDays, journalIdForRequest, stableId, uuid,
   type Decision, type Envelope, type EventData, type Line,
 } from "@kuber/contracts";
-import { once, type EventStore, type MetaInput, type NewEvent } from "@kuber/eventstore";
+import { once, type EventStore, type MetaInput, type NewEvent, type Projection } from "@kuber/eventstore";
 import { isToken, type TenantKeys } from "@kuber/crypto";
 import type { Level, PolicyEngine } from "@kuber/policy";
 import { SUSPENSE, accountNameCtx, classify, type LlmClassifier } from "./classify.ts";
@@ -47,6 +47,36 @@ export class Agent {
       case "TransactionExtracted": return void (await once(this.store, "agent", env, (tx) => this.onExtracted(tx, env)));
       default: return;
     }
+  };
+
+  /**
+   * The agent's read models of the ledger (accounts, journal index, party history), described for
+   * `ops rebuild agent`. Only the GL-derived tables: drafts, rules, parties and ratifications are
+   * the agent's own state, written with the events it emits, and TransactionExtracted is never
+   * replayed (it has side effects). Confirmation of provisional journals comes from the agent's
+   * own ProvisionalConfirmed events.
+   */
+  readonly projection: Projection = {
+    name: "agent", consumer: "agent",
+    tables: ["agent.accounts", "agent.journal_index", "agent.party_accounts"],
+    replay: ["BookOpened", "AccountAdded", "JournalPosted", "JournalReversed", "ProvisionalConfirmed"],
+    inboxTypes: ["BookOpened", "AccountAdded", "JournalPosted", "JournalReversed"],
+    apply: async (tx, env) => {
+      switch (env.type) {
+        case "BookOpened": case "AccountAdded": return this.projectAccounts(tx, env);
+        case "JournalPosted": return this.projectJournal(tx, env);
+        case "JournalReversed": return this.projectReversal(tx, env);
+        case "ProvisionalConfirmed":
+          await tx`UPDATE agent.journal_index SET confirmed = true WHERE tenant_id = ${env.meta.tenantId}
+                   AND journal_id = ${(env.data as EventData<"ProvisionalConfirmed">).journalId}`;
+      }
+    },
+    fingerprint: async (tx, t) => ({
+      accounts: await tx`SELECT book_id, account_id, nature, is_cash_like FROM agent.accounts WHERE tenant_id = ${t} ORDER BY 1, 2`,   // name is sealed
+      journals: await tx`SELECT book_id, journal_id, principal, party_id, counter_account, instrument, amount, txn_date::text, provisional, confirmed, reversed
+                         FROM agent.journal_index WHERE tenant_id = ${t} ORDER BY 2`,
+      parties: await tx`SELECT book_id, party_id, account_id, n FROM agent.party_accounts WHERE tenant_id = ${t} ORDER BY 1, 2, 3`,
+    }),
   };
 
   private async projectAccounts(tx: TransactionSql, env: Envelope) {
