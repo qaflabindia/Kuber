@@ -3,7 +3,9 @@
  *
  *   keys init <file>                  create a master key file (mode 0600); refuses to overwrite
  *   keys status                       master keys, tenant key versions, shredded tenants
- *   keys verify                       link chains, deep digests, anything still plaintext
+ *   keys verify [--full]              link chains and deep digests from each stream's verified checkpoint
+ *                                     (--full: every stream from its first event), anything still plaintext;
+ *                                     moves the checkpoints of streams that verified cleanly
  *   keys encrypt-legacy               seal data written before encryption (one-time migration)
  *   keys rotate-master                add a new master key, re-wrap every tenant key under it
  *   keys retire-master <kekId>        remove an old master key once nothing is wrapped with it
@@ -74,9 +76,11 @@ try {
       break;
     }
     case "verify": {
-      const v = await admin.verify(true);
-      console.log(`${v.events} events in ${v.streams} streams`);
-      console.log(v.problems.length ? `PROBLEMS:\n  ${v.problems.join("\n  ")}` : "link chains intact; every digest matches its decrypted payload");
+      const full = args.includes("--full");
+      const v = await admin.verify(true, { incremental: !full, record: true });
+      console.log(full ? `${v.events} events in ${v.streams} streams (full verification from the first event)`
+        : `${v.events} events verified in ${v.streams} streams (${v.resumed} resumed at their verified checkpoint; run "keys verify --full" to re-check all history)`);
+      console.log(v.problems.length ? `PROBLEMS:\n  ${v.problems.join("\n  ")}` : `link chains intact; every digest matches its decrypted payload; ${v.checkpointed} checkpoint(s) moved`);
       console.log(Object.keys(v.plaintext).length ? `STILL PLAINTEXT: ${JSON.stringify(v.plaintext)} (run: keys encrypt-legacy)` : "no plaintext in events or sealed columns");
       console.log(Object.keys(v.residue).length ? `READABLE AFTER SHRED: ${JSON.stringify(v.residue)} (run: keys purge-shredded)` : "nothing readable remains for shredded tenants");
       if (v.unclassified.length) console.log(`TENANT TABLES MISSING FROM THE RETENTION INVENTORY: ${v.unclassified.join(", ")}`);

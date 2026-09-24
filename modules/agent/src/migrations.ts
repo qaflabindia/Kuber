@@ -94,4 +94,11 @@ END $$;`,
 CREATE INDEX IF NOT EXISTS drafts_open_page ON agent.drafts (tenant_id, created_at, draft_id) WHERE status IN ('queued','awaiting_approval','rejected_by_gl');
 CREATE INDEX IF NOT EXISTS drafts_open_book_page ON agent.drafts (tenant_id, book_id, created_at, draft_id) WHERE status IN ('queued','awaiting_approval','rejected_by_gl');
 CREATE INDEX IF NOT EXISTS ratifications_open_page ON agent.ratifications (tenant_id, due_by, request_id) WHERE status = 'open';`,
+}, {
+  id: "agent-scale-002-match-review-page",
+  // Open match reviews are read as keyset pages in queue order, like drafts: the partial index holds
+  // only open reviews, so a page costs its own size.
+  sql: `
+CREATE INDEX IF NOT EXISTS match_reviews_open_page ON agent.match_reviews (tenant_id, created_at, review_id) WHERE status = 'open';
+CREATE INDEX IF NOT EXISTS match_reviews_open_book_page ON agent.match_reviews (tenant_id, book_id, created_at, review_id) WHERE status = 'open';`,
 }];

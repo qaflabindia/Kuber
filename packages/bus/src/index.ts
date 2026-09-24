@@ -117,3 +117,4 @@ export class MemoryBus implements Bus {
 }
 
 export { NatsBus, purgeKuberStreams, type NatsOptions } from "./nats.ts";
+export { NatsConsumerAdmin, classifyConsumers, expectedConsumers, planPrune, streamNameFor, type ClassifiedConsumer, type ConsumerKind, type ConsumerState, type PruneDecision } from "./consumers.ts";

@@ -253,9 +253,15 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     return o ? reply.send(o) : reply.code(404).send({ error: "not_found", message: `no signal ${req.params.id}` });
   });
   // Statement lines that may be a provisional entry already in the books: a person links or separates them.
-  app.get<P>("/v1/tenants/:tenant/match-reviews", async (req) => {
+  app.get<P>("/v1/tenants/:tenant/match-reviews", async (req, reply) => {
+    const q = req.query as PageQ;
     const { tenant, member } = await who(req, "read");
-    return (await cell.agent.openMatchReviews(tenant)).filter((r) => inScope(member, r.book_id));
+    // ?book= narrows to one book (within a book-scoped member's books); otherwise every book the member may see
+    if (q.book && !inScope(member, q.book)) throw new AccessDenied(`${q.book} is outside your books`);
+    const bookIds = q.book ? [q.book] : member.books ?? undefined;
+    const p = await cell.agent.matchReviewsPage(tenant, { ...pageOf(q), bookIds });
+    if (p.next) reply.header("x-next-cursor", p.next);
+    return p.items;
   });
   app.post<T>("/v1/tenants/:tenant/match-reviews/:id/resolve", async (req, reply) => {
     const { tenant, principal, member } = await who(req, "draft.decide");      // linking a line to a posted entry is a review decision

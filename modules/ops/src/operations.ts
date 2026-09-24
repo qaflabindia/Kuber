@@ -145,7 +145,8 @@ export const balance: OpDef<{ asOf?: string }> = {
     const b = balancesFromState(s, { to: i.asOf });
     let dr = 0n, cr = 0n;
     for (const v of b.values()) if (v > 0n) dr += v; else cr -= v;
-    const broken = await ctx.svc.gl.verify(ctx.tenant, ctx.book);
+    const chain = await ctx.svc.gl.verifyDetail(ctx.tenant, ctx.book);          // from the last verified checkpoint
+    const broken = chain.broken;
     const pos = await ctx.svc.reporting.position(ctx.tenant, ctx.book);
     const drafts = (await ctx.svc.agent.queueCounts(ctx.tenant, ctx.book)).open;   // counts: nothing decrypted
     const ratifs = await ctx.svc.agent.openRatificationCount(ctx.tenant);
@@ -153,7 +154,7 @@ export const balance: OpDef<{ asOf?: string }> = {
     const provisional = [...openProvisional(s)].filter(([, j]) => !i.asOf || j.txnDate <= i.asOf).length;
     const checks: Check[] = [
       { label: "Debits equal credits", ok: dr === cr, blocking: true, detail: `${rs(dr)} each side` },
-      { label: "Hash chain intact", ok: broken === null, blocking: true, detail: broken ? `broken at ${broken}` : `${s.seq} journals verified` },
+      { label: "Hash chain intact", ok: broken === null, blocking: true, detail: broken ? `broken at ${broken}` : `${s.seq} journals; ${chain.events} new event(s) verified since the last check` },
       { label: "Nothing in suspense", ok: suspense === 0n, blocking: false, detail: suspense ? rs(suspense) : undefined },
       { label: "Reports up to date", ok: pos.seq === s.seq, blocking: false, detail: pos.seq === s.seq ? undefined : `reports at ${pos.seq} of ${s.seq}; catching up` },
       { label: "No drafts waiting", ok: drafts === 0, blocking: false, detail: drafts ? `${drafts} waiting` : undefined },

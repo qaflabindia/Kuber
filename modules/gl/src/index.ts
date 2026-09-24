@@ -3,7 +3,7 @@
  * Commands arrive from the API (people) or as PostingRequested / CorrectionRequested events
  * from other modules. Each Book is one event stream: `<tenant>/book/<bookId>`.
  */
-import { journalIdForRequest, reversalIdForRequest, uuid, type Envelope, type EventData } from "@kuber/contracts";
+import { GENESIS_HASH, journalIdForRequest, reversalIdForRequest, uuid, type Envelope, type EventData } from "@kuber/contracts";
 import type { TransactionSql } from "postgres";
 import { ConcurrencyError, once, type EventStore, type MetaInput } from "@kuber/eventstore";
 import { DomainError, decide, emptyBook, evolve, verifyChain, type BookCommand, type BookState } from "./book.ts";
@@ -197,8 +197,32 @@ export class GeneralLedger {
     return this.execute(tenantId, bookId, { kind: "OpenBook", bookId, entityId, entityType, accounts }, { principal });
   }
 
-  async verify(tenantId: string, bookId: string) {
-    return verifyChain(await this.store.readStream(tenantId, bookStream(tenantId, bookId)));
+  /**
+   * Is the book intact? Returns null, or the first broken journal (or storage problem). Verifies
+   * incrementally: from the stream's verified checkpoint, the storage link chain, each event's
+   * digest and the journal hash chain (continuing from the last journal at the checkpoint); then
+   * moves the checkpoint forward. `full` re-checks the whole history (see `keys verify --full`).
+   */
+  async verify(tenantId: string, bookId: string, opts: { full?: boolean } = {}): Promise<string | null> {
+    return (await this.verifyDetail(tenantId, bookId, opts)).broken;
+  }
+
+  async verifyDetail(tenantId: string, bookId: string, opts: { full?: boolean } = {}) {
+    const stream = bookStream(tenantId, bookId);
+    let brokenJournal: string | null = null;
+    const r = await this.store.verifyStream(tenantId, stream, {
+      full: opts.full,
+      check: async (events, from, tx) => {
+        let prev = GENESIS_HASH;
+        if (from > 0) {
+          const last = await this.store.lastEventOfType(tenantId, stream, "JournalPosted", from, tx);
+          if (last) prev = (last.data as EventData<"JournalPosted">).hash;
+        }
+        brokenJournal = verifyChain(events, prev);
+        return brokenJournal ? [`journal ${brokenJournal}: hash chain broken`] : [];
+      },
+    });
+    return { broken: brokenJournal ?? r.problems[0] ?? null, problems: r.problems, from: r.from, to: r.to, events: r.events, checkpointed: r.checkpointed };
   }
 
   /** Event handler: postings and corrections requested by other modules. */

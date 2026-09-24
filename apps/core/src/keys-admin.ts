@@ -71,7 +71,7 @@ export const RETENTION: Record<string, "purge" | "sealed" | "keys" | "tombstone"
   // value once the tenant's books are unreadable. Credentials before members (foreign key).
   "identity.credentials": "purge", "identity.enrolments": "purge", "identity.members": "purge", "identity.settings": "purge",
   "evidence.balances": "purge", "evidence.records": "purge", "evidence.lookup": "purge",
-  "es.outbox": "purge", "es.snapshots": "purge", "es.dead_letters": "purge", "es.commands": "purge",
+  "es.outbox": "purge", "es.snapshots": "purge", "es.dead_letters": "purge", "es.commands": "purge", "es.verify_checkpoints": "purge",
   "es.events": "sealed", "keys.tenant_keys": "keys", "keys.shredded": "tombstone",
 };
 export const PROJECTION_TABLES = Object.keys(RETENTION).filter((t) => RETENTION[t] === "purge");
@@ -360,8 +360,13 @@ export class KeyAdmin {
     });
   }
 
-  async verify(deep = true) {
-    const storage = await this.store.verifyStorage({ deep });
+  /**
+   * Storage and erasure checks. Full by default (every stream from its first event);
+   * `incremental` resumes each stream at its verified checkpoint; `record` moves checkpoints
+   * forward for streams that verified cleanly.
+   */
+  async verify(deep = true, opts: { incremental?: boolean; record?: boolean } = {}) {
+    const storage = await this.store.verifyStorage({ deep, ...opts });
     const plaintext: Record<string, number> = {};
     await this.sys(async (t) => {
       const [e] = await t<{ n: number }[]>`SELECT count(*)::int AS n FROM es.events WHERE NOT (data ? '$c')`;
