@@ -136,6 +136,40 @@ END $$;
 GRANT ${SYSTEM_SCOPE_ROLE} TO CURRENT_USER;
 ` + ROLE_SCOPED_POLICIES_SQL,
   },
+  {
+    id: "es-004-command-results",
+    // Idempotent commands (F04): a client-chosen command id, scoped to the tenant and the action,
+    // with a keyed hash of the request and the outcome. Written in the same transaction as the
+    // financial effect, so "recorded" and "applied" cannot disagree.
+    sql: `
+CREATE TABLE es.commands (
+  tenant_id    TEXT NOT NULL,
+  scope        TEXT NOT NULL,
+  command_id   TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  result       JSONB NOT NULL,
+  recorded_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, scope, command_id)
+);
+ALTER TABLE es.commands ENABLE ROW LEVEL SECURITY;
+ALTER TABLE es.commands FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON es.commands USING (${TENANT_CHECK}) WITH CHECK (${TENANT_CHECK});
+CREATE POLICY system_scope ON es.commands TO ${SYSTEM_SCOPE_ROLE} USING (true) WITH CHECK (true);
+`,
+  },
+  {
+    id: "es-scale-001-snapshots",
+    // Aggregate snapshots (F10): sealed state plus the schema that wrote it, so a code change makes
+    // old rows a miss instead of a misread. Tenant rows like every other table: RLS on.
+    sql: `
+ALTER TABLE es.snapshots ADD COLUMN IF NOT EXISTS schema TEXT;
+CREATE INDEX IF NOT EXISTS snapshots_tenant ON es.snapshots (tenant_id);
+ALTER TABLE es.snapshots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE es.snapshots FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON es.snapshots USING (${TENANT_CHECK}) WITH CHECK (${TENANT_CHECK});
+CREATE POLICY system_scope ON es.snapshots TO ${SYSTEM_SCOPE_ROLE} USING (true) WITH CHECK (true);
+`,
+  },
 ];
 
 /**

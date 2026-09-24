@@ -13,7 +13,7 @@
  */
 import type { TransactionSql } from "postgres";
 import { canonical, sha256, stableId, type Envelope, type EventData, type EventType, type Line } from "@kuber/contracts";
-import { once, tenantRlsFor, type EventStore, type Migration } from "@kuber/eventstore";
+import { once, tenantRlsFor, type EventStore, type Migration, type Projection } from "@kuber/eventstore";
 
 export const EVIDENCE_MIGRATIONS: Migration[] = [{
   id: "evidence-001",
@@ -77,12 +77,12 @@ export class EvidenceService {
     const before = (evs: Envelope[]) => evs.filter((e) => BigInt(e.globalPosition) < BigInt(env.globalPosition));
     const read = async (stream: string) => before(await this.store.readStream(t, stream, 0, tx));
     const cites: Citation[] = [cite(env)];
-    const lookup: [string, string][] = [["event", env.eventId]];
+    let draftId: string | undefined;
 
     // Execution through an ops plan: the approval of exactly this hash was recorded before any action ran.
     const planId = env.meta.commandId;
     const planEvt = planId ? last(await read(`${t}/plan/${planId}`), "PlanApproved") : undefined;
-    if (planEvt) { cites.push(cite(planEvt)); lookup.push(["plan", planEvt.data.planId], ["plan_hash", planEvt.data.hash]); }
+    if (planEvt) cites.push(cite(planEvt));
 
     let subject: EvidenceRecord["subject"], result: Record<string, unknown>;
     let source: Record<string, unknown> = planEvt ? { kind: "plan", planId: planEvt.data.planId } : { kind: "direct", principal: env.meta.principal };
@@ -109,7 +109,6 @@ export class EvidenceService {
     } else {
       const d = env.data as EventData<"JournalPosted">;
       subject = { kind: "journal", id: d.journalId, bookId: d.bookId };
-      lookup.push(["journal", d.journalId], ["journal_hash", d.hash]);
       execution = { ...execution, idempotencyKey: d.journalId };
       result = { journalId: d.journalId, seq: d.seq, txnDate: d.txnDate, voucherType: d.voucherType, narration: d.narration,
         lines: d.lines, provisional: d.provisional, balances: await this.balances(tx, t, d.bookId, d.lines),
@@ -131,8 +130,6 @@ export class EvidenceService {
           source = { kind: "signal", channel: x.data.channel, trust: x.data.trust, signalId: x.data.signalId, txnId: x.data.txnId,
             contentHash: sig?.data.contentHash ?? null, receivedAt: sig?.recordedAt ?? x.recordedAt, reference: x.data.txn.reference ?? null,
             submittedBy: (sig ?? x).meta.principal };
-          lookup.push(["signal", x.data.signalId], ["txn", x.data.txnId]);
-          if (sig) lookup.push(["content_hash", sig.data.contentHash]);
         }
         decision = {
           ...decision,
@@ -143,7 +140,7 @@ export class EvidenceService {
                       approver: pol.data.decision.approver, reasons: pol.data.decision.reasons } : {}),
         };
         if (req) execution = { ...execution, requestId: req.data.requestId, ...(planEvt ? {} : { operation: "agent.pipeline" }) };
-        if (draft) lookup.push(["draft", draft.data.draftId]);
+        if (draft) draftId = draft.data.draftId;
         if (!planEvt) {
           if (approved) approval = { ...approval, kind: "draft", by: approved.meta.principal, role: roleOf(approved.meta.principal),
             at: approved.meta.occurredAt, draftId: approved.data.draftId, accountChosen: approved.data.accountId };
@@ -156,7 +153,6 @@ export class EvidenceService {
         const corr = last(await read(`${t}/corrections/${d.reverses}`), "CorrectionRequested");
         if (corr) { cites.push(cite(corr)); approval = { ...approval, correctionRequestedBy: corr.meta.principal }; }
         exception(`reverses journal ${d.reverses}`, env.meta.principal);
-        lookup.push(["journal", d.reverses]);
       }
     }
 
@@ -167,15 +163,60 @@ export class EvidenceService {
     const [written] = await this.store.append("evidence", t, { streamId: stream, expected: "any", events: [{ type: "EvidenceRecorded",
       data: { evidenceId, bookId: subject.bookId, subject: { kind: subject.kind, id: subject.id }, recordHash, record: record as unknown as Record<string, unknown> } }] },
       { principal: "system:evidence", correlationId: env.meta.correlationId, causationId: env.eventId }, tx);
-    await tx`INSERT INTO evidence.records (tenant_id, evidence_id, book_id, subject_kind, subject_id, record_hash, stream_id, stream_version)
-             VALUES (${t}, ${evidenceId}, ${subject.bookId}, ${subject.kind}, ${subject.id}, ${recordHash}, ${stream}, ${written!.streamVersion})
+    await this.index(tx, t, evidenceId, record, recordHash, stream, written!.streamVersion, draftId);
+  }
+
+  /** The retrieval rows of one record: derived from the record alone (plus its draft id), so a rebuild reproduces them. */
+  private async index(tx: TransactionSql, t: string, evidenceId: string, record: EvidenceRecord, recordHash: string,
+                      stream: string, version: number, draftId: string | undefined, recordedAt?: string) {
+    const { subject, source, execution, result } = record;
+    await tx`INSERT INTO evidence.records (tenant_id, evidence_id, book_id, subject_kind, subject_id, record_hash, stream_id, stream_version, recorded_at)
+             VALUES (${t}, ${evidenceId}, ${subject.bookId}, ${subject.kind}, ${subject.id}, ${recordHash}, ${stream}, ${version}, ${recordedAt ?? new Date().toISOString()})
              ON CONFLICT DO NOTHING`;
+    const lookup: [string, unknown][] = [["event", record.cites[0]?.eventId]];
+    if (execution.planId) lookup.push(["plan", execution.planId], ["plan_hash", execution.planHash]);
+    if (subject.kind === "journal") lookup.push(["journal", result.journalId], ["journal_hash", result.hash]);
+    if (source.kind === "signal") lookup.push(["signal", source.signalId], ["txn", source.txnId], ["content_hash", source.contentHash]);
+    if (draftId) lookup.push(["draft", draftId]);
+    if (result.reverses) lookup.push(["journal", result.reverses]);
     lookup.push(["evidence", evidenceId], ["record_hash", recordHash]);
-    for (const c of cites) lookup.push(["event", c.eventId]);
-    for (const [kind, value] of new Map(lookup.map(([k, v]) => [`${k}\n${v}`, [k, v] as const])).values()) {
+    for (const c of record.cites) lookup.push(["event", c.eventId]);
+    const rows = new Map<string, [string, string]>();
+    for (const [k, v] of lookup) if (typeof v === "string" && v) rows.set(`${k}\n${v}`, [k, v]);
+    for (const [kind, value] of rows.values()) {
       await tx`INSERT INTO evidence.lookup VALUES (${t}, ${value}, ${kind}, ${evidenceId}) ON CONFLICT DO NOTHING`;
     }
   }
+
+  /**
+   * The evidence read models (running balances, record index, lookup), described for
+   * `ops rebuild evidence`. They are rebuilt from the EvidenceRecorded events, never by re-running
+   * the handler: that would append new records. Balances are the "after" figures of each record.
+   */
+  readonly projection: Projection = {
+    name: "evidence", consumer: "evidence",
+    tables: ["evidence.balances", "evidence.records", "evidence.lookup"],
+    replay: ["EvidenceRecorded"], inboxTypes: [],
+    apply: async (tx, env) => {
+      const t = env.meta.tenantId;
+      const d = env.data as EventData<"EvidenceRecorded">;
+      const record = d.record as unknown as EvidenceRecord;
+      const draft = record.cites.find((c) => c.type === "DraftQueued");
+      const draftId = draft
+        ? ((await this.store.readStream(t, draft.streamId, draft.streamVersion - 1, tx))[0]?.data as EventData<"DraftQueued"> | undefined)?.draftId
+        : undefined;
+      await this.index(tx, t, d.evidenceId, record, d.recordHash, env.streamId, env.streamVersion, draftId, env.recordedAt);
+      for (const b of (record.result.balances ?? []) as { accountId: string; after: string }[]) {
+        await tx`INSERT INTO evidence.balances VALUES (${t}, ${record.subject.bookId}, ${b.accountId}, ${b.after})
+                 ON CONFLICT (tenant_id, book_id, account_id) DO UPDATE SET balance = EXCLUDED.balance`;
+      }
+    },
+    fingerprint: async (tx, t) => ({
+      balances: await tx`SELECT book_id, account_id, balance::text FROM evidence.balances WHERE tenant_id = ${t} ORDER BY 1, 2`,
+      records: await tx`SELECT evidence_id, book_id, subject_kind, subject_id, record_hash, stream_id, stream_version FROM evidence.records WHERE tenant_id = ${t} ORDER BY 1`,
+      lookup: await tx`SELECT value, kind, evidence_id FROM evidence.lookup WHERE tenant_id = ${t} ORDER BY 1, 2, 3`,
+    }),
+  };
 
   /** Balances (paise, debit positive) of the journal's accounts before and after it, in posting order. */
   private async balances(tx: TransactionSql, t: string, bookId: string, lines: Line[]) {

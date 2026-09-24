@@ -48,7 +48,9 @@ export interface Account { account_id: string; name: string; nature: "asset" | "
 export interface Line { accountId: string; amount: string; partyId?: string | null }
 export interface Journal { journal_id: string; seq: number; txn_date: string; narration: string; provisional: boolean; reverses: string | null; principal: string; lines: Line[] }
 export interface Draft {
-  draft_id: string; txn_id: string; book_id: string; status: "queued" | "awaiting_approval"; created_at: string;
+  draft_id: string; txn_id: string; book_id: string; status: "queued" | "awaiting_approval" | "rejected_by_gl"; created_at: string;
+  /** Why the ledger refused the posting, when status is rejected_by_gl. */
+  gl_rejection: string | null;
   proposal: { txnDate: string; narration: string; accountId: string; confidence: number; classifiedBy: string; partyName?: string | null;
     amount: string; direction: "in" | "out"; lines: Line[]; provisional: boolean };
   decision: { level: string; action: string; reasons: string[]; policyIds: string[]; approver: string };
@@ -73,7 +75,8 @@ export const api = (s: Pick<Session, "tenant" | "principal">) => ({
   openBook: (bookId: string, entityId: string, entityType: string) => call(s, "POST", "/books", { bookId, entityId, entityType }),
   accounts: (book: string) => call<Account[]>(s, "GET", `/books/${book}/accounts`),
   journals: (book: string, limit = 20) => call<Journal[]>(s, "GET", `/books/${book}/journals?limit=${limit}`),
-  drafts: () => call<Draft[]>(s, "GET", "/drafts"),
+  // A book-scoped member lists the drafts of one book (the core refuses a tenant-wide list for them).
+  drafts: (book?: string) => call<Draft[]>(s, "GET", book ? `/drafts?book=${encodeURIComponent(book)}` : "/drafts"),
   approve: (id: string, accountId?: string) => call(s, "POST", `/drafts/${id}/approve`, accountId ? { accountId } : {}),
   reject: (id: string, reason: string) => call(s, "POST", `/drafts/${id}/reject`, { reason }),
   ratifications: () => call<Ratification[]>(s, "GET", "/ratifications"),
@@ -91,6 +94,7 @@ export const api = (s: Pick<Session, "tenant" | "principal">) => ({
   ask: (book: string, text: string, history: { role: "user" | "assistant"; text: string }[]) => call<CopilotReply>(s, "POST", `/books/${book}/copilot`, { text, history }),
   plan: (book: string, op: string, input: unknown = {}) => call<Plan>(s, "POST", `/books/${book}/ops/${op}`, input),
   plans: (book: string) => call<Plan[]>(s, "GET", `/books/${book}/plans`),
+  attention: (book: string) => call<{ drafts: number; awaitingApproval: number; ratifications: number; plans: number }>(s, "GET", `/books/${book}/attention`),
   commit: (id: string, hash: string) => call<{ planId: string; status: string; steps?: string[]; message?: string }>(s, "POST", `/plans/${id}/commit`, { hash }),
   discard: (id: string) => call(s, "POST", `/plans/${id}/discard`, {}),
   verify: (book: string) => call<{ intact: boolean; firstBrokenJournal: string | null }>(s, "GET", `/books/${book}/verify`),

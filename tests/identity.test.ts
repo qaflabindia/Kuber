@@ -10,7 +10,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createHash, createHmac, createSign, generateKeyPairSync, randomBytes, type KeyObject } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { uuid } from "@kuber/contracts";
-import { buildServer, kuberTools, Copilot, type Cell } from "@kuber/core";
+import postgres from "postgres";
+import { Keyring } from "@kuber/crypto";
+import { EventStore } from "@kuber/eventstore";
+import { KeyAdmin, buildServer, kuberTools, Copilot, type Cell } from "@kuber/core";
 import { AUDIENCE, AUTH_HEADER, ISSUER, ReplayCache, authKey, bodyHash, signRequest, verifyRequest } from "@kuber/auth";
 import { ACTIONS, Identity, ROLES, can, permissionTable, type Action, type Role } from "@kuber/identity";
 import type { Plan } from "@kuber/ops";
@@ -83,7 +86,7 @@ const T = "firm", B = "main", B2 = "restricted";
 const P = { owner: "owner:ravi", controller: "controller:asha", controller2: "controller:kiran", preparer: "preparer:dev", approver: "approver:meena",
   auditor: "auditor:outsider", member: "member:anu", scoped: "controller:branch", agent: "agent:main-only" };
 const clock = { value: "2026-11-25" };
-let cell: Cell, app: FastifyInstance, stop: () => Promise<void>;
+let cell: Cell, app: FastifyInstance, stop: () => Promise<void>, ownerUrl: string;
 let send: ReturnType<typeof signedInject>;
 const as = (principal: string | null, method: SignedRequest["method"], url: string, payload?: unknown, tenant: string | null = T) =>
   send({ method, url, tenant, principal, payload });
@@ -92,7 +95,9 @@ const recordInput = (amount: string | number = 100) => ({ date: "2026-10-01", na
 const seq = async (book = B) => (await cell.gl.state(T, book)).seq;
 
 beforeAll(async () => {
-  ({ cell, stop } = await startCell(clock));
+  let db: { ownerUrl: string };
+  ({ cell, stop, db } = await startCell(clock));
+  ownerUrl = db.ownerUrl;
   await enrol(cell, T, [P.owner, P.controller, P.controller2, P.preparer, P.approver, P.auditor, P.member]);
   await enrol(cell, T, [P.scoped], [B]);
   await enrol(cell, T, [P.agent], [B]);
@@ -388,5 +393,24 @@ describe("passkeys", () => {
     const dev = new Identity(cell.store, cell.policies, { rpId: RP_ID, origins: [ORIGIN], devSignIn: true });
     expect(await dev.devSignIn("devco", "Dev User")).toMatchObject({ principal: "owner:dev-user", source: "dev" });
     await expect(dev.devSignIn(W, "Mallory")).rejects.toThrow(/sign in with a passkey/);
+  });
+
+  it("crypto-shredding a workspace removes its members, passkeys, invitations and settings", async () => {
+    const G = "gone";
+    const opts = (await ceremony(G, "registration/options", { displayName: "Leaving Owner" })).json();
+    expect((await ceremony(G, "registration/verify", { displayName: "Leaving Owner", response: new SoftAuthenticator().create(opts) })).statusCode).toBe(201);
+    await cell.identity.invite(G, "owner:leaving-owner", { role: "auditor", displayName: "Their CA" });
+    await cell.identity.setSettings(G, "owner:leaving-owner", { soloOwner: true, sodLimitPaise: null });
+    await cell.gl.openBook(G, B, G, "individual", "owner:leaving-owner");
+    const owner = postgres(ownerUrl, { max: 2, onnotice: () => undefined });
+    try {
+      const count = async () => Object.fromEntries(await Promise.all(["members", "credentials", "enrolments", "settings"].map(async (t) =>
+        [t, (await owner.unsafe(`SELECT count(*)::int AS n FROM identity.${t} WHERE tenant_id = $1`, [G]))[0]!.n as number])));
+      expect(await count()).toEqual({ members: 1, credentials: 1, enrolments: 1, settings: 1 });
+      const keyring = new Keyring(owner, cell.keyring.kms, 0);
+      await new KeyAdmin(owner, keyring, new EventStore(owner, "admin", { keyring }), 0).shred(G, "operator:test", "erasure request");
+      expect(await count()).toEqual({ members: 0, credentials: 0, enrolments: 0, settings: 0 });
+      expect((await cell.identity.member(T, P.owner))?.role).toBe("owner");           // other workspaces untouched
+    } finally { await owner.end(); }
   });
 });

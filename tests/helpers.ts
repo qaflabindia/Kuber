@@ -88,3 +88,17 @@ export function signedInject(app: FastifyInstance, secret = CORE_AUTH_SECRET) {
     return app.inject({ method: r.method, url: r.url, headers, ...(body !== undefined ? { payload: body } : {}) } as InjectOptions);
   };
 }
+
+/**
+ * Sign an inject request written in the old header style: `x-kuber-tenant` / `x-kuber-principal`
+ * become the signed assertion's tenant and principal (and are removed), the payload is serialized
+ * once and its exact bytes signed. Everything else (other headers, body) is sent unchanged.
+ */
+export function signed(r: { method: string; url: string; headers?: Record<string, string | undefined>; payload?: unknown }, secret = CORE_AUTH_SECRET): InjectOptions {
+  const { "x-kuber-tenant": tenant, "x-kuber-principal": principal, ...headers } = r.headers ?? {};
+  const body = r.payload === undefined ? undefined : typeof r.payload === "string" ? r.payload : JSON.stringify(r.payload);
+  const out: Record<string, string> = Object.fromEntries(Object.entries(headers).filter((e): e is [string, string] => e[1] !== undefined));
+  if (body !== undefined && !Object.keys(out).some((k) => k.toLowerCase() === "content-type")) out["content-type"] = "application/json";
+  out[AUTH_HEADER] = signRequest(authKey(secret), { method: r.method, path: r.url, body, tenant: tenant ?? null, principal: principal ?? null });
+  return { method: r.method, url: r.url, headers: out, ...(body !== undefined ? { payload: body } : {}) } as InjectOptions;
+}

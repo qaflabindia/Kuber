@@ -181,18 +181,43 @@ The core creates `kuber_system` on start with `SYSTEM_DB_PASSWORD`; `./kuber` an
   | `rotate-master` | Adds a new master key and re-wraps every tenant key under it |
   | `retire-master <id>` | Removes an old master key once nothing is wrapped with it |
   | `rotate-tenant <t>` | Creates a new tenant data key and re-encrypts under it |
-  | `drop-retired <t>` | Drops old tenant data keys after a 5-minute grace, and only when unused |
-  | `shred <t> --reason … --confirm <t>` | Crypto-shreds a tenant (irreversible) |
-  | `purge-bus` | Drops broker messages |
+  | `drop-retired <t>` | Drops old tenant data keys after a 5-minute grace, only when no stored value uses them and no envelope sealed with them is still within the bus retention (`KUBER_BUS_RETENTION_DAYS`, default 7) |
+  | `shred <t> --reason … --confirm <t>` | Crypto-shreds a tenant (irreversible) and records it in the shred ledger |
+  | `purge-shredded` | Purges shredded tenants' readable rows again (run about 2 minutes after `shred`, when key caches have expired) |
+  | `reapply-shreds [ledger]` | After a restore: shreds again every tenant in the shred ledger (`restore.sh --replace` runs it) |
+  | `prune-outbox` | Deletes published outbox rows that the broker no longer retains |
+  | `purge-bus` | Drops broker messages and records the purge, so `drop-retired` stops waiting for them |
 
+- **Key lifecycle.** A data key is dropped only when nothing retained needs it. That covers events, unpublished outbox rows, sealed columns and certified report snapshots, which are all re-encrypted. It also covers envelopes already published to NATS: these keep their original ciphertext until the bus retention has passed or `purge-bus` has run. Cached aggregate snapshots under an old key are deleted, not re-encrypted.
 - **Crypto-shredding:**
-  - Deletes the tenant's keys and purges its readable projections.
+  - Deletes the tenant's keys. Purges every table listed in the retention inventory (`RETENTION` in `apps/core/src/keys-admin.ts`), including evidence balances, dead letters and report snapshots.
+  - A database trigger refuses new events for a shredded tenant, even from a process that still has its keys cached.
   - The encrypted events remain, unreadable, but their structure still verifies.
-  - Copies in backups become unreadable too.
+  - `keys verify` fails if anything readable remains for a shredded tenant, or if a table with a `tenant_id` column is missing from the inventory.
+- **Backups and erasure:**
+  - A backup holds the wrapped tenant keys and ciphertext as they were when it was taken. If a backup predates a shred and the master key still exists, the backup can bring the erased tenant back.
+  - The shred ledger (`~/.kuber/shredded.jsonl`, next to `master.keys`, not with the backups) records every shred. `keys reapply-shreds` erases those tenants again after a restore.
+  - Erasure is complete in backups only when every backup older than the shred has expired, or when the master keys that wrapped those backups' tenant keys have been rotated out and destroyed (`rotate-master`, then `retire-master`). Set the backup retention with that in mind.
+  - Dropped data keys also survive in older backups. That is intended: those backups must remain restorable.
 - **Backups:**
   - `./scripts/backup.sh` streams `pg_dump` through chunked AES-256-GCM under a fresh file key, then verifies the result.
   - `./scripts/restore.sh <file>` restores into a new database; `--replace` restores over the live one.
   - Keep `master.keys` and the backups in different places. Either one alone is useless.
+
+**Operations** (`pnpm ops <command>`, or `./kuber run --rm tools ops <command>`; see `apps/core/src/ops-cli.ts`):
+
+| Command | What it does |
+| --- | --- |
+| `status` | Shows the outbox backlog, open dead letters, unprocessed events per consumer, and report lag per book |
+| `dead-letters [--all]` | Lists deliveries that failed their last retry (JetStream `max_deliver`), with the event reference and the error |
+| `retry <id\|all>` / `discard <id> --reason …` | Re-runs the handler on the event read from PostgreSQL (idempotent), or closes the dead letter |
+| `gaps` | Lists events that a consumer has no inbox record for. Unlike a checkpoint, this shows every missed event |
+| `check <reporting\|agent\|evidence>` | Compares the projection with the event store: exact balances, journal counts, contiguity, gaps |
+| `rebuild <reporting\|agent\|evidence> [--tenant t]` | Deletes the projection and replays it from the event store in one transaction. Inbox rows are rewritten, and no side effects run (evidence is rebuilt from its own records). Then runs `check`; the result is deterministic |
+| `certify <t> <book> <kind>` | Waits until the projection has caught up, then stores a certified statement with its ledger position and hash, encrypted |
+| `reproduce <t> <snapshotId>` | Recomputes a certified statement at its ledger position and compares hashes |
+
+Every report states its basis: the journals projected, the ledger position, the lag, and whether any journal is missing. The API and statements accept `fresh=require` (refuse with 409) or `fresh=wait&timeoutMs=…`. All the figures in one statement come from a single database snapshot.
 
 ## Develop on this machine
 
@@ -248,6 +273,11 @@ active member). Identity: `POST /v1/tenants/:t/identity/{registration,authentica
 | `GET  …/books/:b/reports/{trial-balance,profit-and-loss,balance-sheet,statement-of-affairs}` | Statements (amounts in paise) |
 | `GET  …/books/:b/accounts/:a/lines` | Drill-through to journal lines |
 | `GET  …/books/:b/verify` | Recompute the hash chain |
+| `GET  …/books/:b/attention` | Counts for badges: open drafts, drafts awaiting approval, ratifications, open plans |
+
+Lists of open work and drill-through are keyset pages: `?limit=` (drafts and ratifications at most
+500, plans 200, drill-through 1,000) and `?after=` (plans: `?before=`) with the cursor returned in
+the `x-next-cursor` response header; `GET /drafts` also takes `?book=`.
 | `GET /healthz`, `GET /readyz` | Liveness and readiness |
 
 ## Measured (indicative only)
@@ -263,6 +293,33 @@ consumers running in the same process, 20 concurrent connections, ~4,000 events 
 These are not capacity figures for production; they show the design has headroom against the
 ~1,000 req/s peak in section 16.5 when reads and writes are spread across books and instances.
 Load tests from section 16.5 must run per cell before launch.
+
+### Scale work (F09–F11), before and after
+
+Hardware and method: 2 vCPU (Intel Xeon @ 2.1 GHz), 7 GB RAM sandbox shared with other workloads,
+Node 22.22, PostgreSQL 16 on the same host, in-memory bus, one process. Single runs, not a load
+test; expect ±20–30 % between runs. `review/replay-benchmark.ts` is a pure in-memory fold;
+`scripts/scale-bench.ts <journals>` (needs `TEST_DATABASE_ADMIN_URL`) posts N journals to one book
+with `gl.execute`, then measures cold loads, projection and interactive reads.
+
+| Measure | Before | After |
+| --- | --- | --- |
+| Fold 1k / 3k / 10k journals (replay-benchmark) | 49 / 370 / 6,123 ms (quadratic) | 16 / 21 / 42 ms |
+| Sequential writes, one book, 5k journals | 205/s (last 500: p50 5.7 ms, p95 12.5 ms) | 320–358/s (last 500: p50 1.4–3.5 ms, p95 2.9–6.3 ms) |
+| Sequential writes, one book, 20k journals | not run (quadratic) | 457/s (last 500: p50 1.7 ms, p95 3.8 ms) |
+| Concurrent writes, 8 books | 579/s | 763–882/s |
+| Cold load of a 5k-journal book on a new instance | 1,743–2,158 ms (full replay) | 64–76 ms (snapshot + tail); 183 ms full replay |
+| Cold load, 20k journals | not run | 251–351 ms (snapshot + tail); 676 ms full replay |
+| Heap after the 5k run | 99 MB | 40–81 MB |
+| `dashboard` plan, 5k journals (p50 / p95) | 23 / 56 ms | 17–19 / 23–29 ms (20k: 27 / 40 ms) |
+| `reconcile` plan, 5k journals | 4.4 / 7.0 ms | 1.7–3.1 / 3.8–5.0 ms |
+| Recent journals (20), 5k journals | 37 / 55 ms | 21 / 35 ms; 1.7 / 5 ms at 20k with table statistics |
+| `balance` plan, 5k / 20k journals | 231 / 375 ms (5k) | 171 / 221 ms (5k), 654 / 730 ms (20k): dominated by full hash-chain verification, still O(history) |
+
+Tenant fairness is shown by tests rather than a throughput figure: with 8 lanes a tenant whose
+handler is blocked does not delay a tenant in another lane (memory bus and JetStream); with 1 lane
+it does. Projection of one tenant's 5k journals took 54 s before and ~20 s after on the in-memory
+bus; one tenant always stays in one lane, so a single hot tenant is still bounded by one consumer.
 
 ## Known limits and next steps
 

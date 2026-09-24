@@ -5,7 +5,7 @@ import type { Actions, PageServerLoad } from "./$types";
 export const load: PageServerLoad = async ({ locals }) => {
   const s = locals.session!;
   const a = api(s);
-  const [drafts, accounts] = await Promise.all([a.drafts(), a.accounts(s.book!)]);
+  const [drafts, accounts] = await Promise.all([a.drafts(s.books ? s.book ?? undefined : undefined), a.accounts(s.book!)]);
   return { drafts, accounts: accounts.map(({ account_id, name, nature }) => ({ account_id, name, nature })) };
 };
 

@@ -62,7 +62,8 @@ export interface Plan {
   policy: { ids: string[]; level: string; approver: string; reasons: string[] } | null;
   checks: Check[]; journals: PlanJournal[]; effects: Effect[]; sections: Section[]; data?: unknown;
   notes: string[]; links: [string, string][];
-  basisSeq: number; createdAt: string; createdBy: string; hash: string;
+  /** Book event version the plan was simulated at (absent on plans made before it was recorded). */
+  basisSeq: number; basisVersion?: number; createdAt: string; createdBy: string; hash: string;
   /** The person on whose instruction an agent (the copilot) prepared this plan; used for separation of duties. */
   requestedBy?: string;
   status: "preview" | "proposed" | "committed" | "discarded" | "stale";

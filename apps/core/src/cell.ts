@@ -4,13 +4,13 @@
  * the bus and never read each other's tables.
  */
 import postgres, { type Sql } from "postgres";
-import { EVENTSTORE_MIGRATIONS, EventStore, OutboxRelay, SYSTEM_SCOPE_ROLE, appGrants, migrate, openEnvelope, systemGrants, type LegacyPolicy } from "@kuber/eventstore";
+import { DeadLetterStore, EVENTSTORE_MIGRATIONS, EventStore, LIFECYCLE_MIGRATIONS, OutboxRelay, SYSTEM_SCOPE_ROLE, appGrants, migrate, openEnvelope, systemGrants, type LegacyPolicy } from "@kuber/eventstore";
 import { Keyring, type Kms } from "@kuber/crypto";
 import type { Envelope } from "@kuber/contracts";
-import { MemoryBus, NatsBus, type Bus } from "@kuber/bus";
+import { MemoryBus, NatsBus, busPartitions, type Bus } from "@kuber/bus";
 import { GeneralLedger } from "@kuber/gl";
 import { PolicyEngine } from "@kuber/policy";
-import { Channels } from "@kuber/channels";
+import { CHANNELS_MIGRATIONS, Channels, channelsGrants } from "@kuber/channels";
 import { AGENT_MIGRATIONS, Agent, type LlmClassifier } from "@kuber/agent";
 import { REPORTING_MIGRATIONS, Reporting } from "@kuber/reporting";
 import { OPS_MIGRATIONS, Operations } from "@kuber/ops";
@@ -32,7 +32,9 @@ export interface CellOptions {
   /** System login role to create or update while migrating, and grant system scope to. */
   systemRole?: { name: string; password?: string };
   cellId?: string;
-  bus?: "memory" | { natsUrl: string; caFile?: string; retentionDays?: number; token?: string };
+  bus?: "memory" | { natsUrl: string; caFile?: string; retentionDays?: number; token?: string; maxDeliver?: number };
+  /** Tenant partitions (lanes) per module consumer; default KUBER_BUS_PARTITIONS or 8 (F09). */
+  busPartitions?: number;
   policyDir: string;
   /** Key management service holding the master key(s). Required: there is no unencrypted mode. */
   kms: Kms;
@@ -46,7 +48,7 @@ export interface CellOptions {
   identity?: Partial<IdentityOptions>;
 }
 
-const SCHEMAS = ["es", "agent", "reporting", "ops", "keys", "evidence", "identity"];
+const SCHEMAS = ["es", "agent", "reporting", "ops", "keys", "evidence", "channels", "identity"];
 const ident = (role: string) => { if (!/^[a-z_][a-z0-9_]*$/.test(role)) throw new Error(`invalid role name ${role}`); return role; };
 
 /**
@@ -56,9 +58,10 @@ const ident = (role: string) => { if (!/^[a-z_][a-z0-9_]*$/.test(role)) throw ne
 export async function migrateCell(ownerUrl: string, appRole?: string, systemRole?: CellOptions["systemRole"]) {
   const owner = postgres(ownerUrl, { max: 1, onnotice: () => undefined });
   try {
-    await migrate(owner, [...EVENTSTORE_MIGRATIONS, ...AGENT_MIGRATIONS, ...REPORTING_MIGRATIONS, ...OPS_MIGRATIONS, ...EVIDENCE_MIGRATIONS, ...IDENTITY_MIGRATIONS]);
+    await migrate(owner, [...EVENTSTORE_MIGRATIONS, ...LIFECYCLE_MIGRATIONS, ...AGENT_MIGRATIONS, ...REPORTING_MIGRATIONS, ...OPS_MIGRATIONS, ...EVIDENCE_MIGRATIONS, ...CHANNELS_MIGRATIONS, ...IDENTITY_MIGRATIONS]);
     if (appRole) {
       await owner.unsafe(appGrants(ident(appRole), SCHEMAS));
+      await owner.unsafe(channelsGrants(ident(appRole)));
       // A tenant request role that could see every tenant would defeat row-level security.
       await owner.unsafe(`REVOKE ${SYSTEM_SCOPE_ROLE} FROM ${appRole}`);
     }
@@ -72,11 +75,16 @@ export async function migrateCell(ownerUrl: string, appRole?: string, systemRole
         await owner.unsafe(`ALTER ROLE ${name} PASSWORD '${systemRole.password.replace(/'/g, "''")}'`);
       }
       await owner.unsafe(systemGrants(name, SCHEMAS));
+      await owner.unsafe(channelsGrants(name));
     }
   } finally { await owner.end(); }
 }
 
 export class Cell {
+  /** Module handlers by consumer name (plaintext envelopes), for dead-letter retry. */
+  consumers: Record<string, (e: Envelope) => Promise<void>> = {};
+  deadLetters!: DeadLetterStore;
+
   private constructor(
     public readonly cellId: string, public readonly sql: Sql, private readonly systemSql: Sql, public readonly store: EventStore, public readonly bus: Bus,
     public readonly relay: OutboxRelay, public readonly gl: GeneralLedger, public readonly channels: Channels,
@@ -99,7 +107,12 @@ export class Cell {
     const systemSql = postgres(o.systemDatabaseUrl ?? ownerUrl, { max: 3, onnotice: () => undefined });
     const keyring = new Keyring(sql, o.kms);
     const store = new EventStore(sql, cellId, { keyring, legacy: o.legacy ?? "reject" }, systemSql);
-    const bus: Bus = !o.bus || o.bus === "memory" ? new MemoryBus() : await NatsBus.connect(o.bus.natsUrl, cellId, { caFile: o.bus.caFile, retentionDays: o.bus.retentionDays, token: o.bus.token });
+    const partitions = o.busPartitions ?? busPartitions();
+    // Exhausted deliveries (on any lane) are recorded in es.dead_letters under the module's name (see `ops dead-letters`).
+    const deadLetters = new DeadLetterStore(store);
+    const onDeadLetter = (d: { consumer: string; env: Envelope; error: unknown; attempts: number }) => deadLetters.record(d.consumer, d.env, d.attempts, d.error);
+    const bus: Bus = !o.bus || o.bus === "memory" ? new MemoryBus(3, partitions, onDeadLetter)
+      : await NatsBus.connect(o.bus.natsUrl, cellId, { caFile: o.bus.caFile, retentionDays: o.bus.retentionDays, token: o.bus.token, partitions, maxDeliver: o.bus.maxDeliver, onDeadLetter });
     const relay = new OutboxRelay(systemSql, (subject, env) => bus.publish(subject, env));
     const policies = PolicyEngine.fromDir(o.policyDir);
     const gl = new GeneralLedger(store);
@@ -114,12 +127,15 @@ export class Cell {
     const s = (module: string, type: string) => `kuber.${cellId}.${module}.${type}.*`;
     // The broker carries sealed payloads; decrypt just before the module's handler runs.
     const opened = (h: (e: Envelope) => Promise<void>) => async (e: Envelope) => h(await openEnvelope(keyring, e, o.legacy ?? "reject"));
-    await bus.subscribe({ name: "gl", filter: [s("agent", "PostingRequested"), s("agent", "CorrectionRequested")], handler: opened(gl.handler) });
+    await bus.subscribe({ name: "gl", filter: [s("agent", "PostingRequested"), s("agent", "CorrectionRequested"), s("agent", "ProvisionalConfirmed")], handler: opened(gl.handler) });
     await bus.subscribe({ name: "agent", filter: [s("channels", "TransactionExtracted"), s("gl", "BookOpened"), s("gl", "AccountAdded"),
-      s("gl", "JournalPosted"), s("gl", "JournalReversed")], handler: opened(agent.handler) });
+      s("gl", "JournalPosted"), s("gl", "JournalReversed"), s("gl", "PostingRejected")], handler: opened(agent.handler) });
     await bus.subscribe({ name: "evidence", filter: [s("gl", "JournalPosted"), s("gl", "PeriodLocked")], handler: opened(evidence.handler) });
-    await bus.subscribe({ name: "reporting", filter: [s("gl", "BookOpened"), s("gl", "AccountAdded"), s("gl", "JournalPosted")], handler: opened(reporting.handler) });
-    return new Cell(cellId, sql, systemSql, store, bus, relay, gl, channels, agent, reporting, policies, ops, keyring, evidence, identity);
+    await bus.subscribe({ name: "reporting", filter: [s("gl", "BookOpened"), s("gl", "AccountAdded"), s("gl", "JournalPosted"), s("gl", "JournalConfirmed")], handler: opened(reporting.handler) });
+    const cell = new Cell(cellId, sql, systemSql, store, bus, relay, gl, channels, agent, reporting, policies, ops, keyring, evidence, identity);
+    cell.consumers = { gl: gl.handler, agent: agent.handler, evidence: evidence.handler, reporting: reporting.handler };
+    cell.deadLetters = deadLetters;
+    return cell;
   }
 
   /** In-process runs: publish everything pending and wait until every module has caught up. */
@@ -138,6 +154,7 @@ export class Cell {
 
   async close() {
     this.relay.stop();
+    await this.gl.flushSnapshots();
     await this.bus.close();
     await this.sql.end({ timeout: 5 });
     await this.systemSql.end({ timeout: 5 });

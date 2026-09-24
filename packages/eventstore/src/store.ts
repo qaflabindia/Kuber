@@ -15,7 +15,7 @@
  */
 import type { Sql, TransactionSql } from "postgres";
 import {
-  OWNER, SCHEMA_VERSION, subjectFor, uuid, validateEvent,
+  OWNER, SCHEMA_VERSION, canonical, sha256, subjectFor, uuid, validateEvent,
   type Envelope, type EventData, type EventType, type Meta,
 } from "@kuber/contracts";
 import { CryptoError, type Keyring, type TenantKeys } from "@kuber/crypto";
@@ -32,6 +32,13 @@ export type MetaInput = Omit<Meta, "tenantId" | "cellId" | "occurredAt" | "corre
 export class ConcurrencyError extends Error {
   constructor(public streamId: string, public expected: Expected, public actual: number) {
     super(`stream ${streamId}: expected version ${expected}, found ${actual}`);
+  }
+}
+
+/** The same command id was used for a different request (F04): never silently apply or replay it. */
+export class CommandConflict extends Error {
+  constructor(public scope: string, public commandId: string) {
+    super(`command ${commandId} was already used for a different request`);
   }
 }
 
@@ -183,11 +190,52 @@ export class EventStore {
     });
   }
 
+  /**
+   * Idempotent commands (F04). Call under the transaction that applies the command, after taking
+   * whatever lock serialises it: returns the recorded result when this command id was seen with
+   * the same request, throws CommandConflict when it was seen with a different one, else null.
+   * `request` is hashed with the tenant's index key, so the table holds no readable content.
+   */
+  async priorCommand(tx: TransactionSql, tenantId: string, scope: string, commandId: string, request: unknown): Promise<{ result: unknown } | null> {
+    const hash = await this.requestHash(tenantId, request);
+    const [r] = await tx<{ request_hash: string; result: unknown }[]>`
+      SELECT request_hash, result FROM es.commands WHERE tenant_id = ${tenantId} AND scope = ${scope} AND command_id = ${commandId}`;
+    if (!r) return null;
+    if (r.request_hash !== hash) throw new CommandConflict(scope, commandId);
+    return { result: r.result };
+  }
+
+  async recordCommand(tx: TransactionSql, tenantId: string, scope: string, commandId: string, request: unknown, result: unknown) {
+    await tx`INSERT INTO es.commands (tenant_id, scope, command_id, request_hash, result)
+             VALUES (${tenantId}, ${scope}, ${commandId}, ${await this.requestHash(tenantId, request)}, ${tx.json(result as never)})`;
+  }
+
+  private async requestHash(tenantId: string, request: unknown) {
+    const c = canonical(request);
+    return this.crypto ? (await this.keys(tenantId)).index("command", c) : sha256(c);
+  }
+
   /** Read every event after a global position (system scope: rebuilds and catch-up). */
   async readAll(fromPosition = "0", limit = 1000): Promise<Envelope[]> {
     return this.systemTx(async (t) => (await t<Row[]>`
       SELECT event_id, global_position::text, stream_id, stream_version, type, schema_version, data, meta, recorded_at
       FROM es.events WHERE global_position > ${fromPosition} ORDER BY global_position LIMIT ${limit}`)).then((rows) => this.openRows(rows));
+  }
+
+  /**
+   * Events by tenant, type and/or position, oldest first (rebuilds, dead-letter retry). Runs in
+   * `tx` when given (which must see the rows), otherwise in system scope.
+   */
+  async readEvents(q: { tenantId?: string; types?: string[]; after?: string; positions?: string[]; limit?: number },
+                   tx?: TransactionSql): Promise<Envelope[]> {
+    const run = (t: TransactionSql) => t<Row[]>`
+      SELECT event_id, global_position::text, stream_id, stream_version, type, schema_version, data, meta, recorded_at
+      FROM es.events WHERE global_position > ${q.after ?? "0"}
+        ${q.tenantId ? t`AND tenant_id = ${q.tenantId}` : t``}
+        ${q.types ? t`AND type IN ${t(q.types.length ? q.types : [""])}` : t``}
+        ${q.positions ? t`AND global_position IN ${t(q.positions.length ? q.positions : ["0"])}` : t``}
+      ORDER BY global_position LIMIT ${q.limit ?? 1000}`;
+    return this.openRows(tx ? await run(tx) : await this.systemTx(run));
   }
 
   /**

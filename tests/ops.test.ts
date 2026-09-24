@@ -66,7 +66,8 @@ describe("simulate, then commit exactly that", () => {
     expect((await cell.gl.state(T, B)).seq).toBe(seq);                       // simulation wrote nothing
     expect(await commit(p)).toMatchObject({ status: "committed" });
     expect((await cell.gl.state(T, B)).seq).toBe(seq + 1);
-    await expect(commit(p)).rejects.toThrow(/committed/);                    // one commit only
+    expect(await commit(p)).toMatchObject({ status: "committed", replayed: true }); // a retry returns the outcome (F04)
+    expect((await cell.gl.state(T, B)).seq).toBe(seq + 1);                   // one commit only
   });
 
   it("refuses a tampered hash and a plan the books have moved past", async () => {

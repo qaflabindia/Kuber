@@ -6,3 +6,5 @@ export type { LlmProvider, Turn, Message, LlmTool } from "./copilot/provider.ts"
 export { parseGrants } from "./mcp.ts";
 export { kuberTools, planText } from "./tools.ts";
 export { KeyAdmin, SEALED_COLUMNS } from "./keys-admin.ts";
+export { PROJECTION_TABLES, RETENTION, pruneOutbox } from "./keys-admin.ts";
+export { OpsAdmin, CONSUMER_INPUTS, type ConsistencyReport } from "./ops-admin.ts";

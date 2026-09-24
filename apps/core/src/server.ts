@@ -11,15 +11,17 @@
  * the ops guard (maker-checker). Passkey ceremonies run here too: the core holds the credentials.
  */
 import { Readable } from "node:stream";
-import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { AUTH_HEADER, AuthError, ReplayCache, authKey, verifyRequest, type Claims } from "@kuber/auth";
-import { AccessDenied, IdentityError, inScope, type Action } from "@kuber/identity";
+import { AccessDenied, IdentityError, inScope, type Action, type Member } from "@kuber/identity";
 import { z, ZodError } from "zod";
 import { Account, IsoDate, Principal, parseAmount, uuid, type Line } from "@kuber/contracts";
-import { ConcurrencyError } from "@kuber/eventstore";
-import { DomainError } from "@kuber/gl";
+import { CommandConflict, ConcurrencyError } from "@kuber/eventstore";
+import { DomainError, type BookCommand } from "@kuber/gl";
 import { AgentError } from "@kuber/agent";
 import { OpsError } from "@kuber/ops";
+import { StaleReportError, type ReportBasis, type ReportOptions } from "@kuber/reporting";
+import { IngestionError } from "@kuber/channels";
 import type { Cell } from "./cell.ts";
 import { Copilot } from "./copilot/index.ts";
 import { HELP } from "./copilot/router.ts";
@@ -31,6 +33,9 @@ export interface ServerOptions {
   /** Shared secret with the BFF (CORE_AUTH_SECRET). Without it every /v1 request is refused. */
   auth?: { secret: string | Buffer; issuers?: string[] };
 }
+
+/** A client's idempotency key: opaque, bounded, printable. */
+const CommandKey = z.string().min(1).max(200).regex(/^[\x21-\x7e]+$/, "printable ASCII, no spaces");
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -102,8 +107,11 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     if (err instanceof ZodError) return reply.code(400).send({ error: "invalid_request", issues: err.issues });
     if (err instanceof DomainError) return reply.code(422).send({ error: err.code, message: err.message });
     if (err instanceof AgentError) return reply.code(err.code === "not_found" ? 404 : 409).send({ error: err.code, message: err.message });
+    if (err instanceof IngestionError) return reply.code(422).send({ error: err.code, message: err.message, detail: err.detail });
     if (err instanceof OpsError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof ConcurrencyError) return reply.code(409).send({ error: "conflict", message: err.message });
+    if (err instanceof StaleReportError) return reply.code(409).send({ error: err.code, message: err.message, basis: err.basis });
+    if (err instanceof CommandConflict) return reply.code(409).send({ error: "idempotency_conflict", message: err.message });
     const status = (err as { statusCode?: number }).statusCode ?? 500;
     if (status >= 500) console.error(err);
     return reply.code(status).send({ error: status >= 500 ? "internal" : "bad_request", message: status >= 500 ? "internal error" : (err as Error).message });
@@ -128,27 +136,42 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     return reply.code(201).send({ accountId: account.accountId });
   });
 
+  // Journal-creating commands are idempotent when the client names them (F04): an Idempotency-Key
+  // header or a commandId in the body. A retry with the same key and request returns the first
+  // result (Idempotent-Replayed: true) without posting again; the same key for a different request is 409.
+  const postOnce = async (req: FastifyRequest<P>, reply: FastifyReply, scope: string, principal: string, body: { commandId?: string },
+                          cmd: Extract<BookCommand, { kind: "PostJournal" }>) => {
+    const tenant = req.params.tenant, book = req.params.book;
+    const header = req.headers["idempotency-key"];
+    const key = CommandKey.optional().parse(typeof header === "string" ? header : undefined);
+    if (key && body.commandId && key !== body.commandId) throw Object.assign(new Error("Idempotency-Key and commandId differ"), { statusCode: 400 });
+    const commandId = key ?? body.commandId;
+    const shape = (ev: { data: unknown }[]) => ({ journalId: cmd.journalId, seq: (ev[0]?.data as { seq?: number } | undefined)?.seq });
+    if (!commandId) return reply.code(201).send(shape(await cell.gl.execute(tenant, book, cmd, { principal })));
+    // The journal id is incidental to the request, so it is left out of what must match.
+    const { journalId: _incidental, ...request } = cmd;
+    const r = await cell.gl.executeOnce(tenant, book, { scope, commandId, request: { principal, ...request } }, cmd, { principal }, shape);
+    return reply.code(201).header("idempotent-replayed", String(r.replayed)).send(r.result);
+  };
+
   app.post<P>("/v1/tenants/:tenant/books/:book/journals", async (req, reply) => {
-    const { tenant, principal } = await who(req, "journal.post");
-    const b = z.object({ txnDate: IsoDate, narration: z.string().min(1), voucherType: z.string().default("journal"), lines: z.array(ApiLine).min(2) }).parse(req.body);
-    const journalId = uuid();
-    const ev = await cell.gl.execute(tenant, req.params.book, { kind: "PostJournal", journalId, txnDate: b.txnDate, narration: b.narration,
-      voucherType: b.voucherType, lines: b.lines.map(toLine), autonomy: "human" }, { principal });
-    return reply.code(201).send({ journalId, seq: (ev[0]?.data as { seq?: number } | undefined)?.seq });
+    const { principal } = await who(req, "journal.post");
+    const b = z.object({ txnDate: IsoDate, narration: z.string().min(1), voucherType: z.string().default("journal"), lines: z.array(ApiLine).min(2),
+      commandId: CommandKey.optional() }).parse(req.body);
+    return postOnce(req, reply, "journals", principal, b, { kind: "PostJournal", journalId: uuid(), txnDate: b.txnDate, narration: b.narration,
+      voucherType: b.voucherType, lines: b.lines.map(toLine), autonomy: "human" });
   });
 
   app.post<P>("/v1/tenants/:tenant/books/:book/opening-balances", async (req, reply) => {
     const { tenant, principal } = await who(req, "journal.post");
-    const b = z.object({ accountId: z.string(), amount: z.string(), asOf: IsoDate }).parse(req.body);
+    const b = z.object({ accountId: z.string(), amount: z.string(), asOf: IsoDate, commandId: CommandKey.optional() }).parse(req.body);
     const st = await cell.gl.state(tenant, req.params.book);
     const acc = st.accounts.get(b.accountId);
     if (!acc) throw new DomainError("no_account", `unknown account ${b.accountId}`);
     const p = parseAmount(b.amount), signed = acc.nature === "asset" ? p : -p;
-    const journalId = uuid();
-    await cell.gl.execute(tenant, req.params.book, { kind: "PostJournal", journalId, txnDate: b.asOf, narration: `Opening balance declared: ${b.accountId}`,
-      voucherType: "opening", autonomy: "human",
-      lines: [{ accountId: b.accountId, amount: signed.toString(), dimensions: {} }, { accountId: "OPENING", amount: (-signed).toString(), dimensions: {} }] }, { principal });
-    return reply.code(201).send({ journalId });
+    return postOnce(req, reply, "opening-balances", principal, b, { kind: "PostJournal", journalId: uuid(), txnDate: b.asOf,
+      narration: `Opening balance declared: ${b.accountId}`, voucherType: "opening", autonomy: "human",
+      lines: [{ accountId: b.accountId, amount: signed.toString(), dimensions: {} }, { accountId: "OPENING", amount: (-signed).toString(), dimensions: {} }] });
   });
 
   app.post<P>("/v1/tenants/:tenant/books/:book/locks", async (req, reply) => {
@@ -160,9 +183,11 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
 
   app.post<P>("/v1/tenants/:tenant/books/:book/statements", async (req, reply) => {
     const { tenant, principal } = await who(req, "capture");
-    const csv = typeof req.body === "string" ? req.body : z.object({ csv: z.string() }).parse(req.body).csv;
+    const b = typeof req.body === "string" ? { csv: req.body } : z.object({ csv: z.string(),
+      declared: z.object({ opening: z.string(), closing: z.string(), debits: z.string(), credits: z.string(), count: z.number().int() }).partial().optional(),
+      allowUnreconciled: z.boolean().optional() }).parse(req.body);
     const instrument = (req.query as { instrument?: string }).instrument ?? "BANK";
-    const r = await cell.channels.submitStatement(tenant, req.params.book, csv, principal, instrument);
+    const r = await cell.channels.submitStatement(tenant, req.params.book, b.csv, principal, { instrument, declared: b.declared, allowUnreconciled: b.allowUnreconciled });
     return reply.code(r.duplicate ? 200 : 202).send(r);
   });
 
@@ -175,16 +200,39 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   });
 
   type T = { Params: { tenant: string; id: string } };
-  app.get<P>("/v1/tenants/:tenant/drafts", async (req) => {
-    const { tenant, member } = await who(req, "read");
-    return (await cell.agent.queue(tenant)).filter((d) => inScope(member, d.book_id));
-  });
-  // A book-scoped member may decide only drafts of their books.
-  const draftInScope = async (tenant: string, member: { books: string[] | null }, id: string) => {
-    if (member.books === null) return;
-    const d = (await cell.agent.queue(tenant)).find((x) => x.draft_id === id);
-    if (!d || !inScope(member, d.book_id)) throw new AccessDenied(`draft ${id} is outside your books`);
+  // Open-work lists are keyset pages (F11): ?limit=&after= (plans: &before=); the next cursor is in x-next-cursor.
+  type PageQ = { limit?: string; after?: string; before?: string; book?: string };
+  const pageOf = (q: PageQ) => ({ limit: q.limit !== undefined && Number.isFinite(Number(q.limit)) ? Number(q.limit) : undefined, after: q.after || undefined });
+  // A book-scoped member lists one of their books (?book=, or their only book); others may list all.
+  const listBook = (member: Member, book: string | undefined) => {
+    if (member.books === null) return book || undefined;
+    const b = book || (member.books.length === 1 ? member.books[0] : undefined);
+    if (!b || !inScope(member, b)) throw new AccessDenied(`choose one of your books: ${member.books.join(", ")}`);
+    return b;
   };
+  app.get<P>("/v1/tenants/:tenant/drafts", async (req, reply) => {
+    const q = req.query as PageQ;
+    const { tenant, member } = await who(req, "read");
+    const p = await cell.agent.queuePage(tenant, { ...pageOf(q), bookId: listBook(member, q.book) });
+    if (p.next) reply.header("x-next-cursor", p.next);
+    return p.items;
+  });
+  app.get<P>("/v1/tenants/:tenant/books/:book/attention", async (req) => {
+    const { tenant, member } = await who(req, "read");
+    const tenantWide = member.books === null;
+    const [d, ratifications, plans] = await Promise.all([cell.agent.queueCounts(tenant, tenantWide ? undefined : req.params.book),
+      tenantWide ? cell.agent.openRatificationCount(tenant) : Promise.resolve(0), cell.ops.pendingCount(tenant, req.params.book)]);
+    return { drafts: d.open, awaitingApproval: d.awaitingApproval, ratifications, plans };
+  });
+  // Decisions on one draft or match review: a book-scoped member only within their books.
+  const itemInScope = async (tenant: string, member: Member, table: "drafts" | "match_reviews", id: string) => {
+    if (member.books === null) return;
+    const [r] = await cell.store.tenantTx(tenant, (tx) => table === "drafts"
+      ? tx<{ book_id: string }[]>`SELECT book_id FROM agent.drafts WHERE tenant_id = ${tenant} AND draft_id = ${id}`
+      : tx<{ book_id: string }[]>`SELECT book_id FROM agent.match_reviews WHERE tenant_id = ${tenant} AND review_id = ${id}`);
+    if (!r || !inScope(member, r.book_id)) throw new AccessDenied(`${id} is outside your books`);
+  };
+  const draftInScope = (tenant: string, member: Member, id: string) => itemInScope(tenant, member, "drafts", id);
   app.post<T>("/v1/tenants/:tenant/drafts/:id/approve", async (req, reply) => {
     const { tenant, principal, member } = await who(req, "draft.decide");
     await draftInScope(tenant, member, req.params.id);
@@ -198,6 +246,23 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     await cell.agent.rejectDraft(tenant, req.params.id, principal, b.reason);
     return reply.code(204).send();
   });
+  // Source originals (F18): the retained, sealed upload behind a signal, with its hash re-verified.
+  app.get<T>("/v1/tenants/:tenant/signals/:id/original", async (req, reply) => {
+    const { tenant } = await who(req, "read", { allBooks: true });              // auditors may read originals
+    const o = await cell.channels.original(tenant, req.params.id);
+    return o ? reply.send(o) : reply.code(404).send({ error: "not_found", message: `no signal ${req.params.id}` });
+  });
+  // Statement lines that may be a provisional entry already in the books: a person links or separates them.
+  app.get<P>("/v1/tenants/:tenant/match-reviews", async (req) => {
+    const { tenant, member } = await who(req, "read");
+    return (await cell.agent.openMatchReviews(tenant)).filter((r) => inScope(member, r.book_id));
+  });
+  app.post<T>("/v1/tenants/:tenant/match-reviews/:id/resolve", async (req, reply) => {
+    const { tenant, principal, member } = await who(req, "draft.decide");      // linking a line to a posted entry is a review decision
+    await itemInScope(tenant, member, "match_reviews", req.params.id);
+    const b = z.object({ journalId: z.string().nullable() }).parse(req.body);
+    return reply.code(202).send(await cell.agent.resolveMatch(tenant, req.params.id, principal, b.journalId));
+  });
   // Evidence (design 14.7): look up by any id or hash a record cites, or fetch one record.
   app.get<{ Params: { tenant: string }; Querystring: { q?: string } }>("/v1/tenants/:tenant/evidence", async (req, reply) => {
     const { tenant } = await who(req, "read", { allBooks: true });
@@ -209,7 +274,12 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     const e = await cell.evidence.get(tenant, req.params.id);
     return e ? reply.send(e) : reply.code(404).send({ error: "not_found", message: `no evidence ${req.params.id}` });
   });
-  app.get<P>("/v1/tenants/:tenant/ratifications", async (req) => { const { tenant } = await who(req, "read", { allBooks: true }); return cell.agent.openRatifications(tenant); });
+  app.get<P>("/v1/tenants/:tenant/ratifications", async (req, reply) => {
+    const { tenant } = await who(req, "read", { allBooks: true });
+    const p = await cell.agent.ratificationsPage(tenant, pageOf(req.query as PageQ));
+    if (p.next) reply.header("x-next-cursor", p.next);
+    return p.items;
+  });
   app.post<T>("/v1/tenants/:tenant/journals/:id/ratify", async (req, reply) => {
     const { tenant, principal } = await who(req, "journal.ratify", { allBooks: true });
     await cell.agent.ratify(tenant, req.params.id, principal);
@@ -227,21 +297,34 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     return reply.code(201).send(b);
   });
 
-  const money = (s: { title: string; rows: { label: string; amount: bigint; accountId?: string; section?: string }[]; totals: Record<string, bigint> }) => ({
+  const money = (s: { title: string; rows: { label: string; amount: bigint; accountId?: string; section?: string }[]; totals: Record<string, bigint>; basis?: ReportBasis }) => ({
     title: s.title, rows: s.rows.map((r) => ({ label: r.label, amount: r.amount.toString(), ...(r.accountId ? { accountId: r.accountId } : {}), ...(r.section ? { section: r.section } : {}) })),
-    totals: Object.fromEntries(Object.entries(s.totals).map(([k, v]) => [k, v.toString()])), unit: "paise",
+    totals: Object.fromEntries(Object.entries(s.totals).map(([k, v]) => [k, v.toString()])), unit: "paise", ...(s.basis ? { basis: s.basis } : {}),
   });
-  type R = { Params: { tenant: string; book: string }; Querystring: { asOf?: string; from?: string; to?: string; account?: string } };
-  app.get<R>("/v1/tenants/:tenant/books/:book/reports/trial-balance", async (req) => money(await cell.reporting.trialBalance((await who(req, "read")).tenant, req.params.book, req.query.asOf ?? null)));
-  app.get<R>("/v1/tenants/:tenant/books/:book/reports/profit-and-loss", async (req) => money(await cell.reporting.profitAndLoss((await who(req, "read")).tenant, req.params.book, req.query.from ?? null, req.query.to ?? null)));
-  app.get<R>("/v1/tenants/:tenant/books/:book/reports/balance-sheet", async (req) => money(await cell.reporting.balanceSheet((await who(req, "read")).tenant, req.params.book, req.query.asOf ?? null)));
+  type R = { Params: { tenant: string; book: string }; Querystring: { asOf?: string; from?: string; to?: string; account?: string; fresh?: string; timeoutMs?: string } };
+  // Report dates are calendar dates too (F08): an impossible one is a 400, not a database error.
+  const dates = (q: unknown) => z.object({ asOf: IsoDate.optional(), from: IsoDate.optional(), to: IsoDate.optional() }).parse(q);
+  // ?fresh=require refuses a projection that is behind the ledger (409 with the basis); ?fresh=wait waits up to timeoutMs (max 30 s).
+  const fresh = (req: FastifyRequest<R>): ReportOptions => {
+    const q = z.object({ fresh: z.enum(["any", "require", "wait"]).optional(), timeoutMs: z.coerce.number().int().min(0).max(30_000).optional() }).parse(req.query);
+    return { freshness: q.fresh ?? "any", timeoutMs: q.timeoutMs ?? 5_000 };
+  };
+  const reader = async (req: FastifyRequest) => (await who(req, "read")).tenant;
+  app.get<R>("/v1/tenants/:tenant/books/:book/reports/trial-balance", async (req) => money(await cell.reporting.trialBalance(await reader(req), req.params.book, dates(req.query).asOf ?? null, fresh(req))));
+  app.get<R>("/v1/tenants/:tenant/books/:book/reports/profit-and-loss", async (req) => { const t = await reader(req); const q = dates(req.query); return money(await cell.reporting.profitAndLoss(t, req.params.book, q.from ?? null, q.to ?? null, fresh(req))); });
+  app.get<R>("/v1/tenants/:tenant/books/:book/reports/balance-sheet", async (req) => money(await cell.reporting.balanceSheet(await reader(req), req.params.book, dates(req.query).asOf ?? null, fresh(req))));
   app.get<R>("/v1/tenants/:tenant/books/:book/reports/statement-of-affairs", async (req) => {
+    const t = await reader(req);
     const q = z.object({ from: IsoDate, to: IsoDate }).parse(req.query);
-    return money(await cell.reporting.statementOfAffairs((await who(req, "read")).tenant, req.params.book, q.from, q.to));
+    return money(await cell.reporting.statementOfAffairs(t, req.params.book, q.from, q.to, 0n, 0n, fresh(req)));
   });
-  app.get<R>("/v1/tenants/:tenant/books/:book/accounts/:account/lines", async (req) => {
+  app.get<R>("/v1/tenants/:tenant/books/:book/accounts/:account/lines", async (req, reply) => {
     const { account } = req.params as unknown as { account: string };
-    return cell.reporting.drill((await who(req, "read")).tenant, req.params.book, account, req.query.from ?? null, req.query.to ?? null);
+    const t = await reader(req);
+    const q = dates(req.query);
+    const p = await cell.reporting.drillPage(t, req.params.book, account, q.from ?? null, q.to ?? null, pageOf(req.query as PageQ));
+    if (p.next) reply.header("x-next-cursor", p.next);
+    return p.items;
   });
   app.get<P>("/v1/tenants/:tenant/books", async (req) => {
     const { tenant, member } = await who(req, "read");
@@ -314,7 +397,12 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     const { tenant, principal } = await who(req, "read");
     return cell.ops.plan(tenant, req.params.book, principal, req.params.op, req.body ?? {});
   });
-  app.get<P>("/v1/tenants/:tenant/books/:book/plans", async (req) => { const { tenant } = await who(req, "read"); return cell.ops.pending(tenant, req.params.book); });
+  app.get<P>("/v1/tenants/:tenant/books/:book/plans", async (req, reply) => {
+    const { tenant } = await who(req, "read"); const q = req.query as PageQ;
+    const p = await cell.ops.pendingPage(tenant, req.params.book, { limit: pageOf(q).limit, before: q.before || undefined });
+    if (p.next) reply.header("x-next-cursor", p.next);
+    return p.items;
+  });
   app.get<T>("/v1/tenants/:tenant/plans/:id", async (req) => {
     const { tenant, member } = await who(req, "read");
     const p = await cell.ops.get(tenant, req.params.id);

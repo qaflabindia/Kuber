@@ -16,8 +16,9 @@
     "migrate": "tsx packages/eventstore/src/migrate-cli.ts",
     "demo": "tsx apps/core/src/demo.ts",
     "keys": "tsx apps/core/src/keys-cli.ts",
-    "test:llm": "bash scripts/test-llm.sh",
-    "identity": "tsx apps/core/src/identity-cli.ts"
+    "identity": "tsx apps/core/src/identity-cli.ts",
+    "ops": "tsx apps/core/src/ops-cli.ts",
+    "test:llm": "bash scripts/test-llm.sh"
   },
   "devDependencies": {
     "@kuber/crypto": "workspace:*",

@@ -217,6 +217,9 @@ describe("rotation", () => {
     const v = await ownerKeys.rotateTenant(T);
     cell.keyring.invalidate(T);
     expect(v).toBe(2);
+    // Published envelopes sealed with v1 pin it until the broker can no longer deliver them (F13);
+    // here the broker is taken as purged, so nothing outside PostgreSQL needs v1.
+    await admin.recordBusPurge("operator:test");
     const r = await admin.reencrypt(T);
     expect(r.events).toBeGreaterThan(20);
     expect(r.columns).toBeGreaterThan(10);
