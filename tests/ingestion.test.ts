@@ -304,6 +304,42 @@ describe("F06: provisional confirmation", () => {
 
 // ---------------------------------------------------------------- HTTP
 describe("HTTP", () => {
+  it("match reviews are keyset pages with x-next-cursor, narrowed to the member's books", async () => {
+    const app = buildServer(cell, { auth: { secret: CORE_AUTH_SECRET } });
+    const headers = { "x-kuber-tenant": T, "x-kuber-principal": OWNER };
+    try {
+      // three entries with nothing to compare against a statement line: each line becomes a review
+      for (const amt of ["1,200", "1,300", "1,400"]) await cell.channels.submitChat(T, B, `Spent ${amt} on groceries via upi`, OWNER, "2026-10-01");
+      await cell.settle();
+      await cell.channels.submitStatement(T, B, csvNoBal("01/10/2026,UPI/DR/BIGBASKET/bb@ybl,1200,", "01/10/2026,UPI/DR/DMART/dm@ybl,1300,",
+        "01/10/2026,UPI/DR/NATURES/nb@ybl,1400,"), OWNER);
+      await cell.settle();
+      const all = await cell.agent.openMatchReviews(T);
+      expect(all).toHaveLength(3);
+      const get = (q: string) => app.inject(signed({ method: "GET", url: `/v1/tenants/${T}/match-reviews${q}`, headers }));
+      const p1 = await get("?limit=2");
+      expect(p1.statusCode).toBe(200);
+      expect(p1.json().map((r: { review_id: string }) => r.review_id)).toEqual(all.slice(0, 2).map((r) => r.review_id));
+      const cursor = p1.headers["x-next-cursor"] as string;
+      expect(cursor).toBeTruthy();
+      const p2 = await get(`?limit=2&after=${cursor}`);
+      expect(p2.json().map((r: { review_id: string }) => r.review_id)).toEqual([all[2]!.review_id]);
+      expect(p2.json()[0].detail).toMatchObject({ amount: "140000" });
+      expect(p2.headers["x-next-cursor"]).toBeUndefined();
+      expect((await get("")).json()).toHaveLength(3);
+      expect((await get("?book=other")).json()).toHaveLength(0);
+      expect((await get("?after=not-a-cursor")).statusCode).toBe(409);
+      // a member scoped to another book sees none of these, and may not ask for this book
+      await enrol(cell, T, ["preparer:other"], ["other"]);
+      const scoped = { "x-kuber-tenant": T, "x-kuber-principal": "preparer:other" };
+      expect((await app.inject(signed({ method: "GET", url: `/v1/tenants/${T}/match-reviews`, headers: scoped }))).json()).toHaveLength(0);
+      expect((await app.inject(signed({ method: "GET", url: `/v1/tenants/${T}/match-reviews?book=${B}`, headers: scoped }))).statusCode).toBe(403);
+      // resolving one leaves the page index consistent
+      await cell.agent.resolveMatch(T, all[0]!.review_id, OWNER, null);
+      expect((await get("?limit=5")).json()).toHaveLength(2);
+    } finally { await app.close(); }
+  });
+
   it("refuses an unreconciled statement with 422, serves originals and resolves match reviews", async () => {
     const app = buildServer(cell, { auth: { secret: CORE_AUTH_SECRET } });
     const headers = { "x-kuber-tenant": T, "x-kuber-principal": OWNER };

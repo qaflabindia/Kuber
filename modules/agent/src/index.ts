@@ -289,13 +289,40 @@ export class Agent {
     });
   }
 
-  /** Statement lines waiting for a person to say whether they are a provisional entry already in the books. */
-  async openMatchReviews(tenantId: string) {
+  /** Statement lines waiting for a person to say whether they are a provisional entry already in the books (every page). */
+  async openMatchReviews(tenantId: string, opts: { bookIds?: string[] } = {}) {
+    const out: MatchReviewRow[] = [];
+    let after: string | undefined;
+    for (;;) {
+      const p = await this.matchReviewsPage(tenantId, { ...opts, limit: MAX_PAGE, after });
+      out.push(...p.items);
+      if (!p.next) return out;
+      after = p.next;
+    }
+  }
+
+  /**
+   * Open match reviews in queue order (created_at, review_id), one keyset page after `after`, like
+   * `queuePage`. `bookIds` narrows to those books in the index (a book-scoped member's books).
+   */
+  async matchReviewsPage(tenantId: string, opts: { bookIds?: string[]; limit?: number; after?: string } = {}): Promise<{ items: MatchReviewRow[]; next: string | null }> {
+    const limit = pageSize(opts.limit);
+    const cur = decodeCursor(opts.after);
+    if (opts.bookIds && !opts.bookIds.length) return { items: [], next: null };
     const keys = await this.store.keys(tenantId);
-    const rows = await this.store.tenantTx(tenantId, (tx) => tx<{ review_id: string; txn_id: string; book_id: string; candidates: string[]; detail: string; created_at: Date }[]>`
-      SELECT review_id, txn_id, book_id, candidates, detail, created_at FROM agent.match_reviews
-      WHERE tenant_id = ${tenantId} AND status = 'open' ORDER BY created_at, review_id`);
-    return rows.map((r) => ({ ...r, detail: keys.openJson<MatchReviewDetail>(r.detail, matchReviewCtx(r.review_id)) }));
+    const rows = await this.store.tenantTx(tenantId, (tx) => tx<(Omit<MatchReviewRow, "detail"> & { detail: string; cur_ts: string })[]>`
+      SELECT review_id, txn_id, book_id, candidates, detail, created_at, created_at::text AS cur_ts FROM agent.match_reviews
+      WHERE tenant_id = ${tenantId} AND status = 'open'
+        ${opts.bookIds ? tx`AND book_id IN ${tx(opts.bookIds)}` : tx``}
+        ${cur ? tx`AND (created_at, review_id) > (${cur[0]}::text::timestamptz, ${cur[1]})` : tx``}
+      ORDER BY created_at, review_id LIMIT ${limit + 1}`);
+    const more = rows.length > limit;
+    const page = rows.slice(0, limit);
+    const last = page.at(-1);
+    return {
+      items: page.map(({ cur_ts: _c, ...r }) => ({ ...r, detail: keys.openJson<MatchReviewDetail>(r.detail, matchReviewCtx(r.review_id)) })),
+      next: more && last ? encodeCursor([last.cur_ts, last.review_id]) : null,
+    };
   }
 
   /**
@@ -645,6 +672,7 @@ function openProposal(keys: TenantKeys, draftId: string, v: unknown): Proposal {
 type MatchOutcome = { kind: "none" } | { kind: "confirm"; journalId: string; basis: "reference" | "counterparty" }
   | { kind: "review"; candidates: string[]; reason: string };
 interface MatchReviewDetail { txnDate: string; narration: string; amount: string; direction: "in" | "out"; instrument: string; reference: string | null; reason: string }
+export interface MatchReviewRow { review_id: string; txn_id: string; book_id: string; candidates: string[]; detail: MatchReviewDetail; created_at: Date }
 
 export const matchReviewCtx = (reviewId: string) => `agent.match_reviews.detail|${reviewId}`;
 export const provisionalSourceCtx = (txnId: string) => `agent.provisional_sources.detail|${txnId}`;
