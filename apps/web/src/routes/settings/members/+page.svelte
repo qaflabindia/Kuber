@@ -20,7 +20,7 @@
   let confirming = $state<string | null>(null);
   let copied = $state(false);
   // Invitation form
-  let invScope = $state<"all" | "some">("all");
+  let invScope = $state<"all" | "some">("all"), invName = $state("");
   // Edit form (one member at a time)
   let editRole = $state(""), editScope = $state<"all" | "some">("all"), editBooks = $state<string[]>([]);
 
@@ -39,7 +39,7 @@
     return async ({ result, update }: { result: { type: string }; update: (o?: { reset?: boolean }) => Promise<void> }) => {
       busy = null;
       if (result.type === "success") { after?.(); }
-      await update({ reset: key === "invite" && result.type === "success" });
+      await update({ reset: false });
     };
   };
   async function copy(code: string) {
@@ -80,10 +80,10 @@
             They join as <span class="mono">{inv.principal}</span> · {scopeText(inv.books)}.</p>
         </div>
       {/if}
-      <form method="POST" action="?/invite" class="invite" use:enhance={act("invite")}>
+      <form method="POST" action="?/invite" class="invite" use:enhance={act("invite", () => { invName = ""; invScope = "all"; })}>
         <div class="field">
           <label for="inv-name">Name</label>
-          <input id="inv-name" name="displayName" required minlength="2" maxlength="80" autocomplete="off" placeholder="Asha Menon" />
+          <input id="inv-name" name="displayName" bind:value={invName} required minlength="2" maxlength="80" autocomplete="off" placeholder="Asha Menon" />
         </div>
         <div class="field">
           <label for="inv-role">Role</label>
