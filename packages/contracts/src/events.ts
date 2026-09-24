@@ -191,8 +191,12 @@ export const IDENTITY = {
   MemberAdded: z.object({ principal: Principal, role: z.string(), books: Books, source: z.string(), displayName: z.string(),
     reactivated: z.boolean().default(false) }),
   MemberRemoved: z.object({ principal: Principal }),
-  /** Role or book scope of an active member changed. */
-  MemberRoleChanged: z.object({ principal: Principal, role: z.string(), books: Books, previousRole: z.string(), previousBooks: Books }),
+  /**
+   * Role or book scope of an active member changed. A role change re-keys the principal (its prefix
+   * is its role): `principal` is then the successor and `previousPrincipal` the one it replaced.
+   */
+  MemberRoleChanged: z.object({ principal: Principal, role: z.string(), books: Books, previousRole: z.string(), previousBooks: Books,
+    previousPrincipal: Principal.optional() }),
   /** `invitation` is the SHA-256 of the one-time code (the code itself is never recorded). */
   InvitationIssued: z.object({ invitation: z.string(), principal: Principal, role: z.string(), books: Books, expiresAt: z.string() }),
   InvitationRedeemed: z.object({ invitation: z.string(), principal: Principal, credentialId: z.string() }),

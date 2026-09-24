@@ -18,6 +18,9 @@
   });
   const onCanvas = $derived(page.url.pathname === "/");
 
+  const ROLE: Record<string, string> = { owner: "Owner", controller: "Controller", preparer: "Preparer", approver: "Approver", auditor: "Auditor", member: "Member" };
+  const roleLabel = $derived(ROLE[data.shell?.role ?? data.session?.role ?? ""] ?? data.session?.role ?? "");
+
   function focusAsk() { if (onCanvas) document.getElementById("ask")?.focus(); else goto("/?ask"); }
   function onKey(e: KeyboardEvent) {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k" && data.shell) { e.preventDefault(); focusAsk(); }
@@ -61,16 +64,20 @@
           <Icon name="shield" size={16} />
           <span>{data.shell.intact ? "Ledger verified" : "Ledger check failed"}</span>
         </div>
-        <div class="who">
-          <div class="avatar" aria-hidden="true">{data.session?.name?.[0]?.toUpperCase()}</div>
-          <div class="who-text">
-            <div class="who-name">{data.session?.name}</div>
-            <div class="faint small">{data.session?.book} · {data.session?.tenant}</div>
-          </div>
-          <form method="POST" action="/signin?/signout">
-            <button class="btn quiet sm icon-only" aria-label="Sign out" title="Sign out"><Icon name="signout" size={16} /></button>
-          </form>
+      </div>
+      <div class="who" aria-label="Your account" role="group">
+        <div class="avatar" aria-hidden="true">{data.session?.name?.[0]?.toUpperCase()}</div>
+        <div class="who-text">
+          <div class="who-name"><span class="faint as">Signed in as</span> {data.session?.name}</div>
+          <div class="faint small"><span class="role">{roleLabel}</span> · {data.session?.book} · {data.session?.tenant}</div>
         </div>
+        {#if data.shell.canSeeMembers}
+          <a class="btn quiet sm icon-only" href="/settings/members" aria-label="Members and access" title="Members and access"
+            aria-current={page.url.pathname.startsWith("/settings/members") ? "page" : undefined}><Icon name="members" size={16} /></a>
+        {/if}
+        <form method="POST" action="/signin?/signout">
+          <button class="btn quiet sm icon-only" aria-label="Sign out" title="Sign out"><Icon name="signout" size={16} /></button>
+        </form>
       </div>
     </aside>
 
@@ -123,6 +130,9 @@
     color: var(--brass-2); font-family: var(--serif); font-size: 16px; border: 1px solid var(--line); }
   .who-text { flex: 1; min-width: 0; }
   .who-name { font-weight: 600; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .who-name .as { font-weight: 500; font-size: 11.5px; display: block; }
+  .role { color: var(--brass-2); font-weight: 600; }
+  .who .small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .small { font-size: 11.5px; }
   .icon-only { width: 30px; padding: 0; }
   .main { min-width: 0; padding: 40px 48px 80px; max-width: 1180px; width: 100%; }
@@ -132,6 +142,8 @@
     .rail { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; padding: 12px 16px; }
     .waiting { grid-auto-flow: column; overflow-x: auto; } .wl { display: none; }
     .rail-foot, .capture-btn .kbd { display: none; }
+    .who { order: 10; width: 100%; padding-top: 10px; }
+    .who-name .as { display: inline; }
     .main { padding: 24px 16px 64px; }
   }
 </style>

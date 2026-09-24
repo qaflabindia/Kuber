@@ -2,6 +2,7 @@ import { fail, redirect } from "@sveltejs/kit";
 import { ApiError, api, identity } from "$lib/server/api";
 import { COOKIE, devSignInEnabled, newSessionId, slug } from "$lib/server/session";
 import { startSession } from "$lib/server/signin";
+import { forgetStepUp } from "$lib/server/stepup";
 import type { Actions, PageServerLoad } from "./$types";
 
 export const load: PageServerLoad = async ({ locals }) => {
@@ -36,6 +37,7 @@ export const actions: Actions = {
     // Sign-out still completes locally when the core cannot be reached.
     if (locals.session) await api(locals.session).signOut().catch(() => undefined);
     cookies.delete(COOKIE, { path: "/" });
+    forgetStepUp(cookies);
     throw redirect(303, "/signin");
   },
 };

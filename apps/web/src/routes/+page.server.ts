@@ -1,5 +1,6 @@
 import { fail } from "@sveltejs/kit";
 import { api, ApiError } from "$lib/server/api";
+import { stepUpAt } from "$lib/server/stepup";
 import type { Actions, PageServerLoad } from "./$types";
 
 /** The canvas: live position, plans waiting for approval, and the agent. */
@@ -28,13 +29,18 @@ export const actions: Actions = {
     try { return { asked: text, answer: await api(s).ask(s.book!, text, history) }; }
     catch (e) { return fail(502, { asked: text, ...problem(e, "Kuber could not answer.") }); }
   },
-  commit: async ({ request, locals }) => {
+  commit: async ({ request, locals, cookies }) => {
     const f = await request.formData();
     const id = String(f.get("planId") ?? ""), hash = String(f.get("hash") ?? "");
+    const s = locals.session!;
     try {
-      const r = await api(locals.session!).commit(id, hash);
+      // A recent passkey step-up, if any, travels with the commit; the core decides whether it is needed.
+      const r = await api({ ...s, stepUpAt: stepUpAt(cookies, s) }).commit(id, hash);
       return { planId: id, status: r.status === "committed" ? "committed" : "proposed", message: r.message ?? null };
-    } catch (e) { return fail(409, { planId: id, ...problem(e, "Could not post.") }); }
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "step_up_required") return fail(403, { planId: id, ...problem(e, "Confirm with your passkey.") });
+      return fail(409, { planId: id, ...problem(e, "Could not post.") });
+    }
   },
   discard: async ({ request, locals }) => {
     const id = String((await request.formData()).get("planId") ?? "");

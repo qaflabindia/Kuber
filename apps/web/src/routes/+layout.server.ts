@@ -1,5 +1,5 @@
 import { redirect } from "@sveltejs/kit";
-import { api } from "$lib/server/api";
+import { api, members } from "$lib/server/api";
 import type { LayoutServerLoad } from "./$types";
 
 /**
@@ -14,9 +14,10 @@ export const load: LayoutServerLoad = async ({ locals, url }) => {
 
   const a = api(s);
   // Counts, not lists: the shell's cost does not grow with the queue (F11).
-  const [attention, journals, verify] = await Promise.all([
+  const [attention, journals, verify, me] = await Promise.all([
     a.attention(s.book).catch(() => ({ drafts: 0, awaitingApproval: 0, ratifications: 0, plans: 0 })),
     a.journals(s.book, 1).catch(() => []), a.verify(s.book).catch(() => ({ intact: false, firstBrokenJournal: null })),
+    members(s).me().catch(() => null),
   ]);
   return {
     session: s,
@@ -27,6 +28,9 @@ export const load: LayoutServerLoad = async ({ locals, url }) => {
       hasJournals: journals.length > 0,
       intact: verify.intact,
       pendingPlans: attention.plans,
+      // From the core's answer for this member (role changes show at once), not the session.
+      role: me?.role ?? s.role,
+      canSeeMembers: !!me?.permissions.includes("members.read"),
     },
   };
 };
