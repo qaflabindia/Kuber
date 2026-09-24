@@ -24,13 +24,13 @@ import { tenantRlsFor, type EventStore, type Migration } from "@kuber/eventstore
 import { DomainError, type BookState } from "@kuber/gl";
 import { AgentError } from "@kuber/agent";
 import { isToken, type TenantKeys } from "@kuber/crypto";
-import { balancesFromState } from "./math.ts";
+import { balancesFromState, paidParties } from "./math.ts";
 import { OPERATIONS } from "./operations.ts";
 import type { Action, Effect, OpContext, OpDef, OpName, OpsGuard, Plan, PlanJournal, Services } from "./types.ts";
 
 export * from "./types.ts";
 export { OPERATIONS } from "./operations.ts";
-export { balancesFromState, splitByWeights, rebalanceTransfers, financialYear, pctToBp } from "./math.ts";
+export { balancesFromState, splitByWeights, rebalanceTransfers, financialYear, fiscalStart, paidParties, pctToBp } from "./math.ts";
 
 export const OPS_MIGRATIONS: Migration[] = [{
   id: "ops-001",
@@ -89,6 +89,14 @@ export class Operations {
     const effects = effectsOf(state, journals);
     const decision = def.event ? this.svc.policies.decide({ eventCode: def.event, on: ctx.today, amountPaise: d.amountPaise, confidence: 1 }) : null;
     const checks = d.checks ?? [];
+    // FIN-MDM-03 / POL-501: a payment to a party whose bank details changed and are not yet
+    // verified and released is held. Blocking: a held plan is shown, never stored.
+    const paid = paidParties(state.accounts, paymentJournals(d.actions, d.data));
+    if (paid.length && this.svc.parties) {
+      const held = await this.svc.parties.holds(tenant, paid);
+      checks.push({ label: "No payment to a party on hold (POL-501)", ok: held.length === 0, blocking: true,
+        detail: held.length ? `bank details of ${held.map((h) => `${h.partyId} (${h.status})`).join(", ")} changed: verify and release first` : undefined });
+    }
     const blocked = checks.some((c) => c.blocking && !c.ok);
     // A blocked plan is shown, never stored: there is nothing anyone could approve.
     const committable = def.kind === "write" && !blocked;
@@ -192,6 +200,10 @@ export class Operations {
         if (cur!.status !== "proposed") throw new OpsError("not_open", `plan is ${cur!.status}`);
         // Nothing can post between this check and the actions below.
         const moved = row.basis_version !== null ? b.version !== row.basis_version : b.state.seq !== row.basis_seq;
+        // A proposal made before a party's bank details changed is held too, until the change is released.
+        const paying = paidParties(b.state.accounts, paymentJournals(row.actions, p.data));
+        const held = paying.length && this.svc.parties ? await this.svc.parties.holds(tenant, paying, b.tx) : [];
+        if (held.length) throw new OpsError("party_hold", `payments to ${held.map((h) => h.partyId).join(", ")} are held: bank details changed and not yet verified and released (POL-501); nothing was applied`);
         if (moved) throw new OpsError("stale", row.basis_version !== null
           ? `the books changed since this was simulated (version ${row.basis_version} → ${b.version}); simulate again`
           : `the books changed since this was simulated (journal ${row.basis_seq} → ${b.state.seq}); simulate again`);
@@ -235,6 +247,13 @@ export class Operations {
 }
 
 // ---------------------------------------------------------------- derived views of a plan
+/** Journals a plan would post, with their parties: its own PostJournal actions and the drafts it approves. */
+function paymentJournals(actions: Action[], data: unknown): { lines: Line[] }[] {
+  const own = actions.flatMap((a) => (a.type === "gl" && a.command.kind === "PostJournal" ? [{ lines: a.command.lines }] : []));
+  const drafts = (data as { journalsFromDrafts?: { lines: Line[] }[] } | undefined)?.journalsFromDrafts ?? [];
+  return [...own, ...drafts];
+}
+
 function journalsOf(s: BookState, actions: Action[], data: unknown): PlanJournal[] {
   const nm = (id: string) => s.accounts.get(id)?.name ?? (id === "RETAINED" ? "Retained surplus" : id);
   const view = (journalId: string, txnDate: string, narration: string, voucherType: string, lines: Line[]): PlanJournal =>

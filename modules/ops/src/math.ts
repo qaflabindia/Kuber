@@ -98,8 +98,33 @@ export function rebalanceTransfers(current: { id: string; bal: bigint }[], targe
 }
 
 /** Indian financial year containing a date: 2026-10-12 -> { from: 2026-04-01, to: 2027-03-31 }. */
-export function financialYear(iso: string) {
+/**
+ * The fiscal year containing `iso`, for a book whose year starts in `startMonth` (FIN-MDM-01;
+ * default April, the Indian financial year). A January year is labelled "FY 2026".
+ */
+export function financialYear(iso: string, startMonth = 4) {
   const y = Number(iso.slice(0, 4)), m = Number(iso.slice(5, 7));
-  const start = m >= 4 ? y : y - 1;
-  return { from: `${start}-04-01`, to: `${start + 1}-03-31`, label: `FY ${start}-${String((start + 1) % 100).padStart(2, "0")}` };
+  const start = m >= startMonth ? y : y - 1;
+  const mm = String(startMonth).padStart(2, "0");
+  const endYear = startMonth === 1 ? start : start + 1;
+  const endMonth = startMonth === 1 ? 12 : startMonth - 1;
+  const endDay = new Date(Date.UTC(endYear, endMonth, 0)).getUTCDate();
+  return { from: `${start}-${mm}-01`, to: `${endYear}-${String(endMonth).padStart(2, "0")}-${String(endDay).padStart(2, "0")}`,
+    label: startMonth === 1 ? `FY ${start}` : `FY ${start}-${String((start + 1) % 100).padStart(2, "0")}` };
+}
+
+/** Fiscal year start month of a book (April for books opened before FIN-MDM-01). */
+export const fiscalStart = (s: { config?: { fiscalYearStartMonth: number } }) => s.config?.fiscalYearStartMonth ?? 4;
+
+/**
+ * Parties a set of journals pays (FIN-MDM-03): the parties named on a journal in which a cash-like
+ * account (bank, cash, card) is credited, i.e. money goes out.
+ */
+export function paidParties(accounts: ReadonlyMap<string, { isCashLike: boolean }>, journals: { lines: { accountId: string; amount: string; partyId?: string }[] }[]): string[] {
+  const out = new Set<string>();
+  for (const j of journals) {
+    if (!j.lines.some((l) => accounts.get(l.accountId)?.isCashLike && BigInt(l.amount) < 0n)) continue;
+    for (const l of j.lines) if (l.partyId) out.add(l.partyId);
+  }
+  return [...out].sort();
 }

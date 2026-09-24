@@ -6,11 +6,12 @@
 import { GENESIS_HASH, journalIdForRequest, reversalIdForRequest, uuid, type Envelope, type EventData } from "@kuber/contracts";
 import type { TransactionSql } from "postgres";
 import { ConcurrencyError, once, type EventStore, type MetaInput } from "@kuber/eventstore";
-import { DomainError, decide, emptyBook, evolve, verifyChain, type BookCommand, type BookState } from "./book.ts";
+import { DomainError, decide, emptyBook, evolve, verifyChain, type BookCommand, type BookState, type DecideContext } from "./book.ts";
 import { SEEDS } from "./seeds.ts";
 import { SnapshotStore, approxBytes } from "./snapshot.ts";
 
-export { DomainError, verifyChain, validateJournal, type BookCommand, type BookState, type JournalRecord } from "./book.ts";
+export { DomainError, verifyChain, validateJournal, checkEntity, type BookCommand, type BookState, type DecideContext, type JournalRecord } from "./book.ts";
+export * from "./parties.ts";
 export { JournalMap } from "./journals.ts";
 export { BOOK_SNAPSHOT_SCHEMA, SnapshotStore } from "./snapshot.ts";
 export { SEEDS } from "./seeds.ts";
@@ -33,6 +34,11 @@ export interface GlOptions {
   cacheBytes?: number;
   /** Take a durable snapshot once this many events follow the last one (default KUBER_SNAPSHOT_EVERY or 500; 0 disables). */
   snapshotEvery?: number;
+  /**
+   * Legal entity of registered parties (the party master, FIN-MDM-01/03), read in the book's
+   * transaction before a journal naming parties is decided. Without it, party entities are not checked.
+   */
+  partyEntities?: (tenantId: string, partyIds: string[], tx: TransactionSql) => Promise<ReadonlyMap<string, string>>;
 }
 
 interface CacheEntry { version: number; state: BookState; bytes: number; snapshotVersion: number }
@@ -53,6 +59,7 @@ export class GeneralLedger {
   private cacheEntries: number;
   private cacheBytes: number;
   private snapshotEvery: number;
+  private partyEntities?: GlOptions["partyEntities"];
   readonly snapshots: SnapshotStore;
 
   private inFlight = new Map<string, Promise<void>>();
@@ -63,6 +70,14 @@ export class GeneralLedger {
     this.cacheBytes = o.cacheBytes ?? envInt("KUBER_GL_CACHE_MB", 256) * 1024 * 1024;
     this.snapshotEvery = o.snapshotEvery ?? envInt("KUBER_SNAPSHOT_EVERY", 500);
     this.snapshots = new SnapshotStore(store);
+    this.partyEntities = o.partyEntities;
+  }
+
+  /** Facts from outside the book that `decide` needs for this command (FIN-MDM-01: party entities). */
+  private async contextFor(tenantId: string, cmd: BookCommand, tx: TransactionSql): Promise<DecideContext> {
+    if (!this.partyEntities || cmd.kind !== "PostJournal") return {};
+    const ids = [...new Set(cmd.lines.map((l) => l.partyId).filter((p): p is string => !!p))];
+    return ids.length ? { partyEntities: await this.partyEntities(tenantId, ids, tx) } : {};
   }
 
   private async load(tenantId: string, stream: string, tx: TransactionSql): Promise<CacheEntry> {
@@ -150,7 +165,7 @@ export class GeneralLedger {
           const b: BookTx = {
             tx, state: loaded.state, version: loaded.version,
             execute: async (cmd, meta) => {
-              const events = decide(b.state, cmd, meta.principal);
+              const events = decide(b.state, cmd, meta.principal, await this.contextFor(tenantId, cmd, tx));
               if (!events.length) return [];
               const written = await this.store.append("gl", tenantId, { streamId: stream, expected: b.version, events }, meta, tx);
               b.state = written.reduce(evolve, b.state); b.version += written.length;
@@ -191,10 +206,12 @@ export class GeneralLedger {
     });
   }
 
-  openBook(tenantId: string, bookId: string, entityId: string, entityType: string, principal: string) {
+  /** Open a book from the entity type's seed chart. `config`: FIN-MDM-01 configuration (defaults otherwise). */
+  openBook(tenantId: string, bookId: string, entityId: string, entityType: string, principal: string,
+           config: Omit<Extract<BookCommand, { kind: "OpenBook" }>, "kind" | "bookId" | "entityId" | "entityType" | "accounts"> = {}) {
     const accounts = SEEDS[entityType];
     if (!accounts) throw new DomainError("bad_entity_type", `unknown entity type ${entityType}`);
-    return this.execute(tenantId, bookId, { kind: "OpenBook", bookId, entityId, entityType, accounts }, { principal });
+    return this.execute(tenantId, bookId, { kind: "OpenBook", bookId, entityId, entityType, accounts, ...config }, { principal });
   }
 
   /**
