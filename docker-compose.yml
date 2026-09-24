@@ -54,7 +54,9 @@ services:
 
   valkey:
     image: valkey/valkey:8
-    command: ["valkey-server", "--port", "0", "--tls-port", "6379", "--tls-cert-file", "/certs/server.crt", "--tls-key-file", "/certs/server.key",
+    # Copy the key in owned by valkey (the server drops to that user), then start as usual.
+    entrypoint: ["sh", "-c", "install -o valkey -g valkey -m 600 /certs/server.key /tmp/server.key && exec docker-entrypoint.sh \"$@\"", "--"]
+    command: ["valkey-server", "--port", "0", "--tls-port", "6379", "--tls-cert-file", "/certs/server.crt", "--tls-key-file", "/tmp/server.key",
               "--tls-ca-cert-file", "/certs/ca.crt", "--tls-auth-clients", "no", "--requirepass", "${VALKEY_PASSWORD:?missing}"]
     ports: ["127.0.0.1:6379:6379"]
     volumes: ["${KUBER_HOME:?missing}/certs:/certs:ro"]
@@ -76,9 +78,9 @@ services:
       NATS_TOKEN: ${NATS_TOKEN:?missing}
       NODE_EXTRA_CA_CERTS: /certs/ca.crt
       TLS_CERT_FILE: /certs/server.crt
-      TLS_KEY_FILE: /certs/server.key
+      TLS_KEY_FILE: /run/kuber/server.key          # copied in by deploy/core-entrypoint.sh
       KUBER_REQUIRE_TLS: "true"
-      KUBER_MASTER_KEY_FILE: /kuber/master.keys
+      KUBER_MASTER_KEY_FILE: /run/kuber/master.keys
       CELL_ID: local-1
       PORT: "8080"
       # Copilot model (optional). Without both, the canvas uses Kuber's deterministic router.
@@ -93,6 +95,7 @@ services:
     volumes:
       - ${KUBER_HOME:?missing}/master.keys:/kuber/master.keys:ro
       - ${KUBER_HOME:?missing}/certs:/certs:ro
+    tmpfs: ["/run/kuber:size=1m,mode=0700"]    # keys live in memory only
     ports: ["127.0.0.1:8080:8080"]      # HTTPS; the browser talks only to web
     depends_on:
       postgres: { condition: service_healthy }
@@ -117,6 +120,7 @@ services:
     build: .
     profiles: ["tools"]
     entrypoint: ["npx", "tsx", "apps/core/src/keys-cli.ts"]
+    user: "0:0"                                     # operator tool: reads and rewrites the mounted key file
     environment:
       <<: *core-env
       KUBER_MASTER_KEY_FILE: /kuber/master.keys
