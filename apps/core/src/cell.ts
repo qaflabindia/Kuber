@@ -7,7 +7,7 @@ import postgres, { type Sql } from "postgres";
 import { DeadLetterStore, EVENTSTORE_MIGRATIONS, EventStore, LIFECYCLE_MIGRATIONS, OutboxRelay, SYSTEM_SCOPE_ROLE, appGrants, migrate, openEnvelope, systemGrants, type LegacyPolicy } from "@kuber/eventstore";
 import { Keyring, type Kms } from "@kuber/crypto";
 import type { Envelope } from "@kuber/contracts";
-import { MemoryBus, NatsBus, type Bus } from "@kuber/bus";
+import { MemoryBus, NatsBus, busPartitions, type Bus } from "@kuber/bus";
 import { GeneralLedger } from "@kuber/gl";
 import { PolicyEngine } from "@kuber/policy";
 import { CHANNELS_MIGRATIONS, Channels, channelsGrants } from "@kuber/channels";
@@ -32,6 +32,8 @@ export interface CellOptions {
   systemRole?: { name: string; password?: string };
   cellId?: string;
   bus?: "memory" | { natsUrl: string; caFile?: string; retentionDays?: number; token?: string; maxDeliver?: number };
+  /** Tenant partitions (lanes) per module consumer; default KUBER_BUS_PARTITIONS or 8 (F09). */
+  busPartitions?: number;
   policyDir: string;
   /** Key management service holding the master key(s). Required: there is no unencrypted mode. */
   kms: Kms;
@@ -101,11 +103,12 @@ export class Cell {
     const systemSql = postgres(o.systemDatabaseUrl ?? ownerUrl, { max: 3, onnotice: () => undefined });
     const keyring = new Keyring(sql, o.kms);
     const store = new EventStore(sql, cellId, { keyring, legacy: o.legacy ?? "reject" }, systemSql);
-    // Exhausted deliveries are recorded in es.dead_letters (see `ops dead-letters`).
+    const partitions = o.busPartitions ?? busPartitions();
+    // Exhausted deliveries (on any lane) are recorded in es.dead_letters under the module's name (see `ops dead-letters`).
     const deadLetters = new DeadLetterStore(store);
     const onDeadLetter = (d: { consumer: string; env: Envelope; error: unknown; attempts: number }) => deadLetters.record(d.consumer, d.env, d.attempts, d.error);
-    const bus: Bus = !o.bus || o.bus === "memory" ? new MemoryBus(3, onDeadLetter)
-      : await NatsBus.connect(o.bus.natsUrl, cellId, { caFile: o.bus.caFile, retentionDays: o.bus.retentionDays, token: o.bus.token, maxDeliver: o.bus.maxDeliver, onDeadLetter });
+    const bus: Bus = !o.bus || o.bus === "memory" ? new MemoryBus(3, partitions, onDeadLetter)
+      : await NatsBus.connect(o.bus.natsUrl, cellId, { caFile: o.bus.caFile, retentionDays: o.bus.retentionDays, token: o.bus.token, partitions, maxDeliver: o.bus.maxDeliver, onDeadLetter });
     const relay = new OutboxRelay(systemSql, (subject, env) => bus.publish(subject, env));
     const policies = PolicyEngine.fromDir(o.policyDir);
     const gl = new GeneralLedger(store);
@@ -145,6 +148,7 @@ export class Cell {
 
   async close() {
     this.relay.stop();
+    await this.gl.flushSnapshots();
     await this.bus.close();
     await this.sql.end({ timeout: 5 });
     await this.systemSql.end({ timeout: 5 });

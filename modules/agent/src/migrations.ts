@@ -86,4 +86,12 @@ BEGIN
     EXECUTE format($p$CREATE POLICY system_scope ON agent.%I TO kuber_system_scope USING (true) WITH CHECK (true)$p$, t);
   END LOOP;
 END $$;`,
+}, {
+  id: "agent-scale-001-open-work-indexes",
+  // Open drafts and ratifications are read as keyset pages in queue order (F11): the partial
+  // indexes hold only open work, so a page costs its own size, not the tenant's history.
+  sql: `
+CREATE INDEX IF NOT EXISTS drafts_open_page ON agent.drafts (tenant_id, created_at, draft_id) WHERE status IN ('queued','awaiting_approval','rejected_by_gl');
+CREATE INDEX IF NOT EXISTS drafts_open_book_page ON agent.drafts (tenant_id, book_id, created_at, draft_id) WHERE status IN ('queued','awaiting_approval','rejected_by_gl');
+CREATE INDEX IF NOT EXISTS ratifications_open_page ON agent.ratifications (tenant_id, due_by, request_id) WHERE status = 'open';`,
 }];

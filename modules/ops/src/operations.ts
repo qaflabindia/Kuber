@@ -13,7 +13,7 @@
 import { z } from "zod";
 import { IsoDate, parseAmount, stableId, type Line } from "@kuber/contracts";
 import { validateJournal, type BookState } from "@kuber/gl";
-import { balancesFromState, financialYear, pctToBp, rebalanceTransfers, splitByWeights } from "./math.ts";
+import { balancesFromState, financialYear, latestTxnDate, openProvisional, pctToBp, rebalanceTransfers, splitByWeights } from "./math.ts";
 import type { Action, Check, Draft, OpContext, OpDef, Section } from "./types.ts";
 
 // ---------------------------------------------------------------- shared helpers
@@ -48,9 +48,8 @@ const post = (journalId: string, txnDate: string, narration: string, lines: Line
 
 /** Default date for transfers and allocations: never before the last posting already in the book. */
 function asOfDefault(ctx: OpContext) {
-  let last = ctx.today;
-  for (const j of ctx.state.journals.values()) if (j.txnDate > last) last = j.txnDate;
-  return last;
+  const last = latestTxnDate(ctx.state);
+  return last !== null && last > ctx.today ? last : ctx.today;
 }
 
 function cashLike(s: BookState) { return [...s.accounts.values()].filter((a) => a.isCashLike && a.nature === "asset").map((a) => a.accountId); }
@@ -104,7 +103,7 @@ export const postDrafts: OpDef<z.infer<typeof PostInput>> = {
   input: PostInput,
   async plan(ctx, i) {
     const s = ctx.state;
-    const all = (await ctx.svc.agent.queue(ctx.tenant) as unknown as DraftRow[]).filter((d) => d.book_id === ctx.book);
+    const all = await ctx.svc.agent.queue(ctx.tenant, { bookId: ctx.book }) as unknown as DraftRow[];
     const picked = all.filter((d) => (!i.draftIds || i.draftIds.includes(d.draft_id)) && d.proposal.confidence >= i.minConfidence);
     const actions: Action[] = [], skipped: DraftRow[] = [];
     let max = 0n;
@@ -148,17 +147,17 @@ export const balance: OpDef<{ asOf?: string }> = {
     for (const v of b.values()) if (v > 0n) dr += v; else cr -= v;
     const broken = await ctx.svc.gl.verify(ctx.tenant, ctx.book);
     const pos = await ctx.svc.reporting.position(ctx.tenant, ctx.book);
-    const drafts = (await ctx.svc.agent.queue(ctx.tenant) as unknown as DraftRow[]).filter((d) => d.book_id === ctx.book);
-    const ratifs = await ctx.svc.agent.openRatifications(ctx.tenant);
+    const drafts = (await ctx.svc.agent.queueCounts(ctx.tenant, ctx.book)).open;   // counts: nothing decrypted
+    const ratifs = await ctx.svc.agent.openRatificationCount(ctx.tenant);
     const suspense = b.get("SUSPENSE") ?? 0n;
-    const provisional = [...s.journals.values()].filter((j) => j.provisional && !j.reversedBy && (!i.asOf || j.txnDate <= i.asOf)).length;
+    const provisional = [...openProvisional(s)].filter(([, j]) => !i.asOf || j.txnDate <= i.asOf).length;
     const checks: Check[] = [
       { label: "Debits equal credits", ok: dr === cr, blocking: true, detail: `${rs(dr)} each side` },
       { label: "Hash chain intact", ok: broken === null, blocking: true, detail: broken ? `broken at ${broken}` : `${s.seq} journals verified` },
       { label: "Nothing in suspense", ok: suspense === 0n, blocking: false, detail: suspense ? rs(suspense) : undefined },
       { label: "Reports up to date", ok: pos.seq === s.seq, blocking: false, detail: pos.seq === s.seq ? undefined : `reports at ${pos.seq} of ${s.seq}; catching up` },
-      { label: "No drafts waiting", ok: drafts.length === 0, blocking: false, detail: drafts.length ? `${drafts.length} waiting` : undefined },
-      { label: "No automatic postings to confirm", ok: ratifs.length === 0, blocking: false, detail: ratifs.length ? `${ratifs.length} to confirm` : undefined },
+      { label: "No drafts waiting", ok: drafts === 0, blocking: false, detail: drafts ? `${drafts} waiting` : undefined },
+      { label: "No automatic postings to confirm", ok: ratifs === 0, blocking: false, detail: ratifs ? `${ratifs} to confirm` : undefined },
       { label: "No entries awaiting a statement", ok: provisional === 0, blocking: false, detail: provisional ? `${provisional} provisional` : undefined },
     ];
     const allOk = checks.every((c) => c.ok);
@@ -166,7 +165,7 @@ export const balance: OpDef<{ asOf?: string }> = {
       title: allOk ? "Books are in order" : checks.some((c) => !c.ok && c.blocking) ? "Books are out of balance" : "Books balance; some items are open",
       summary: `Trial balance ${dr === cr ? "agrees" : "does not agree"} at ${rs(dr)}; ${checks.filter((c) => !c.ok).length} open item(s).`,
       actions: [], checks,
-      links: [["Trial balance", "/reports/trial-balance"], ...(drafts.length ? [["Review drafts", "/review"] as [string, string]] : [])],
+      links: [["Trial balance", "/reports/trial-balance"], ...(drafts ? [["Review drafts", "/review"] as [string, string]] : [])],
     };
   },
 };
@@ -188,11 +187,11 @@ export const reconcile: OpDef<z.infer<typeof ReconcileInput>> = {
     const liability = s.accounts.get(i.account)!.nature === "liability";
     const books = natural(s, i.account, balancesFromState(s, { to: i.asOf }).get(i.account) ?? 0n);
     // In the books, not yet on the statement: provisional entries (entered by hand or chat).
-    const inBooks = [...s.journals.entries()].filter(([, j]) => j.provisional && !j.reversedBy && j.txnDate <= i.asOf)
+    const inBooks = [...openProvisional(s)].filter(([, j]) => j.txnDate <= i.asOf)
       .map(([id, j]) => ({ id, j, amt: natural(s, i.account, j.lines.filter((l) => l.accountId === i.account).reduce((a, l) => a + BigInt(l.amount), 0n)) }))
       .filter((x) => x.amt !== 0n);
     // On the statement, not yet in the books: drafts from this instrument awaiting a decision.
-    const drafts = (await ctx.svc.agent.queue(ctx.tenant) as unknown as DraftRow[]).filter((d) => d.book_id === ctx.book && d.proposal.txnDate <= i.asOf)
+    const drafts = (await ctx.svc.agent.queue(ctx.tenant, { bookId: ctx.book }) as unknown as DraftRow[]).filter((d) => d.proposal.txnDate <= i.asOf)
       .map((d) => ({ d, amt: natural(s, i.account, d.proposal.lines.filter((l) => l.accountId === i.account).reduce((a, l) => a + BigInt(l.amount), 0n)) }))
       .filter((x) => x.amt !== 0n);
     // Also on the statement, not yet in the books: lines waiting for a person to say whether they are a provisional entry.
@@ -342,12 +341,12 @@ export const close: OpDef<z.infer<typeof CloseInput>> = {
     let dr = 0n, cr = 0n; for (const v of b.values()) if (v > 0n) dr += v; else cr -= v;
     checks.push({ label: "Debits equal credits", ok: dr === cr, blocking: true });
     checks.push({ label: "Nothing in suspense", ok: (b.get("SUSPENSE") ?? 0n) === 0n, blocking: true, detail: b.get("SUSPENSE") ? rs(b.get("SUSPENSE")!) : undefined });
-    const drafts = (await ctx.svc.agent.queue(ctx.tenant) as unknown as DraftRow[]).filter((d) => d.book_id === ctx.book && d.proposal.txnDate <= i.periodEnd);
+    const drafts = (await ctx.svc.agent.queue(ctx.tenant, { bookId: ctx.book }) as unknown as DraftRow[]).filter((d) => d.proposal.txnDate <= i.periodEnd);
     checks.push({ label: "No drafts dated in the period", ok: drafts.length === 0, blocking: true, detail: drafts.length ? `${drafts.length} to decide first` : undefined });
     // Approved drafts the GL has not answered yet would land in (or be refused by) the closed period.
     const inFlight = (await ctx.svc.agent.inFlight(ctx.tenant, ctx.book)).length;
     checks.push({ label: "No postings in flight", ok: inFlight === 0, blocking: true, detail: inFlight ? `${inFlight} approved, awaiting the ledger` : undefined });
-    const prov = [...s.journals.values()].filter((j) => j.provisional && !j.reversedBy && j.txnDate <= i.periodEnd).length;
+    const prov = [...openProvisional(s)].filter(([, j]) => j.txnDate <= i.periodEnd).length;
     checks.push({ label: "No entries awaiting a statement", ok: prov === 0, blocking: false, detail: prov ? `${prov} provisional; they will be frozen as entered` : undefined });
 
     actions.push({ type: "gl", command: { kind: "LockPeriod", periodEnd: i.periodEnd, level: "soft" } });
@@ -471,8 +470,8 @@ export const dashboard: OpDef<{ months?: number }> = {
     const year = balancesFromState(s, { from: f.fy.from, to: f.fy.to, excludeVoucher: "closing" });
     const top = [...year.entries()].filter(([id, v]) => s.accounts.get(id)?.nature === "expense" && v > 0n).sort((a, b) => (a[1] > b[1] ? -1 : 1)).slice(0, 5)
       .map(([id, v]) => ({ accountId: id, name: name(s, id), amount: v.toString() }));
-    const drafts = (await ctx.svc.agent.queue(ctx.tenant) as unknown as DraftRow[]).filter((d) => d.book_id === ctx.book).length;
-    const ratifs = (await ctx.svc.agent.openRatifications(ctx.tenant)).length;
+    const drafts = (await ctx.svc.agent.queueCounts(ctx.tenant, ctx.book)).open;
+    const ratifs = await ctx.svc.agent.openRatificationCount(ctx.tenant);
     const suspense = balancesFromState(s).get("SUSPENSE") ?? 0n;
     const k = { cash: f.cash.toString(), netWorth: f.netWorth.toString(), income: f.income.toString(), expenses: f.expenses.toString(),
       surplus: f.surplus.toString(), avgMonthlySpend: avgOut.toString(), runwayMonths: runway, fy: f.fy.label };

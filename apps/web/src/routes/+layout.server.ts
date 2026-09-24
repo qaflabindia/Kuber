@@ -13,20 +13,20 @@ export const load: LayoutServerLoad = async ({ locals, url }) => {
   if (!s.book) return { session: s, shell: null };
 
   const a = api(s);
-  const [drafts, ratifications, journals, verify, plans] = await Promise.all([
-    a.drafts().catch(() => []), a.ratifications().catch(() => []),
+  // Counts, not lists: the shell's cost does not grow with the queue (F11).
+  const [attention, journals, verify] = await Promise.all([
+    a.attention(s.book).catch(() => ({ drafts: 0, awaitingApproval: 0, ratifications: 0, plans: 0 })),
     a.journals(s.book, 1).catch(() => []), a.verify(s.book).catch(() => ({ intact: false, firstBrokenJournal: null })),
-    a.plans(s.book).catch(() => []),
   ]);
   return {
     session: s,
     shell: {
-      reviewCount: drafts.length,
-      awaitingApproval: drafts.filter((d) => d.status === "awaiting_approval").length,
-      confirmCount: ratifications.length,
+      reviewCount: attention.drafts,
+      awaitingApproval: attention.awaitingApproval,
+      confirmCount: attention.ratifications,
       hasJournals: journals.length > 0,
       intact: verify.intact,
-      pendingPlans: plans.length,
+      pendingPlans: attention.plans,
     },
   };
 };

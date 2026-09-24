@@ -78,6 +78,7 @@ export const api = (s: Pick<Session, "tenant" | "principal">) => ({
   ask: (book: string, text: string, history: { role: "user" | "assistant"; text: string }[]) => call<CopilotReply>(s, "POST", `/books/${book}/copilot`, { text, history }),
   plan: (book: string, op: string, input: unknown = {}) => call<Plan>(s, "POST", `/books/${book}/ops/${op}`, input),
   plans: (book: string) => call<Plan[]>(s, "GET", `/books/${book}/plans`),
+  attention: (book: string) => call<{ drafts: number; awaitingApproval: number; ratifications: number; plans: number }>(s, "GET", `/books/${book}/attention`),
   commit: (id: string, hash: string) => call<{ planId: string; status: string; steps?: string[]; message?: string }>(s, "POST", `/plans/${id}/commit`, { hash }),
   discard: (id: string) => call(s, "POST", `/plans/${id}/discard`, {}),
   verify: (book: string) => call<{ intact: boolean; firstBrokenJournal: string | null }>(s, "GET", `/books/${book}/verify`),

@@ -91,13 +91,14 @@ describe("F13: key lifecycle covers every retained copy", () => {
 
   it("re-seals certified report snapshots and drops cached aggregate snapshots under a retired key", async () => {
     const snap = await f.cell.reporting.certify(T, "main", "trial-balance", { asOf: null }, OWNER);
-    await f.owner`INSERT INTO es.snapshots (stream_id, tenant_id, stream_version, state) VALUES (${`${T}/book/main`}, ${T}, 1, ${f.owner.json({ $c: "kb1.3.fake" })})`;
+    // a GL snapshot sealed with the key about to be retired (GL snapshots are sealed {$c} rows)
+    await f.owner`INSERT INTO es.snapshots (stream_id, tenant_id, stream_version, state) VALUES (${`${T}/book/old`}, ${T}, 1, ${f.owner.json({ $c: "kb1.3.fake" })})`;
     await f.keyring.rotateTenant(T);
     const admin = f.keys(0, 0);
     expect((await admin.usage(T, 3))["reporting.snapshots.body"]).toBe(1);
     const r = await admin.reencrypt(T);
     expect(r.dropped).toContain(3);
-    expect(await f.owner`SELECT 1 FROM es.snapshots WHERE tenant_id = ${T}`).toHaveLength(0);
+    expect(await f.owner`SELECT 1 FROM es.snapshots WHERE tenant_id = ${T} AND state->>'$c' NOT LIKE 'kb1.4.%'`).toHaveLength(0);
     f.cell.keyring.invalidate(T);
     expect((await f.cell.reporting.getSnapshot(T, snap.snapshotId))!.verified).toBe(true);
   });

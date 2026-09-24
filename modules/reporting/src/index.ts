@@ -65,6 +65,13 @@ CREATE POLICY tenant_isolation ON reporting.confirmations
 CREATE POLICY system_scope ON reporting.confirmations TO kuber_system_scope USING (true) WITH CHECK (true);
 `,
 }, {
+  id: "reporting-scale-001-journal-heads",
+  // Recent journals are chosen from one row per journal (its first line) by seq, then only their
+  // lines are read (F11); drill-through pages follow the (txn_date, seq, line_no) order.
+  sql: `
+CREATE INDEX IF NOT EXISTS lines_journal_heads ON reporting.lines (tenant_id, book_id, seq DESC) WHERE line_no = 1;
+CREATE INDEX IF NOT EXISTS lines_drill_page ON reporting.lines (tenant_id, book_id, account_id, txn_date, seq, line_no);`,
+}, {
   id: "reporting-ops-001-freshness-snapshots",
   sql: `
 -- Journals projected per book: equal to the checkpoint seq exactly when no journal below it is
@@ -85,6 +92,9 @@ CREATE POLICY tenant_isolation ON reporting.snapshots
 CREATE POLICY system_scope ON reporting.snapshots TO kuber_system_scope USING (true) WITH CHECK (true);
 `,
 }];
+
+/** Largest drill-through page. */
+export const MAX_DRILL = 1000;
 
 export interface Row { label: string; amount: bigint; accountId?: string; section?: string }
 export interface Statement { title: string; rows: Row[]; totals: Record<string, bigint>; basis?: ReportBasis }
@@ -462,25 +472,46 @@ export class Reporting {
       GROUP BY a.account_id, a.name, a.nature, a.parent_id, a.taxonomy_tag ORDER BY a.nature, a.account_id`);
   }
 
-  /** Most recent journals with their lines, newest first. */
+  /** Most recent journals with their lines, newest first: pick the journals first, then read only their lines. */
   async recentJournals(tenantId: string, bookId: string, limit = 20) {
     const keys = await this.store.keys(tenantId);
     return openNarrations(keys, await this.store.tenantTx(tenantId, (tx) => tx<({ journal_id: string; narration: string } & Record<string, any>)[]>`
-      SELECT journal_id, max(seq) AS seq, max(txn_date)::text AS txn_date, max(narration) AS narration,
-             bool_or(provisional) AS provisional, max(reverses) AS reverses, max(principal) AS principal,
-             json_agg(json_build_object('accountId', account_id, 'amount', amount::text, 'partyId', party_id) ORDER BY line_no) AS lines
-      FROM reporting.lines WHERE tenant_id = ${tenantId} AND book_id = ${bookId}
-      GROUP BY journal_id ORDER BY max(seq) DESC LIMIT ${Math.min(Math.max(limit, 1), 200)}`));
+      WITH heads AS MATERIALIZED (
+        SELECT journal_id FROM reporting.lines WHERE tenant_id = ${tenantId} AND book_id = ${bookId} AND line_no = 1
+        ORDER BY seq DESC LIMIT ${Math.min(Math.max(limit, 1), 200)})
+      SELECT l.journal_id, max(l.seq) AS seq, max(l.txn_date)::text AS txn_date, max(l.narration) AS narration,
+             bool_or(l.provisional) AS provisional, max(l.reverses) AS reverses, max(l.principal) AS principal,
+             json_agg(json_build_object('accountId', l.account_id, 'amount', l.amount::text, 'partyId', l.party_id) ORDER BY l.line_no) AS lines
+      FROM reporting.lines l JOIN heads h ON h.journal_id = l.journal_id
+      WHERE l.tenant_id = ${tenantId} AND l.book_id = ${bookId}
+      GROUP BY l.journal_id ORDER BY max(l.seq) DESC`));
   }
 
-  /** Drill-through: the journal lines behind an account balance. */
+  /** Drill-through: the journal lines behind an account balance, in (date, seq, line) order; at most MAX_DRILL (see drillPage). */
   async drill(tenantId: string, bookId: string, accountId: string, from: string | null = null, to: string | null = null) {
+    return (await this.drillPage(tenantId, bookId, accountId, from, to)).items;
+  }
+
+  /** One page of drill-through lines (default and maximum MAX_DRILL) after `after`, a previous page's `next`. */
+  async drillPage(tenantId: string, bookId: string, accountId: string, from: string | null = null, to: string | null = null,
+                  page: { limit?: number; after?: string } = {}) {
+    const limit = Math.min(Math.max(Math.trunc(page.limit ?? MAX_DRILL) || 1, 1), MAX_DRILL);
+    let cur: [string, number, number] | null = null;
+    if (page.after) {
+      try { cur = JSON.parse(Buffer.from(page.after, "base64url").toString("utf8")); } catch { cur = null; }
+      if (!Array.isArray(cur) || cur.length !== 3) throw new Error("invalid drill cursor");
+    }
     const keys = await this.store.keys(tenantId);
-    return openNarrations(keys, await this.store.tenantTx(tenantId, (tx) => tx<({ journal_id: string; narration: string } & Record<string, any>)[]>`
-      SELECT journal_id, seq, txn_date::text, amount::text, party_id, narration, provisional, reverses, principal
+    const rows = await this.store.tenantTx(tenantId, (tx) => tx<({ journal_id: string; narration: string } & Record<string, any>)[]>`
+      SELECT journal_id, seq, txn_date::text, amount::text, party_id, narration, provisional, reverses, principal, line_no
       FROM reporting.lines WHERE tenant_id = ${tenantId} AND book_id = ${bookId} AND account_id = ${accountId}
         AND (${from}::date IS NULL OR txn_date >= ${from}::date) AND (${to}::date IS NULL OR txn_date <= ${to}::date)
-      ORDER BY txn_date, seq, line_no`));
+        ${cur ? tx`AND (txn_date, seq, line_no) > (${cur[0]}::text::date, ${cur[1]}::int, ${cur[2]}::int)` : tx``}
+      ORDER BY txn_date, seq, line_no LIMIT ${limit + 1}`);
+    const pageRows = rows.slice(0, limit), last = pageRows.at(-1);
+    const next = rows.length > limit && last ? Buffer.from(JSON.stringify([last.txn_date, last.seq, last.line_no])).toString("base64url") : null;
+    for (const r of pageRows) delete r.line_no;
+    return { items: openNarrations(keys, pageRows), next };
   }
 }
 

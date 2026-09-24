@@ -47,6 +47,10 @@ CREATE INDEX plans_open ON ops.plans (tenant_id, book_id, created_at DESC) WHERE
   // Plans are fenced on the book's full event version, not only its journal count: an account
   // or lock added after simulation also invalidates the plan. NULL for plans made before this.
   sql: `ALTER TABLE ops.plans ADD COLUMN basis_version INT;`,
+}, {
+  id: "ops-scale-001-plan-pages",
+  // Keyset pages of open plans (F11): newest first, plan id breaks ties.
+  sql: `CREATE INDEX IF NOT EXISTS plans_open_page ON ops.plans (tenant_id, book_id, created_at DESC, plan_id DESC) WHERE status = 'proposed';`,
 }];
 
 export class OpsError extends Error {
@@ -108,12 +112,33 @@ export class Operations {
     return { ...open<Plan>(await this.store.keys(tenant), planId, "plan", r.plan), status: r.status };
   }
 
-  async pending(tenant: string, book: string): Promise<Plan[]> {
+  /** Open plans, newest first: one keyset page (default 50, at most 200) older than `before` (a previous page's `next`). */
+  async pending(tenant: string, book: string, opts: { limit?: number; before?: string } = {}): Promise<Plan[]> {
+    return (await this.pendingPage(tenant, book, opts)).items;
+  }
+
+  async pendingPage(tenant: string, book: string, opts: { limit?: number; before?: string } = {}): Promise<{ items: Plan[]; next: string | null }> {
+    const limit = Math.min(Math.max(Math.trunc(opts.limit ?? 50) || 1, 1), 200);
+    let cur: [string, string] | null = null;
+    if (opts.before) {
+      try { cur = JSON.parse(Buffer.from(opts.before, "base64url").toString("utf8")); } catch { cur = null; }
+      if (!Array.isArray(cur) || cur.length !== 2 || !cur.every((x) => typeof x === "string")) throw new OpsError("bad_cursor", "invalid page cursor", 400);
+    }
     const keys = await this.store.keys(tenant);
-    const rows = await this.store.tenantTx(tenant, (tx) => tx<{ plan_id: string; plan: unknown }[]>`
-      SELECT plan_id, plan FROM ops.plans WHERE tenant_id = ${tenant} AND book_id = ${book} AND status = 'proposed'
-      ORDER BY created_at DESC LIMIT 50`);
-    return rows.map((r) => open<Plan>(keys, r.plan_id, "plan", r.plan));
+    const rows = await this.store.tenantTx(tenant, (tx) => tx<{ plan_id: string; plan: unknown; cur_ts: string }[]>`
+      SELECT plan_id, plan, created_at::text AS cur_ts FROM ops.plans WHERE tenant_id = ${tenant} AND book_id = ${book} AND status = 'proposed'
+        ${cur ? tx`AND (created_at, plan_id) < (${cur[0]}::text::timestamptz, ${cur[1]})` : tx``}
+      ORDER BY created_at DESC, plan_id DESC LIMIT ${limit + 1}`);
+    const page = rows.slice(0, limit), last = page.at(-1);
+    return { items: page.map((r) => open<Plan>(keys, r.plan_id, "plan", r.plan)),
+      next: rows.length > limit && last ? Buffer.from(JSON.stringify([last.cur_ts, last.plan_id])).toString("base64url") : null };
+  }
+
+  /** Number of open plans for a book (badges). */
+  async pendingCount(tenant: string, book: string): Promise<number> {
+    const [r] = await this.store.tenantTx(tenant, (tx) => tx<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM ops.plans WHERE tenant_id = ${tenant} AND book_id = ${book} AND status = 'proposed'`);
+    return r?.n ?? 0;
   }
 
   async discard(tenant: string, planId: string, principal: string) {

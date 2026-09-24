@@ -13,7 +13,11 @@ import { fingerprintProjection, rebuildProjection, unprocessedEvents, type DeadL
 import type { Cell } from "./cell.ts";
 import { pruneOutbox } from "./keys-admin.ts";
 
-/** Event types each consumer takes (keep in step with the subscriptions in cell.ts). */
+/**
+ * Event types each consumer takes (keep in step with the subscriptions in cell.ts). Keyed by module
+ * consumer, not by bus lane: partition lanes (<module>_p<n>) are transport only; inbox rows, dead
+ * letters, gap checks and rebuilds all use the module name, so they are unaffected by the lane count.
+ */
 export const CONSUMER_INPUTS: Record<string, string[]> = {
   gl: ["PostingRequested", "CorrectionRequested", "ProvisionalConfirmed"],
   agent: ["TransactionExtracted", "BookOpened", "AccountAdded", "JournalPosted", "JournalReversed", "PostingRejected"],
