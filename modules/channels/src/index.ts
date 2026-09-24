@@ -19,7 +19,7 @@
  * flagged in the signal and its record).
  */
 import { canonical, sha256, type RawTxn } from "@kuber/contracts";
-import { tenantRlsFor, type AppendRequest, type EventStore, type Migration } from "@kuber/eventstore";
+import { DENY_ALL_GUARD, tenantRlsFor, type AppendRequest, type EventStore, type Migration, type ModuleGuard } from "@kuber/eventstore";
 import { STATEMENT_PARSER, parseBankStatement, parseChat, type ControlTotals, type DeclaredTotals, type SkippedRow } from "./parsers.ts";
 
 export { STATEMENT_PARSER, parseBankCsv, parseBankStatement, parseChat, parseDate, readCsv } from "./parsers.ts";
@@ -105,13 +105,15 @@ function legacyIdentity(bookId: string, t: RawTxn): string {
 }
 
 export class Channels {
-  constructor(private store: EventStore) {}
+  /** `guard`: every submission is authorized for `capture` in its book (F02, in depth); without one, nothing is accepted. */
+  constructor(private store: EventStore, private guard: ModuleGuard = DENY_ALL_GUARD) {}
 
   /**
    * Submit a bank statement CSV. The fifth argument is the instrument account (default BANK) or options.
    * Throws IngestionError("control_totals") when the file's own figures do not add up.
    */
   async submitStatement(tenantId: string, bookId: string, csv: string, principal: string, opts: string | StatementOptions = "BANK") {
+    await this.guard.permit(tenantId, principal, "capture", { book: bookId });
     const o: StatementOptions = typeof opts === "string" ? { instrument: opts } : opts;
     const parsed = parseBankStatement(csv, o.instrument ?? "BANK", o.declared ?? {});
     if (parsed.controls.status === "mismatch" && !o.allowUnreconciled) {
@@ -126,14 +128,16 @@ export class Channels {
 
   /** Returns null when the text is not a transaction the rule parser understands. */
   async submitChat(tenantId: string, bookId: string, text: string, principal: string, on: string) {
+    await this.guard.permit(tenantId, principal, "capture", { book: bookId });
     const t = parseChat(text, on);
     if (!t) return null;
     return this.submit(tenantId, bookId, "chat", "user", `${on}|${principal}|${text}`, [{ ...t, sourceRow: 1 }], principal, { parser: "chat-rules/1" });
   }
 
   /** Adapters for SMS, email, notifications and AA call this with already-extracted transactions. */
-  submitRaw(tenantId: string, bookId: string, channel: string, trust: "authoritative" | "provisional" | "user",
-            content: string, txns: RawTxn[], principal: string) {
+  async submitRaw(tenantId: string, bookId: string, channel: string, trust: "authoritative" | "provisional" | "user",
+                  content: string, txns: RawTxn[], principal: string) {
+    await this.guard.permit(tenantId, principal, "capture", { book: bookId });
     return this.submit(tenantId, bookId, channel, trust, content, txns.map((t, i) => ({ ...t, sourceRow: t.sourceRow ?? i + 1 })), principal, { parser: `${channel}/adapter` });
   }
 

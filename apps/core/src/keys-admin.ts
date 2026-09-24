@@ -28,8 +28,9 @@ import { GENESIS_LINK, eventContext, isSealed, linkOf, sealEvent, type EventStor
 import { narrationCtx, snapshotCtx } from "@kuber/reporting";
 import { accountNameCtx, matchReviewCtx, provisionalSourceCtx } from "@kuber/agent";
 import { signalDetailCtx, signalOriginalCtx } from "@kuber/channels";
+import { IDENTITY_SEAL_MIGRATION, enrolmentNameCtx, memberNameCtx } from "@kuber/identity";
 
-interface SealedColumn {
+export interface SealedColumn {
   table: string; column: string; kind: "text" | "json"; keyCols: string[];
   ctx: (row: Record<string, string>) => string;
 }
@@ -49,6 +50,9 @@ export const SEALED_COLUMNS: SealedColumn[] = [
   { table: "channels.signals", column: "original", kind: "text", keyCols: ["signal_id"], ctx: (r) => signalOriginalCtx(r.signal_id!) },
   { table: "channels.signals", column: "detail", kind: "text", keyCols: ["signal_id"], ctx: (r) => signalDetailCtx(r.signal_id!) },
   { table: "reporting.snapshots", column: "body", kind: "text", keyCols: ["snapshot_id"], ctx: (r) => snapshotCtx(r.snapshot_id!) },
+  // Personal data in the identity schema: the names people and invitations are shown by.
+  { table: "identity.members", column: "display_name", kind: "text", keyCols: ["principal"], ctx: (r) => memberNameCtx(r.principal!) },
+  { table: "identity.enrolments", column: "display_name", kind: "text", keyCols: ["token_hash"], ctx: (r) => enrolmentNameCtx(r.token_hash!) },
 ];
 
 /**
@@ -70,6 +74,7 @@ export const RETENTION: Record<string, "purge" | "sealed" | "keys" | "tombstone"
   // Identity (members, passkeys, invitation codes, separation settings): personal data with no
   // value once the tenant's books are unreadable. Credentials before members (foreign key).
   "identity.credentials": "purge", "identity.enrolments": "purge", "identity.members": "purge", "identity.settings": "purge",
+  "identity.sessions": "purge",
   "evidence.balances": "purge", "evidence.records": "purge", "evidence.lookup": "purge",
   "es.outbox": "purge", "es.snapshots": "purge", "es.dead_letters": "purge", "es.commands": "purge",
   "es.events": "sealed", "keys.tenant_keys": "keys", "keys.shredded": "tombstone",
@@ -96,6 +101,63 @@ export interface KeyAdminOptions {
 
 const tokenOf = (kind: "text" | "json", v: unknown): string | null =>
   kind === "text" ? (isToken(v) ? v : null) : (isToken((v as { $c?: unknown } | null)?.$c) ? (v as { $c: string }).$c : null);
+
+/**
+ * Seal one column's values for one tenant, in `t` (a transaction that sees the tenant's rows).
+ * mode "legacy": seal plaintext values; mode "rotate": re-seal values under a non-active key version.
+ */
+async function sealColumnRows(t: TransactionSql, c: SealedColumn, tenant: string, keys: TenantKeys, mode: "legacy" | "rotate"): Promise<number> {
+  let n = 0;
+  const rows = await t.unsafe(`SELECT ${[...new Set([...c.keyCols, c.column])].join(", ")} FROM ${c.table} WHERE tenant_id = $1 FOR UPDATE`, [tenant]) as Record<string, unknown>[];
+  for (const r of rows) {
+    const tok = tokenOf(c.kind, r[c.column]);
+    let plain: string | null = null;
+    const extra: Record<string, string> = {};
+    if (mode === "legacy" && !tok && r[c.column] !== "") {   // '' is "not recorded", not data
+      plain = c.kind === "text" ? String(r[c.column]) : JSON.stringify(r[c.column]);
+      if (c.table === "agent.rules") extra.pattern_idx = keys.index("rule", plain);   // legacy rules get their blind index
+    } else if (mode === "rotate" && tok && keys.versionOf(tok) !== keys.activeVersion) {
+      plain = keys.openText(tok, c.ctx(r as Record<string, string>));
+    }
+    if (plain === null) continue;
+    const ctx = c.ctx({ ...(r as Record<string, string>), ...extra });
+    const sealed = keys.seal(plain, ctx);
+    const value = c.kind === "text" ? sealed : { $c: sealed };
+    const where = c.keyCols.filter((k) => k !== "pattern_idx").map((k, i) => `${k} = $${i + 3}`).join(" AND ");
+    const sets = [`${c.column} = $1`, ...Object.keys(extra).map((k) => `${k} = '${extra[k]!.replace(/'/g, "")}'`)].join(", ");
+    await t.unsafe(`UPDATE ${c.table} SET ${sets} WHERE tenant_id = $2 AND ${where}`,
+      // jsonb parameters are serialised by the driver: pass the object, not a JSON string.
+      [value, tenant, ...c.keyCols.filter((k) => k !== "pattern_idx").map((k) => r[k] as string)] as never[]);
+    n++;
+  }
+  return n;
+}
+
+/**
+ * A data migration that seals the plaintext values of `columns` for every tenant with rows in them,
+ * once: recorded in schema_migrations under `id` like the SQL migrations, under the same kind of
+ * advisory lock so concurrent starts do it once. Runs with the owner connection (system scope).
+ * Crypto-shredded tenants are skipped (their rows are purged, not sealed). Returns values sealed.
+ */
+export async function sealColumnsOnce(owner: Sql, keyring: Keyring, id: string, columns: SealedColumn[]): Promise<number> {
+  return owner.begin(async (t) => {
+    await t`SELECT pg_advisory_xact_lock(7337002)`;
+    const [done] = await t`SELECT 1 FROM public.schema_migrations WHERE id = ${id}`;
+    if (done) return 0;
+    const shredded = new Set((await t<{ tenant_id: string }[]>`SELECT tenant_id FROM keys.shredded`).map((r) => r.tenant_id));
+    let n = 0;
+    for (const c of columns) {
+      const tenants = (await t.unsafe(`SELECT DISTINCT tenant_id FROM ${c.table} ORDER BY 1`) as { tenant_id: string }[]).map((r) => r.tenant_id);
+      for (const tenant of tenants) if (!shredded.has(tenant)) n += await sealColumnRows(t, c, tenant, await keyring.forTenant(tenant), "legacy");
+    }
+    await t`INSERT INTO public.schema_migrations (id) VALUES (${id})`;
+    return n;
+  }) as Promise<number>;
+}
+
+/** Identity's personal columns, sealed once on upgrade (IDENTITY_SEAL_MIGRATION). */
+export const IDENTITY_SEALED_COLUMNS = () => SEALED_COLUMNS.filter((c) => c.table.startsWith("identity."));
+export const sealIdentityColumns = (owner: Sql, keyring: Keyring) => sealColumnsOnce(owner, keyring, IDENTITY_SEAL_MIGRATION, IDENTITY_SEALED_COLUMNS());
 
 export class KeyAdmin {
   /**
@@ -160,32 +222,7 @@ export class KeyAdmin {
   /** mode "legacy": seal plaintext values; mode "rotate": re-seal values under a non-active key version. */
   private async sealColumns(tenant: string, keys: TenantKeys, mode: "legacy" | "rotate"): Promise<number> {
     let n = 0;
-    for (const c of SEALED_COLUMNS) {
-      await this.sys(async (t) => {
-        const rows = await t.unsafe(`SELECT ${[...new Set([...c.keyCols, c.column])].join(", ")} FROM ${c.table} WHERE tenant_id = $1 FOR UPDATE`, [tenant]) as Record<string, unknown>[];
-        for (const r of rows) {
-          const tok = tokenOf(c.kind, r[c.column]);
-          let plain: string | null = null;
-          const extra: Record<string, string> = {};
-          if (mode === "legacy" && !tok && r[c.column] !== "") {   // '' is "not recorded", not data
-            plain = c.kind === "text" ? String(r[c.column]) : JSON.stringify(r[c.column]);
-            if (c.table === "agent.rules") extra.pattern_idx = keys.index("rule", plain);   // legacy rules get their blind index
-          } else if (mode === "rotate" && tok && keys.versionOf(tok) !== keys.activeVersion) {
-            plain = keys.openText(tok, c.ctx(r as Record<string, string>));
-          }
-          if (plain === null) continue;
-          const ctx = c.ctx({ ...(r as Record<string, string>), ...extra });
-          const sealed = keys.seal(plain, ctx);
-          const value = c.kind === "text" ? sealed : { $c: sealed };
-          const where = c.keyCols.filter((k) => k !== "pattern_idx").map((k, i) => `${k} = $${i + 3}`).join(" AND ");
-          const sets = [`${c.column} = $1`, ...Object.keys(extra).map((k) => `${k} = '${extra[k]!.replace(/'/g, "")}'`)].join(", ");
-          await t.unsafe(`UPDATE ${c.table} SET ${sets} WHERE tenant_id = $2 AND ${where}`,
-            // jsonb parameters are serialised by the driver: pass the object, not a JSON string.
-            [value, tenant, ...c.keyCols.filter((k) => k !== "pattern_idx").map((k) => r[k] as string)] as never[]);
-          n++;
-        }
-      });
-    }
+    for (const c of SEALED_COLUMNS) n += await this.sys((t) => sealColumnRows(t, c, tenant, keys, mode));
     return n;
   }
 

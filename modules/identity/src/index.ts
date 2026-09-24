@@ -5,14 +5,23 @@
  *   credentials  passkeys (WebAuthn public keys) of members; verified here, in the core
  *   enrolments   one-time codes that let a new person register a passkey for an assigned role
  *   settings     separation-of-duties policy per tenant (explicit single-owner exception, limit)
+ *   sessions     web sessions bound at sign-in (hash of the session id, principal, passkey) and
+ *                revoked at sign-out; a signed request's session id is checked here
  *
- * Every table is tenant-scoped with row-level security, like the rest of the core.
+ * Every table is tenant-scoped with row-level security, like the rest of the core. Display names
+ * (members, invitations) are sealed with the tenant's data key; principals stay readable because
+ * they are the identifiers every other record uses.
+ *
+ * Every change (member added, removed or re-scoped, invitation issued or redeemed, passkey
+ * registered or revoked, session revoked, settings changed) is appended as a sealed event to the
+ * tenant's identity stream (`<tenant>/identity`) in the same transaction as the change.
  *
  * Sign-in ceremonies are stateless on the server: a challenge is random bytes plus an expiry,
  * authenticated with a per-process key, bound to the ceremony kind and tenant, and accepted once.
  *
  * The same service is the operations guard: role, book scope and maker-checker for every plan,
- * commit and discard, whichever surface (web, copilot, MCP) the request came through.
+ * commit and discard, whichever surface (web, copilot, MCP) the request came through; and the
+ * module guard the agent and channels modules check their commands against (permit).
  */
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { TransactionSql } from "postgres";
@@ -21,11 +30,13 @@ import {
   type AuthenticationResponseJSON, type PublicKeyCredentialCreationOptionsJSON, type PublicKeyCredentialRequestOptionsJSON,
   type RegistrationResponseJSON,
 } from "@simplewebauthn/server";
-import { tenantRlsFor, type EventStore, type Migration } from "@kuber/eventstore";
+import { Principal } from "@kuber/contracts";
+import { isToken, type TenantKeys } from "@kuber/crypto";
+import { tenantRlsFor, type EventStore, type GuardScope, type Migration, type ModuleGuard, type NewEvent } from "@kuber/eventstore";
 import type { OpsGuard, OpsGuardQuery, Plan } from "@kuber/ops";
 import type { PolicyEngine } from "@kuber/policy";
 import { ReplayCache } from "@kuber/auth";
-import { can, isRole, roleOf, type Action, type Role } from "./roles.ts";
+import { ACTIONS, can, isRole, roleOf, type Action, type Role } from "./roles.ts";
 
 export * from "./roles.ts";
 
@@ -59,7 +70,32 @@ CREATE TABLE identity.settings (
   tenant_id TEXT PRIMARY KEY, solo_owner BOOLEAN NOT NULL DEFAULT false, sod_limit_paise BIGINT,
   updated_by TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
 ` + tenantRlsFor("identity"),
+}, {
+  id: "identity-002-sessions-credential-revocation",
+  // Passkeys can be revoked; web sessions are bound at sign-in and revoked at sign-out (by the
+  // hash of their id: the id itself is a bearer secret of the web tier and is never stored).
+  sql: `
+ALTER TABLE identity.credentials ADD COLUMN revoked_at TIMESTAMPTZ, ADD COLUMN revoked_by TEXT;
+CREATE TABLE identity.sessions (
+  tenant_id TEXT NOT NULL, session_hash TEXT NOT NULL, principal TEXT, credential_id TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(), revoked_at TIMESTAMPTZ, revoked_by TEXT,
+  PRIMARY KEY (tenant_id, session_hash));
+ALTER TABLE identity.sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE identity.sessions FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON identity.sessions USING (tenant_id = current_setting('kuber.tenant', true)) WITH CHECK (tenant_id = current_setting('kuber.tenant', true));
+CREATE POLICY system_scope ON identity.sessions TO kuber_system_scope USING (true) WITH CHECK (true);`,
 }];
+
+/**
+ * Data migration (run once by the cell after the SQL migrations, recorded in schema_migrations):
+ * seal display names stored before they were encrypted. See SEALED_COLUMNS in the core.
+ */
+export const IDENTITY_SEAL_MIGRATION = "identity-003-seal-display-names";
+/** Contexts the sealed display names are bound to. */
+export const memberNameCtx = (principal: string) => `identity.members.display_name|${principal}`;
+export const enrolmentNameCtx = (tokenHash: string) => `identity.enrolments.display_name|${tokenHash}`;
+/** The tenant's identity audit stream. */
+export const identityStream = (tenant: string) => `${tenant}/identity`;
 
 /** 403: authenticated, but not allowed to do this. */
 export class AccessDenied extends Error {
@@ -97,8 +133,20 @@ const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 const denied = (m: string) => new AccessDenied(m);
 
 type Row = { tenant_id: string; principal: string; role: string; books: string[] | null; display_name: string; status: string; source: string };
-const toMember = (r: Row): Member => ({ tenant: r.tenant_id, principal: r.principal, role: r.role as Member["role"], books: r.books,
-  displayName: r.display_name, status: r.status as Member["status"], source: r.source });
+/** Rows written before names were sealed are plaintext until the sealing migration has run. */
+const openName = (keys: TenantKeys, v: string, ctx: string) => (isToken(v) ? keys.openText(v, ctx) : v);
+const toMember = (r: Row, keys: TenantKeys): Member => ({ tenant: r.tenant_id, principal: r.principal, role: r.role as Member["role"], books: r.books,
+  displayName: openName(keys, r.display_name, memberNameCtx(r.principal)), status: r.status as Member["status"], source: r.source });
+const sameBooks = (a: string[] | null, b: string[] | null) => (a === null || b === null ? a === b : a.length === b.length && [...a].sort().join("\u0000") === [...b].sort().join("\u0000"));
+/** Event metadata needs a principal: operator and configuration actors ("operator:cli", "config") are recorded as system:<actor>. */
+const actor = (by: string) => (Principal.safeParse(by).success ? by : `system:${by.replace(/[^\w.@-]+/g, ".").replace(/^\.+|\.+$/g, "") || "unknown"}`);
+const sessionHash = (sid: string) => sha(`session|${sid}`);
+
+/** What a system principal may do at a module boundary: channel adapters capture statements and messages. */
+const SYSTEM_ACTIONS = new Set<Action>(["capture"]);
+/** What an agent with a book grant may do directly at a module boundary (anything else goes through an ops plan). */
+const AGENT_ACTIONS = new Set<Action>(["capture"]);
+const isAction = (a: string): a is Action => (ACTIONS as readonly string[]).includes(a);
 export const inScope = (m: Pick<Member, "books">, book: string) => m.books === null || m.books.includes(book);
 
 /** Largest amount a plan moves: the biggest journal's total debits (paise). */
@@ -111,7 +159,7 @@ export function planAmount(p: Pick<Plan, "journals">): bigint {
   return max;
 }
 
-export class Identity implements OpsGuard {
+export class Identity implements OpsGuard, ModuleGuard {
   private readonly challengeKey = randomBytes(32);
   private readonly used = new ReplayCache(50_000);
   private readonly now: () => number;
@@ -122,18 +170,27 @@ export class Identity implements OpsGuard {
   get devSignInEnabled() { return !!this.o.devSignIn; }
 
   // ------------------------------------------------------------------ membership
-  async member(tenant: string, principal: string): Promise<Member | null> {
-    const [r] = await this.store.tenantTx(tenant, (tx) => tx<Row[]>`
+  /** The active membership of `principal`; in `tx` when given (the caller's tenant transaction). */
+  async member(tenant: string, principal: string, tx?: TransactionSql): Promise<Member | null> {
+    const q = (t: TransactionSql) => t<Row[]>`
       SELECT tenant_id, principal, role, books, display_name, status, source FROM identity.members
-      WHERE tenant_id = ${tenant} AND principal = ${principal} AND status = 'active'`);
-    return r ? toMember(r) : null;
+      WHERE tenant_id = ${tenant} AND principal = ${principal} AND status = 'active'`;
+    const [r] = tx ? await q(tx) : await this.store.tenantTx(tenant, q);
+    return r ? toMember(r, await this.store.keys(tenant)) : null;
   }
 
   async members(tenant: string): Promise<Member[]> {
     const rows = await this.store.tenantTx(tenant, (tx) => tx<Row[]>`
       SELECT tenant_id, principal, role, books, display_name, status, source FROM identity.members
       WHERE tenant_id = ${tenant} ORDER BY created_at`);
-    return rows.map(toMember);
+    const keys = await this.store.keys(tenant);
+    return rows.map((r) => toMember(r, keys));
+  }
+
+  /** Append identity events to the tenant's identity stream, in the transaction of the change they record. */
+  private async audit(tx: TransactionSql, tenant: string, by: string, events: NewEvent[]) {
+    if (!events.length) return;
+    await this.store.append("identity", tenant, { streamId: identityStream(tenant), expected: "any", events }, { principal: actor(by) }, tx);
   }
 
   /**
@@ -141,8 +198,8 @@ export class Identity implements OpsGuard {
    * and whose book scope covers `book`. `allBooks` marks tenant-wide resources (drafts,
    * evidence, members), which a book-scoped member may not touch.
    */
-  async authorize(tenant: string, principal: string, action: Action, scope: { book?: string; allBooks?: boolean } = {}): Promise<Member> {
-    const m = await this.member(tenant, principal);
+  async authorize(tenant: string, principal: string, action: Action, scope: GuardScope = {}, tx?: TransactionSql): Promise<Member> {
+    const m = await this.member(tenant, principal, tx);
     if (!m || m.role === "agent") throw denied(`${principal} is not a member of workspace ${tenant}`);
     if (!can(m.role, action)) throw denied(`${m.role} may not ${action}`);
     if (scope.book !== undefined && !inScope(m, scope.book)) throw denied(`${principal} has no access to book ${scope.book}`);
@@ -150,17 +207,53 @@ export class Identity implements OpsGuard {
     return m;
   }
 
+  /**
+   * The module guard (F02, in depth): the same check at a module boundary, for callers that did not
+   * come through HTTP. People: authorize(). Agents: an active grant covering the book, and only the
+   * few actions an agent may take directly (AGENT_ACTIONS); everything else is an ops plan.
+   * System principals: only SYSTEM_ACTIONS (channel adapters). Throws AccessDenied (403).
+   */
+  async permit(tenant: string, principal: string, action: string, scope: GuardScope = {}, tx?: TransactionSql): Promise<void> {
+    if (!isAction(action)) throw denied(`unknown action ${action}`);
+    if (principal.startsWith("system:")) {
+      if (!SYSTEM_ACTIONS.has(action) || !/^system:[\w.@-]+$/.test(principal)) throw denied(`${principal} may not ${action}`);
+      return;
+    }
+    if (principal.startsWith("agent:")) {
+      const m = await this.member(tenant, principal, tx);
+      if (!m || m.role !== "agent") throw denied(`${principal} has no grant in workspace ${tenant}`);
+      if (!AGENT_ACTIONS.has(action)) throw denied(`an agent may not ${action} directly; it proposes a plan for a person`);
+      if (scope.book !== undefined && !inScope(m, scope.book)) throw denied(`${principal} is not granted book ${scope.book}`);
+      if (scope.allBooks && m.books !== null) throw denied(`${principal} is limited to books ${m.books.join(", ")}`);
+      return;
+    }
+    await this.authorize(tenant, principal, action, scope, tx);
+  }
+
   /** Add a member directly: operator tooling, MCP grants and tests. People normally arrive by enrolment. */
   async addMember(tenant: string, by: string, m: { principal: string; books?: string[] | null; displayName?: string; source?: Member["source"] }): Promise<Member> {
     const role = roleOf(m.principal);
     if (!isRole(role) && role !== "agent") throw new IdentityError("bad_role", `unknown role in ${m.principal}`);
+    const keys = await this.store.keys(tenant);
     return this.store.tenantTx(tenant, async (tx) => {
+      await this.lockTenant(tx, tenant);
+      const [prev] = await tx<Row[]>`SELECT tenant_id, principal, role, books, display_name, status, source FROM identity.members
+        WHERE tenant_id = ${tenant} AND principal = ${m.principal}`;
+      const name = m.displayName ?? m.principal.slice(role.length + 1);
       const [r] = await tx<Row[]>`
         INSERT INTO identity.members (tenant_id, principal, role, books, display_name, source, created_by)
-        VALUES (${tenant}, ${m.principal}, ${role}, ${m.books ?? null}, ${m.displayName ?? m.principal.slice(role.length + 1)}, ${m.source ?? "operator"}, ${by})
+        VALUES (${tenant}, ${m.principal}, ${role}, ${m.books ?? null}, ${keys.seal(name, memberNameCtx(m.principal))}, ${m.source ?? "operator"}, ${by})
         ON CONFLICT (tenant_id, principal) DO UPDATE SET status = 'active', books = EXCLUDED.books, revoked_by = NULL, revoked_at = NULL
         RETURNING tenant_id, principal, role, books, display_name, status, source`;
-      return toMember(r!);
+      const member = toMember(r!, keys);
+      if (!prev || prev.status !== "active") {
+        await this.audit(tx, tenant, by, [{ type: "MemberAdded", data: { principal: member.principal, role: member.role, books: member.books,
+          source: member.source, displayName: member.displayName, reactivated: !!prev } }]);
+      } else if (!sameBooks(prev.books, member.books) || prev.role !== member.role) {
+        await this.audit(tx, tenant, by, [{ type: "MemberRoleChanged", data: { principal: member.principal, role: member.role, books: member.books,
+          previousRole: prev.role, previousBooks: prev.books } }]);
+      }
+      return member;
     });
   }
 
@@ -186,6 +279,7 @@ export class Identity implements OpsGuard {
         if (o!.n <= 1) throw new IdentityError("last_owner", "a workspace keeps at least one owner", 409);
       }
       await tx`UPDATE identity.members SET status = 'revoked', revoked_by = ${by}, revoked_at = now() WHERE tenant_id = ${tenant} AND principal = ${principal}`;
+      await this.audit(tx, tenant, by, [{ type: "MemberRemoved", data: { principal } }]);
     });
   }
 
@@ -199,11 +293,14 @@ export class Identity implements OpsGuard {
     if (roleOf(principal) !== i.role || !/^[a-z]+:[\w.@-]+$/.test(principal)) throw new IdentityError("bad_principal", `principal ${principal} must be ${i.role}:<name>`);
     const token = randomBytes(24).toString("base64url");
     const expiresAt = new Date(this.now() + (i.ttlHours ?? ENROLMENT_TTL_HOURS) * 3600_000);
+    const keys = await this.store.keys(tenant), hash = sha(token);
     await this.store.tenantTx(tenant, async (tx) => {
+      await this.lockTenant(tx, tenant);
       const [exists] = await tx`SELECT 1 FROM identity.members WHERE tenant_id = ${tenant} AND principal = ${principal} AND status = 'active'`;
       if (exists) throw new IdentityError("member_exists", `${principal} is already a member`, 409);
       await tx`INSERT INTO identity.enrolments (tenant_id, token_hash, principal, role, books, display_name, created_by, expires_at)
-        VALUES (${tenant}, ${sha(token)}, ${principal}, ${i.role}, ${i.books ?? null}, ${i.displayName}, ${by}, ${expiresAt})`;
+        VALUES (${tenant}, ${hash}, ${principal}, ${i.role}, ${i.books ?? null}, ${keys.seal(i.displayName, enrolmentNameCtx(hash))}, ${by}, ${expiresAt})`;
+      await this.audit(tx, tenant, by, [{ type: "InvitationIssued", data: { invitation: hash, principal, role: i.role, books: i.books ?? null, expiresAt: expiresAt.toISOString() } }]);
     });
     return { token, principal, role: i.role, books: i.books ?? null, expiresAt: expiresAt.toISOString() };
   }
@@ -216,9 +313,16 @@ export class Identity implements OpsGuard {
 
   async setSettings(tenant: string, by: string, s: Separation) {
     if (s.sodLimitPaise !== null && !/^\d+$/.test(s.sodLimitPaise)) throw new IdentityError("bad_limit", "limit must be whole paise");
-    await this.store.tenantTx(tenant, (tx) => tx`
-      INSERT INTO identity.settings (tenant_id, solo_owner, sod_limit_paise, updated_by) VALUES (${tenant}, ${s.soloOwner}, ${s.sodLimitPaise}, ${by})
-      ON CONFLICT (tenant_id) DO UPDATE SET solo_owner = EXCLUDED.solo_owner, sod_limit_paise = EXCLUDED.sod_limit_paise, updated_by = EXCLUDED.updated_by, updated_at = now()`);
+    await this.store.tenantTx(tenant, async (tx) => {
+      await this.lockTenant(tx, tenant);
+      const [prev] = await tx<{ solo_owner: boolean; sod_limit_paise: string | null }[]>`
+        SELECT solo_owner, sod_limit_paise::text FROM identity.settings WHERE tenant_id = ${tenant}`;
+      await tx`
+        INSERT INTO identity.settings (tenant_id, solo_owner, sod_limit_paise, updated_by) VALUES (${tenant}, ${s.soloOwner}, ${s.sodLimitPaise}, ${by})
+        ON CONFLICT (tenant_id) DO UPDATE SET solo_owner = EXCLUDED.solo_owner, sod_limit_paise = EXCLUDED.sod_limit_paise, updated_by = EXCLUDED.updated_by, updated_at = now()`;
+      await this.audit(tx, tenant, by, [{ type: "SettingsChanged", data: { soloOwner: s.soloOwner, sodLimitPaise: s.sodLimitPaise,
+        previous: prev ? { soloOwner: prev.solo_owner, sodLimitPaise: prev.sod_limit_paise } : null } }]);
+    });
     return this.settings(tenant);
   }
 
@@ -309,11 +413,14 @@ export class Identity implements OpsGuard {
     await tx`SELECT pg_advisory_xact_lock(hashtextextended(${"identity:" + tenant}, 0))`;
   }
 
-  /** A workspace can be claimed by a first owner only while it has no members and no data. */
+  /**
+   * A workspace can be claimed by a first owner only while it has no members and no data (identity
+   * events alone, such as an agent grant from configuration, are not data).
+   */
   private async claimable(tx: TransactionSql, tenant: string): Promise<boolean> {
     const [m] = await tx`SELECT 1 FROM identity.members WHERE tenant_id = ${tenant} AND role <> 'agent' LIMIT 1`;
     if (m) return false;
-    const [e] = await tx`SELECT 1 FROM es.events WHERE tenant_id = ${tenant} LIMIT 1`;
+    const [e] = await tx`SELECT 1 FROM es.events WHERE tenant_id = ${tenant} AND module <> 'identity' LIMIT 1`;
     return !e;
   }
 
@@ -347,7 +454,7 @@ export class Identity implements OpsGuard {
   }
 
   /** Verify the new passkey and create the membership it belongs to, atomically. */
-  async register(tenant: string, i: { displayName: string; enrolment?: string; response: RegistrationResponseJSON }): Promise<Member> {
+  async register(tenant: string, i: { displayName: string; enrolment?: string; response: RegistrationResponseJSON; session?: string | null }): Promise<Member> {
     this.validTenant(tenant);
     const displayName = i.displayName.trim().slice(0, 80);
     let v;
@@ -357,30 +464,42 @@ export class Identity implements OpsGuard {
     } catch (e) { throw new IdentityError("passkey_rejected", `passkey registration failed: ${e instanceof Error ? e.message : String(e)}`, 401); }
     if (!v.verified) throw new IdentityError("passkey_rejected", "passkey registration could not be verified", 401);
     const cred = v.registrationInfo.credential;
+    const keys = await this.store.keys(tenant);
     return this.store.tenantTx(tenant, async (tx) => {
       await this.lockTenant(tx, tenant);
       let member: Member;
+      const events: NewEvent[] = [];
       if (i.enrolment) {
         const e = await this.enrolment(tx, tenant, i.enrolment, true);
-        await tx`UPDATE identity.enrolments SET used_at = now() WHERE tenant_id = ${tenant} AND token_hash = ${sha(i.enrolment)}`;
+        const hash = sha(i.enrolment);
+        await tx`UPDATE identity.enrolments SET used_at = now() WHERE tenant_id = ${tenant} AND token_hash = ${hash}`;
+        const [prev] = await tx<{ status: string }[]>`SELECT status FROM identity.members WHERE tenant_id = ${tenant} AND principal = ${e.principal}`;
+        const name = displayName || openName(keys, e.display_name, enrolmentNameCtx(hash));
         const [r] = await tx<Row[]>`
           INSERT INTO identity.members (tenant_id, principal, role, books, display_name, source, created_by)
-          VALUES (${tenant}, ${e.principal}, ${e.role}, ${e.books}, ${displayName || e.display_name}, 'enrolment', ${e.principal})
+          VALUES (${tenant}, ${e.principal}, ${e.role}, ${e.books}, ${keys.seal(name, memberNameCtx(e.principal))}, 'enrolment', ${e.principal})
           ON CONFLICT (tenant_id, principal) DO UPDATE SET status = 'active', role = EXCLUDED.role, books = EXCLUDED.books,
             display_name = EXCLUDED.display_name, revoked_by = NULL, revoked_at = NULL
           RETURNING tenant_id, principal, role, books, display_name, status, source`;
-        member = toMember(r!);
+        member = toMember(r!, keys);
+        events.push({ type: "InvitationRedeemed", data: { invitation: hash, principal: member.principal, credentialId: cred.id } },
+          { type: "MemberAdded", data: { principal: member.principal, role: member.role, books: member.books, source: member.source,
+            displayName: member.displayName, reactivated: !!prev } });
       } else {
         if (!(await this.claimable(tx, tenant))) throw new IdentityError("workspace_taken", "that workspace already exists", 409);
         const principal = `owner:${slug(displayName) || "owner"}`;
         const [r] = await tx<Row[]>`
           INSERT INTO identity.members (tenant_id, principal, role, books, display_name, source, created_by)
-          VALUES (${tenant}, ${principal}, 'owner', NULL, ${displayName}, 'passkey', ${principal})
+          VALUES (${tenant}, ${principal}, 'owner', NULL, ${keys.seal(displayName, memberNameCtx(principal))}, 'passkey', ${principal})
           RETURNING tenant_id, principal, role, books, display_name, status, source`;
-        member = toMember(r!);
+        member = toMember(r!, keys);
+        events.push({ type: "MemberAdded", data: { principal, role: "owner", books: null, source: "passkey", displayName: member.displayName, reactivated: false } });
       }
       await tx`INSERT INTO identity.credentials (tenant_id, credential_id, principal, public_key, counter, transports)
         VALUES (${tenant}, ${cred.id}, ${member.principal}, ${Buffer.from(cred.publicKey)}, ${cred.counter}, ${cred.transports ?? []})`;
+      events.push({ type: "CredentialRegistered", data: { principal: member.principal, credentialId: cred.id } });
+      await this.audit(tx, tenant, member.principal, events);
+      if (i.session) await this.bindSession(tx, tenant, i.session, member.principal, cred.id);
       return member;
     });
   }
@@ -392,13 +511,13 @@ export class Identity implements OpsGuard {
   }
 
   /** Verify a passkey assertion; returns the active member it belongs to. */
-  async authenticate(tenant: string, i: { response: AuthenticationResponseJSON }): Promise<Member> {
+  async authenticate(tenant: string, i: { response: AuthenticationResponseJSON; session?: string | null }): Promise<Member> {
     this.validTenant(tenant);
     const fail = () => new IdentityError("passkey_rejected", "that passkey is not registered for this workspace", 401);
     const [c] = await this.store.tenantTx(tenant, (tx) => tx<{ credential_id: string; principal: string; public_key: Buffer; counter: string; transports: string[] }[]>`
       SELECT c.credential_id, c.principal, c.public_key, c.counter::text, c.transports FROM identity.credentials c
       JOIN identity.members m ON m.tenant_id = c.tenant_id AND m.principal = c.principal AND m.status = 'active'
-      WHERE c.tenant_id = ${tenant} AND c.credential_id = ${String(i.response?.id ?? "")}`);
+      WHERE c.tenant_id = ${tenant} AND c.credential_id = ${String(i.response?.id ?? "")} AND c.revoked_at IS NULL`);
     if (!c) throw fail();
     let v;
     try {
@@ -407,8 +526,11 @@ export class Identity implements OpsGuard {
         credential: { id: c.credential_id, publicKey: new Uint8Array(c.public_key), counter: Number(c.counter), transports: c.transports } });
     } catch (e) { throw new IdentityError("passkey_rejected", `passkey sign-in failed: ${e instanceof Error ? e.message : String(e)}`, 401); }
     if (!v.verified) throw fail();
-    await this.store.tenantTx(tenant, (tx) => tx`UPDATE identity.credentials SET counter = ${v.authenticationInfo.newCounter}, last_used_at = now()
-      WHERE tenant_id = ${tenant} AND credential_id = ${c.credential_id}`);
+    await this.store.tenantTx(tenant, async (tx) => {
+      await tx`UPDATE identity.credentials SET counter = ${v.authenticationInfo.newCounter}, last_used_at = now()
+        WHERE tenant_id = ${tenant} AND credential_id = ${c.credential_id}`;
+      if (i.session) await this.bindSession(tx, tenant, i.session, c.principal, c.credential_id);
+    });
     const m = await this.member(tenant, c.principal);
     if (!m) throw fail();
     return m;
@@ -418,23 +540,95 @@ export class Identity implements OpsGuard {
    * Development sign-in (KUBER_DEV_SIGNIN=true only): an owner by name, for a workspace that has
    * no people yet or where that owner already exists. No proof of identity: never in production.
    */
-  async devSignIn(tenant: string, name: string): Promise<Member> {
+  async devSignIn(tenant: string, name: string, session?: string | null): Promise<Member> {
     if (!this.o.devSignIn) throw denied("development sign-in is disabled");
     this.validTenant(tenant);
     const principal = `owner:${slug(name) || "owner"}`;
+    const keys = await this.store.keys(tenant);
     return this.store.tenantTx(tenant, async (tx) => {
       await this.lockTenant(tx, tenant);
       const [r] = await tx<Row[]>`SELECT tenant_id, principal, role, books, display_name, status, source FROM identity.members
         WHERE tenant_id = ${tenant} AND principal = ${principal} AND status = 'active'`;
-      if (r) return toMember(r);
+      if (r) {
+        if (session) await this.bindSession(tx, tenant, session, principal, null);
+        return toMember(r, keys);
+      }
       const [people] = await tx`SELECT 1 FROM identity.members WHERE tenant_id = ${tenant} AND role <> 'agent' AND status = 'active' LIMIT 1`;
       if (people) throw denied("this workspace has members: sign in with a passkey");
+      const [prev] = await tx`SELECT 1 FROM identity.members WHERE tenant_id = ${tenant} AND principal = ${principal}`;
       const [n] = await tx<Row[]>`
         INSERT INTO identity.members (tenant_id, principal, role, books, display_name, source, created_by)
-        VALUES (${tenant}, ${principal}, 'owner', NULL, ${name.trim().slice(0, 80)}, 'dev', ${principal})
+        VALUES (${tenant}, ${principal}, 'owner', NULL, ${keys.seal(name.trim().slice(0, 80), memberNameCtx(principal))}, 'dev', ${principal})
         ON CONFLICT (tenant_id, principal) DO UPDATE SET status = 'active', revoked_by = NULL, revoked_at = NULL
         RETURNING tenant_id, principal, role, books, display_name, status, source`;
-      return toMember(n!);
+      const member = toMember(n!, keys);
+      await this.audit(tx, tenant, principal, [{ type: "MemberAdded", data: { principal, role: "owner", books: null, source: "dev",
+        displayName: member.displayName, reactivated: !!prev } }]);
+      if (session) await this.bindSession(tx, tenant, session, principal, null);
+      return member;
     });
+  }
+
+  // ------------------------------------------------------------------ passkey and session revocation
+  /** A member's passkeys (never the key material). */
+  async credentials(tenant: string, principal: string) {
+    const rows = await this.store.tenantTx(tenant, (tx) => tx<{ credential_id: string; created_at: Date; last_used_at: Date | null; revoked_at: Date | null }[]>`
+      SELECT credential_id, created_at, last_used_at, revoked_at FROM identity.credentials
+      WHERE tenant_id = ${tenant} AND principal = ${principal} ORDER BY created_at`);
+    return rows.map((r) => ({ credentialId: r.credential_id, createdAt: r.created_at.toISOString(), lastUsedAt: r.last_used_at?.toISOString() ?? null,
+      revokedAt: r.revoked_at?.toISOString() ?? null }));
+  }
+
+  /**
+   * Revoke a passkey: it can no longer sign in, and sessions bound to it at sign-in stop working.
+   * `by` may revoke its own passkeys; `anyMember` (members.manage, checked by the caller) any in the workspace.
+   */
+  async revokeCredential(tenant: string, by: string, credentialId: string, opts: { anyMember?: boolean } = {}) {
+    await this.store.tenantTx(tenant, async (tx) => {
+      await this.lockTenant(tx, tenant);
+      const [c] = await tx<{ principal: string; revoked_at: Date | null }[]>`
+        SELECT principal, revoked_at FROM identity.credentials WHERE tenant_id = ${tenant} AND credential_id = ${credentialId} FOR UPDATE`;
+      if (!c || (!opts.anyMember && c.principal !== by)) throw new IdentityError("not_found", "no such passkey", 404);
+      if (c.revoked_at) return;
+      await tx`UPDATE identity.credentials SET revoked_at = now(), revoked_by = ${by} WHERE tenant_id = ${tenant} AND credential_id = ${credentialId}`;
+      await this.audit(tx, tenant, by, [{ type: "CredentialRevoked", data: { principal: c.principal, credentialId } }]);
+    });
+  }
+
+  /** Record which principal and passkey a web session was issued for (first binding wins). */
+  private async bindSession(tx: TransactionSql, tenant: string, session: string, principal: string, credentialId: string | null) {
+    await tx`INSERT INTO identity.sessions (tenant_id, session_hash, principal, credential_id)
+      VALUES (${tenant}, ${sessionHash(session)}, ${principal}, ${credentialId}) ON CONFLICT (tenant_id, session_hash) DO NOTHING`;
+  }
+
+  /**
+   * Sign-out: revoke a session id. Works for sessions the core never saw bound (revocation list),
+   * and is idempotent. `by` is the signed-in principal the session belongs to.
+   */
+  async revokeSession(tenant: string, session: string, by: string) {
+    const h = sessionHash(session);
+    await this.store.tenantTx(tenant, async (tx) => {
+      await this.lockTenant(tx, tenant);
+      const [prev] = await tx<{ revoked_at: Date | null; principal: string | null }[]>`
+        SELECT revoked_at, principal FROM identity.sessions WHERE tenant_id = ${tenant} AND session_hash = ${h} FOR UPDATE`;
+      if (prev?.revoked_at) return;
+      if (prev) await tx`UPDATE identity.sessions SET revoked_at = now(), revoked_by = ${by} WHERE tenant_id = ${tenant} AND session_hash = ${h}`;
+      else await tx`INSERT INTO identity.sessions (tenant_id, session_hash, principal, revoked_at, revoked_by) VALUES (${tenant}, ${h}, ${by}, now(), ${by})`;
+      await this.audit(tx, tenant, by, [{ type: "SessionRevoked", data: { session: h, principal: prev?.principal ?? by } }]);
+    });
+  }
+
+  /**
+   * Is this session still good for `principal`? No when it was revoked, when it was bound to
+   * another principal, or when the passkey it was issued for has been revoked. A session the core
+   * has no record of (issued before binding existed, or by development tooling) is good until revoked.
+   */
+  async sessionActive(tenant: string, session: string, principal: string): Promise<boolean> {
+    const [r] = await this.store.tenantTx(tenant, (tx) => tx<{ revoked: boolean; principal: string | null; credential_revoked: boolean }[]>`
+      SELECT s.revoked_at IS NOT NULL AS revoked, s.principal, c.revoked_at IS NOT NULL AS credential_revoked
+      FROM identity.sessions s LEFT JOIN identity.credentials c ON c.tenant_id = s.tenant_id AND c.credential_id = s.credential_id
+      WHERE s.tenant_id = ${tenant} AND s.session_hash = ${sessionHash(session)}`);
+    if (!r) return true;
+    return !r.revoked && !r.credential_revoked && (r.principal === null || r.principal === principal);
   }
 }
