@@ -190,7 +190,7 @@ export class KeyAdmin {
       const keys = await this.keyring.forTenant(tenant);
       await this.sys(async (t) => {
         const rows = await t<{ global_position: string; event_id: string; type: string; stream_id: string; data: unknown }[]>`
-          SELECT global_position::text, event_id, type, stream_id, data FROM es.events WHERE tenant_id = ${tenant} ORDER BY global_position FOR UPDATE`;
+          SELECT global_position::text, event_id, type, stream_id, data FROM es.events WHERE tenant_id = ${tenant} ORDER BY es.events.global_position FOR UPDATE`;
         for (const r of rows) {
           if (isSealed(r.data)) continue;
           const { sealed, digest } = sealEvent(keys, r.event_id, r.type, r.stream_id, r.data);
@@ -233,7 +233,7 @@ export class KeyAdmin {
     let events = 0;
     await this.sys(async (t) => {
       const rows = await t<{ global_position: string; event_id: string; type: string; stream_id: string; data: unknown; digest: string }[]>`
-        SELECT global_position::text, event_id, type, stream_id, data, digest FROM es.events WHERE tenant_id = ${tenant} ORDER BY global_position FOR UPDATE`;
+        SELECT global_position::text, event_id, type, stream_id, data, digest FROM es.events WHERE tenant_id = ${tenant} ORDER BY es.events.global_position FOR UPDATE`;
       for (const r of rows) {
         if (!isSealed(r.data) || keys.versionOf(r.data.$c) === keys.activeVersion) continue;
         const ctx = eventContext(r.event_id, r.type, r.stream_id);

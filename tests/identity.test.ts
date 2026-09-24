@@ -17,7 +17,7 @@ import { KeyAdmin, buildServer, kuberTools, Copilot, type Cell } from "@kuber/co
 import { AUDIENCE, AUTH_HEADER, ISSUER, ReplayCache, authKey, bodyHash, signRequest, verifyRequest } from "@kuber/auth";
 import { ACTIONS, Identity, ROLES, can, permissionTable, type Action, type Role } from "@kuber/identity";
 import type { Plan } from "@kuber/ops";
-import { CORE_AUTH_SECRET, enrol, signedInject, startCell, type SignedRequest } from "./helpers.ts";
+import { CORE_AUTH_SECRET, enrol, newSession, signedInject, startCell, type SignedRequest } from "./helpers.ts";
 
 // ---------------------------------------------------------------- request signing (unit)
 describe("service assertions (BFF → core)", () => {
@@ -126,13 +126,13 @@ describe("F01: the core authenticates every request", () => {
     const url = `/v1/tenants/${T}/books/${B}/journals`;
     expect((await signedInject(app, "not-the-core-secret-but-long-enough-0123")({ method: "POST", url, tenant: T, principal: P.owner, payload: journal })).statusCode).toBe(401);
     const body = JSON.stringify(journal);
-    const header = signRequest(authKey(CORE_AUTH_SECRET), { method: "POST", path: url, body, tenant: T, principal: P.controller });
+    const header = signRequest(authKey(CORE_AUTH_SECRET), { method: "POST", path: url, body, tenant: T, principal: P.controller, session: newSession() });
     const once = await app.inject({ method: "POST", url, headers: { [AUTH_HEADER]: header, "content-type": "application/json" }, payload: body });
     expect(once.statusCode).toBe(201);
     const replayed = await app.inject({ method: "POST", url, headers: { [AUTH_HEADER]: header, "content-type": "application/json" }, payload: body });
     expect(replayed.statusCode).toBe(401);
     expect(replayed.json().error).toBe("replayed");
-    const altered = await app.inject({ method: "POST", url, headers: { [AUTH_HEADER]: signRequest(authKey(CORE_AUTH_SECRET), { method: "POST", path: url, body, tenant: T, principal: P.controller }), "content-type": "application/json" },
+    const altered = await app.inject({ method: "POST", url, headers: { [AUTH_HEADER]: signRequest(authKey(CORE_AUTH_SECRET), { method: "POST", path: url, body, tenant: T, principal: P.controller, session: newSession() }), "content-type": "application/json" },
       payload: JSON.stringify({ ...journal, narration: "Altered in transit" }) });
     expect(altered.statusCode).toBe(401);
     expect((await as(P.owner, "POST", url, journal, "other-tenant")).statusCode).toBe(403);

@@ -22,8 +22,9 @@ export class OutboxRelay {
   async drainOnce(): Promise<number> {
     return this.sql.begin(async (tx) => {
       const rows = await tx<{ id: string; subject: string; envelope: Envelope }[]>`
-        SELECT id::text, subject, envelope FROM es.outbox
-        WHERE published_at IS NULL ORDER BY id LIMIT ${this.batch} FOR UPDATE SKIP LOCKED`;
+        SELECT id::text AS id, subject, envelope FROM es.outbox
+        WHERE published_at IS NULL ORDER BY es.outbox.id LIMIT ${this.batch} FOR UPDATE SKIP LOCKED`;
+      // (ORDER BY the column, not the text alias: "10" sorts before "2", which published out of commit order.)
       for (const r of rows) await this.publish(r.subject, r.envelope);
       if (rows.length) await tx`UPDATE es.outbox SET published_at = now() WHERE id IN ${tx(rows.map((r) => r.id))}`;
       return rows.length;

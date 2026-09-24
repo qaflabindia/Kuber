@@ -218,7 +218,10 @@ describe("F07: a draft is posted only when the GL accepts its journal", () => {
   it("a rejected posting can be fixed and approved again, and then posts once", async () => {
     const d = await draft();
     await cell.gl.execute(T, B, { kind: "LockPeriod", periodEnd: "2026-10-31", level: "soft" }, { principal: OWNER });
-    await cell.agent.approveDraft(T, d.draft_id, "preparer:pat", "LIVING");   // soft lock: preparers may not post
+    // Soft lock: an approver may decide drafts but not post into the locked period, so the GL refuses.
+    // (Was preparer:pat; preparers may not decide drafts at all, which the agent now checks itself.)
+    await enrol(cell, T, ["approver:pat"]);
+    await cell.agent.approveDraft(T, d.draft_id, "approver:pat", "LIVING");
     await cell.settle();
     expect((await draftRow(d.draft_id)).status).toBe("rejected_by_gl");
     expect((await cell.agent.queue(T))[0]!.gl_rejection).toMatch(/period_soft_locked/);

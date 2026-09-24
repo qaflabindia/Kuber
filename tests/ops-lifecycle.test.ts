@@ -422,6 +422,7 @@ describe("F12: rebuild covers provisional journals confirmed by the GL", () => {
   const T = "conf", B = "main", ME = "owner:conf";
   beforeAll(async () => {
     f = await fixture(T);
+    await enrol(f.cell, T, [ME]);
     await f.cell.channels.submitChat(T, B, "Paid 100 to Alice via bank", ME, "2026-10-01");
     await f.cell.settle();
     await f.cell.channels.submitStatement(T, B, "Date,Narration,Withdrawal Amt,Deposit Amt\n01/10/2026,UPI/DR/ALICE K/alice@okaxis,100,\n", ME);
