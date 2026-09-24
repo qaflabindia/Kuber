@@ -12,8 +12,8 @@
  */
 import { Readable } from "node:stream";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
-import { AUTH_HEADER, AuthError, ReplayCache, authKey, verifyRequest, type Claims } from "@kuber/auth";
-import { AccessDenied, IdentityError, inScope, type Action, type Member } from "@kuber/identity";
+import { AUTH_HEADER, AuthError, ReplayCache, STEP_UP_MAX_AGE_MS, authKey, stepUpFresh, verifyRequest, type Claims } from "@kuber/auth";
+import { AccessDenied, IdentityError, ROLES, inScope, type Action, type Member } from "@kuber/identity";
 import { z, ZodError } from "zod";
 import { Account, IsoDate, Principal, parseAmount, uuid, type Line } from "@kuber/contracts";
 import { CommandConflict, ConcurrencyError } from "@kuber/eventstore";
@@ -383,6 +383,31 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     await cell.identity.revoke(tenant, principal, req.params.principal);
     return reply.code(204).send();
   });
+  type M = { Params: { tenant: string; principal: string } };
+  // A role and/or book-scope change; a role change answers with the successor principal.
+  app.patch<M>("/v1/tenants/:tenant/members/:principal", async (req) => {
+    const { tenant, principal } = await who(req, "members.manage", { allBooks: true });
+    const b = z.object({ role: z.enum(ROLES).optional(), books: z.array(z.string().min(1).max(64)).min(1).nullable().optional() })
+      .refine((x) => x.role !== undefined || x.books !== undefined, "change role, books or both").parse(req.body);
+    return cell.identity.changeMember(tenant, principal, req.params.principal, b);
+  });
+  app.get<P>("/v1/tenants/:tenant/credentials", async (req) => { const { tenant } = await who(req, "members.read", { allBooks: true }); return cell.identity.credentials(tenant); });
+  app.post<{ Params: { tenant: string; id: string } }>("/v1/tenants/:tenant/credentials/:id/revoke", async (req, reply) => {
+    const { tenant, principal } = await who(req, "members.manage", { allBooks: true });
+    await cell.identity.revokeCredential(tenant, principal, req.params.id);
+    return reply.code(204).send();
+  });
+  // Step-up: a signed-in person re-confirms with their own passkey before a sensitive approval.
+  // The BFF then carries the time of that confirmation in its signed assertions (claim `su`).
+  app.post<P>("/v1/tenants/:tenant/identity/stepup/options", async (req) => {
+    const { tenant, principal } = await who(req, "read");
+    return cell.identity.stepUpOptions(tenant, principal);
+  });
+  app.post<P>("/v1/tenants/:tenant/identity/stepup/verify", async (req) => {
+    const { tenant, principal } = await who(req, "read");
+    const b = z.union([z.object({ response: Json }), z.object({ dev: z.literal(true) })]).parse(req.body);
+    return "dev" in b ? cell.identity.devStepUp(tenant, principal) : cell.identity.stepUp(tenant, principal, { response: b.response as never });
+  });
   app.get<P>("/v1/tenants/:tenant/settings/separation", async (req) => cell.identity.settings((await who(req, "read")).tenant));
   app.put<P>("/v1/tenants/:tenant/settings/separation", async (req) => {
     const { tenant, principal } = await who(req, "settings.manage", { allBooks: true });
@@ -412,6 +437,17 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   app.post<T>("/v1/tenants/:tenant/plans/:id/commit", async (req, reply) => {
     const { tenant, principal } = await who(req, "read");          // role, book and maker-checker: ops guard
     const b = z.object({ hash: z.string().length(64) }).parse(req.body);
+    // Period operations and amounts above the approval limit need a fresh passkey step-up. The
+    // guard runs first, so nobody is asked for a passkey for a plan they could not approve anyway.
+    const plan = await cell.ops.get(tenant, req.params.id);
+    if (plan.status === "proposed" && plan.kind === "write" && !principal.startsWith("agent:")) {
+      await cell.identity.check({ step: "commit", tenant, book: plan.bookId, principal, op: { name: plan.op, kind: plan.kind, gate: plan.gate }, plan });
+      const reason = await cell.identity.stepUpReason(tenant, plan);
+      if (reason && !stepUpFresh(claimsOf.get(req)!)) {
+        return reply.code(403).send({ error: "step_up_required", reason,
+          message: `Confirm with your passkey to approve this (${reason}); a confirmation lasts ${STEP_UP_MAX_AGE_MS / 60_000} minutes.` });
+      }
+    }
     const r = await cell.ops.commit(tenant, req.params.id, principal, b.hash);
     return reply.code(r.status === "committed" ? 200 : 202).send(r);
   });
