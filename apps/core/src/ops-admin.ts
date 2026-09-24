@@ -163,6 +163,18 @@ export class OpsAdmin {
     return { projection: name, tenant, ok: problems.length === 0, problems, fingerprint: await fingerprintProjection(this.owner, p, tenant) };
   }
 
+  // ------------------------------------------------------------------ backfills
+  /**
+   * Confirmations recorded only by the agent before they were propagated to the GL: emit
+   * ProvisionalConfirmed once per such journal (idempotent), for one tenant or every tenant.
+   * The events reach the GL through the running core's relay.
+   */
+  async backfillConfirmations(tenant?: string): Promise<{ tenant: string; emitted: number }[]> {
+    const out = [];
+    for (const t of tenant ? [tenant] : await this.tenants()) out.push({ tenant: t, ...(await this.cell.agent.backfillConfirmations(t)) });
+    return out;
+  }
+
   // ------------------------------------------------------------------ bus consumers
   /**
    * Durable consumers on the cell's stream: which are expected for `partitions` lanes, their

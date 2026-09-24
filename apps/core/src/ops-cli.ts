@@ -16,6 +16,8 @@
  *                                                 KUBER_BUS_PARTITIONS, pending counts, stale ones (un-suffixed
  *                                                 <module>, lanes beyond the partition count); --prune deletes stale
  *                                                 ones whose pending messages are processed (es.inbox), --force all stale
+ *   ops backfill-confirmations [--tenant t]       emit ProvisionalConfirmed for confirmations the GL never heard of
+ *                                                 (databases from before propagation); idempotent
  *   ops verify [--full] [--tenant t]              link chains and digests from each stream's verified checkpoint
  *                                                 (--full: from the first event); moves checkpoints of clean streams
  *
@@ -102,6 +104,12 @@ try {
       process.exitCode = r.matches ? 0 : 1;
       break;
     }
+    case "backfill-confirmations": {
+      const r = await ops.backfillConfirmations(flag("--tenant"));
+      print(r);
+      console.log(`emitted ${r.reduce((n, x) => n + x.emitted, 0)} confirmation(s) for ${r.length} tenant(s); the core's relay publishes them to the GL`);
+      break;
+    }
     case "bus-consumers": {
       const nats = await NatsConsumerAdmin.connect(need("NATS_URL"), streamNameFor(process.env.CELL_ID ?? "local"),
         { caFile: process.env.NATS_TLS_CA, token: process.env.NATS_TOKEN });
@@ -120,7 +128,7 @@ try {
       break;
     }
     default:
-      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify, bus-consumers");
+      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify, bus-consumers, backfill-confirmations");
       process.exitCode = 2;
   }
 } finally {

@@ -9,7 +9,7 @@ import { join } from "node:path";
 import postgres from "postgres";
 import { canonical, sha256, uuid } from "@kuber/contracts";
 import { IngestionError, parseBankStatement } from "@kuber/channels";
-import { KeyAdmin, buildServer, type Cell } from "@kuber/core";
+import { KeyAdmin, OpsAdmin, buildServer, type Cell } from "@kuber/core";
 import { Keyring, MemoryKms } from "@kuber/crypto";
 import { EventStore } from "@kuber/eventstore";
 import { CORE_AUTH_SECRET, ROOT, enrol, signed, startCell } from "./helpers.ts";
@@ -287,6 +287,21 @@ describe("F06: provisional confirmation", () => {
     await cell.settle();
     expect((await cell.gl.state(T, B)).journals.get(jid!)!.provisional).toBe(false);
     expect((await cell.reporting.recentJournals(T, B))[0]!.provisional).toBe(false);
+  });
+
+  it("ops backfill-confirmations runs the backfill for every tenant or one", async () => {
+    await provisional("Paid 100 to Alice via bank");
+    const jid = (await journals())[0]![0];
+    await cell.store.tenantTx(T, (tx) => tx`UPDATE agent.journal_index SET confirmed = true WHERE tenant_id = ${T}`);
+    const owner = postgres(ownerUrl, { max: 1, onnotice: () => undefined });
+    try {
+      const ops = new OpsAdmin(owner, cell);
+      expect(await ops.backfillConfirmations("nobody")).toEqual([{ tenant: "nobody", emitted: 0 }]);
+      expect(await ops.backfillConfirmations()).toEqual([{ tenant: T, emitted: 1 }]);
+      expect(await ops.backfillConfirmations(T)).toEqual([{ tenant: T, emitted: 0 }]);
+    } finally { await owner.end(); }
+    await cell.settle();
+    expect((await cell.gl.state(T, B)).journals.get(jid!)!.provisional).toBe(false);
   });
 
   it("a confirmation cannot apply to a reversed journal, and repeating it is harmless", async () => {
