@@ -488,7 +488,9 @@ describe("passkeys", () => {
     expect(r.statusCode).toBe(201);
     expect(r.json()).toMatchObject({ principal: "auditor:ca-firm", role: "auditor", books: ["main"] });
     expect((await ceremony(W, "registration/options", { displayName: "CA Firm", enrolment: token })).statusCode).toBe(403);
-    expect((await as("auditor:ca-firm", "GET", `/v1/tenants/${W}/me`, undefined, W)).json().role).toBe("auditor");
+    const me = (await as("auditor:ca-firm", "GET", `/v1/tenants/${W}/me`, undefined, W)).json();
+    expect(me.role).toBe("auditor");
+    expect(me.permissions).toEqual(["read", "members.read"]);
   });
 
   it("step-up: re-confirms the signed-in person with their own passkey only", async () => {

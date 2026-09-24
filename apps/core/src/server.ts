@@ -13,7 +13,7 @@
 import { Readable } from "node:stream";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { AUTH_HEADER, AuthError, ReplayCache, STEP_UP_MAX_AGE_MS, authKey, stepUpFresh, verifyRequest, type Claims } from "@kuber/auth";
-import { AccessDenied, IdentityError, ROLES, inScope, type Action, type Member } from "@kuber/identity";
+import { ACTIONS, AccessDenied, IdentityError, ROLES, can, inScope, type Action, type Member } from "@kuber/identity";
 import { z, ZodError } from "zod";
 import { Account, IsoDate, Principal, parseAmount, uuid, type Line } from "@kuber/contracts";
 import { CommandConflict, ConcurrencyError } from "@kuber/eventstore";
@@ -370,7 +370,11 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     const b = z.object({ name: z.string().min(2).max(80) }).parse(req.body);
     return cell.identity.devSignIn(ceremony(req), b.name);
   });
-  app.get<P>("/v1/tenants/:tenant/me", async (req) => (await who(req, "read")).member);
+  // The member and what their role allows, so surfaces show only what the core would accept.
+  app.get<P>("/v1/tenants/:tenant/me", async (req) => {
+    const { member } = await who(req, "read");
+    return { ...member, permissions: ACTIONS.filter((a) => can(member.role, a)) };
+  });
   app.get<P>("/v1/tenants/:tenant/members", async (req) => { const { tenant } = await who(req, "members.read", { allBooks: true }); return cell.identity.members(tenant); });
   app.post<P>("/v1/tenants/:tenant/members/invitations", async (req, reply) => {
     const { tenant, principal } = await who(req, "members.manage", { allBooks: true });

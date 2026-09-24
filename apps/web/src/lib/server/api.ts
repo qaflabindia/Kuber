@@ -24,13 +24,13 @@ export class ApiError extends Error {
 }
 
 /** One signed call. `principal` is null only for sign-in ceremonies, before anyone is signed in. */
-async function call<T>(s: { tenant: string; principal: string | null }, method: string, path: string, body?: unknown, contentType = "application/json"): Promise<T> {
+async function call<T>(s: { tenant: string; principal: string | null; stepUpAt?: number }, method: string, path: string, body?: unknown, contentType = "application/json"): Promise<T> {
   const target = `/v1/tenants/${encodeURIComponent(s.tenant)}${path}`;
   const payload = body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body);
   const res = await fetch(`${CORE}${target}`, {
     method,
     headers: {
-      [AUTH_HEADER]: signRequest(coreKey(), { method, path: target, body: payload, tenant: s.tenant, principal: s.principal }),
+      [AUTH_HEADER]: signRequest(coreKey(), { method, path: target, body: payload, tenant: s.tenant, principal: s.principal, stepUpAt: s.stepUpAt }),
       ...(payload !== undefined ? { "content-type": contentType } : {}),
     },
     body: payload,
@@ -70,7 +70,8 @@ export interface Plan {
 }
 export interface CopilotReply { reply: string; cards: Plan[]; suggestions?: string[]; engine: string; trace: { tool: string; ok: boolean }[] }
 
-export const api = (s: Pick<Session, "tenant" | "principal">) => ({
+/** `stepUpAt`: the person's last passkey step-up (see stepup.ts), for sensitive approvals. */
+export const api = (s: Pick<Session, "tenant" | "principal"> & { stepUpAt?: number }) => ({
   books: () => call<{ book_id: string; accounts: number }[]>(s, "GET", "/books"),
   openBook: (bookId: string, entityId: string, entityType: string) => call(s, "POST", "/books", { bookId, entityId, entityType }),
   accounts: (book: string) => call<Account[]>(s, "GET", `/books/${book}/accounts`),
@@ -114,5 +115,29 @@ export const identity = (tenant: string) => {
     authenticationOptions: () => call<CeremonyOptions>(c, "POST", "/identity/authentication/options", {}),
     authenticate: (response: unknown) => call<Member>(c, "POST", "/identity/authentication/verify", { response }),
     devSignIn: (name: string) => call<Member>(c, "POST", "/identity/dev-signin", { name }),
+  };
+};
+
+// ---------------------------------------------------------------- member management and step-up
+export interface Me extends Member { permissions: string[] }
+export interface Credential { credentialId: string; principal: string; transports: string[]; createdAt: string; lastUsedAt: string | null }
+export interface Invitation { token: string; principal: string; role: string; books: string[] | null; expiresAt: string }
+export interface Separation { soloOwner: boolean; sodLimitPaise: string | null }
+
+/** Signed-in calls for the members page and passkey step-up; the core authorizes each one. */
+export const members = (s: Pick<Session, "tenant" | "principal">) => {
+  const m = (p: string) => `/members/${encodeURIComponent(p)}`;
+  return {
+    me: () => call<Me>(s, "GET", "/me"),
+    list: () => call<Member[]>(s, "GET", "/members"),
+    credentials: () => call<Credential[]>(s, "GET", "/credentials"),
+    invite: (i: { role: string; displayName: string; books: string[] | null; ttlHours?: number }) => call<Invitation>(s, "POST", "/members/invitations", i),
+    change: (principal: string, c: { role?: string; books?: string[] | null }) => call<Member>(s, "PATCH", m(principal), c),
+    revoke: (principal: string) => call<void>(s, "POST", `${m(principal)}/revoke`, {}),
+    revokeCredential: (id: string) => call<void>(s, "POST", `/credentials/${encodeURIComponent(id)}/revoke`, {}),
+    separation: () => call<Separation>(s, "GET", "/settings/separation"),
+    setSeparation: (v: Separation) => call<Separation>(s, "PUT", "/settings/separation", v),
+    stepUpOptions: () => call<CeremonyOptions>(s, "POST", "/identity/stepup/options", {}),
+    stepUp: (body: { response: unknown } | { dev: true }) => call<{ principal: string; at: number }>(s, "POST", "/identity/stepup/verify", body),
   };
 };
