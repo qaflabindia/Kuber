@@ -26,7 +26,8 @@ import type { Sql, TransactionSql } from "postgres";
 import { isToken, type Keyring, type TenantKeys } from "@kuber/crypto";
 import { GENESIS_LINK, eventContext, isSealed, linkOf, sealEvent, type EventStore } from "@kuber/eventstore";
 import { narrationCtx, snapshotCtx } from "@kuber/reporting";
-import { accountNameCtx } from "@kuber/agent";
+import { accountNameCtx, matchReviewCtx, provisionalSourceCtx } from "@kuber/agent";
+import { signalDetailCtx, signalOriginalCtx } from "@kuber/channels";
 
 interface SealedColumn {
   table: string; column: string; kind: "text" | "json"; keyCols: string[];
@@ -43,6 +44,10 @@ export const SEALED_COLUMNS: SealedColumn[] = [
   { table: "reporting.lines", column: "narration", kind: "text", keyCols: ["journal_id", "line_no"], ctx: (r) => narrationCtx(r.journal_id!) },
   { table: "ops.plans", column: "plan", kind: "json", keyCols: ["plan_id"], ctx: (r) => `ops.plans.plan|${r.plan_id}` },
   { table: "ops.plans", column: "actions", kind: "json", keyCols: ["plan_id"], ctx: (r) => `ops.plans.actions|${r.plan_id}` },
+  { table: "agent.provisional_sources", column: "detail", kind: "text", keyCols: ["txn_id"], ctx: (r) => provisionalSourceCtx(r.txn_id!) },
+  { table: "agent.match_reviews", column: "detail", kind: "text", keyCols: ["review_id"], ctx: (r) => matchReviewCtx(r.review_id!) },
+  { table: "channels.signals", column: "original", kind: "text", keyCols: ["signal_id"], ctx: (r) => signalOriginalCtx(r.signal_id!) },
+  { table: "channels.signals", column: "detail", kind: "text", keyCols: ["signal_id"], ctx: (r) => signalDetailCtx(r.signal_id!) },
   { table: "reporting.snapshots", column: "body", kind: "text", keyCols: ["snapshot_id"], ctx: (r) => snapshotCtx(r.snapshot_id!) },
 ];
 
@@ -59,9 +64,11 @@ export const RETENTION: Record<string, "purge" | "sealed" | "keys" | "tombstone"
   "reporting.snapshots": "purge",
   "agent.parties": "purge", "agent.rules": "purge", "agent.party_accounts": "purge", "agent.journal_index": "purge",
   "agent.drafts": "purge", "agent.ratifications": "purge", "agent.accounts": "purge", "agent.overrides": "purge",
+  "agent.provisional_sources": "purge", "agent.match_reviews": "purge", "reporting.confirmations": "purge",
+  "channels.signals": "purge",
   "ops.plans": "purge",
   "evidence.balances": "purge", "evidence.records": "purge", "evidence.lookup": "purge",
-  "es.outbox": "purge", "es.snapshots": "purge", "es.dead_letters": "purge",
+  "es.outbox": "purge", "es.snapshots": "purge", "es.dead_letters": "purge", "es.commands": "purge",
   "es.events": "sealed", "keys.tenant_keys": "keys", "keys.shredded": "tombstone",
 };
 export const PROJECTION_TABLES = Object.keys(RETENTION).filter((t) => RETENTION[t] === "purge");
@@ -331,7 +338,7 @@ export class KeyAdmin {
     return this.sys(async (t) => {
       const tables = (await t<{ t: string }[]>`
         SELECT table_schema || '.' || table_name AS t FROM information_schema.columns
-        WHERE column_name = 'tenant_id' AND table_schema IN ('es','agent','reporting','ops','keys','evidence')
+        WHERE column_name = 'tenant_id' AND table_schema NOT IN ('pg_catalog', 'information_schema')
           AND table_name NOT IN (SELECT viewname FROM pg_views) ORDER BY 1`).map((r) => r.t);
       const unclassified = tables.filter((x) => !RETENTION[x]);
       const residue: Record<string, Record<string, number>> = {};

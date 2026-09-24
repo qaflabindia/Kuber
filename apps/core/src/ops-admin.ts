@@ -15,10 +15,10 @@ import { pruneOutbox } from "./keys-admin.ts";
 
 /** Event types each consumer takes (keep in step with the subscriptions in cell.ts). */
 export const CONSUMER_INPUTS: Record<string, string[]> = {
-  gl: ["PostingRequested", "CorrectionRequested"],
-  agent: ["TransactionExtracted", "BookOpened", "AccountAdded", "JournalPosted", "JournalReversed"],
+  gl: ["PostingRequested", "CorrectionRequested", "ProvisionalConfirmed"],
+  agent: ["TransactionExtracted", "BookOpened", "AccountAdded", "JournalPosted", "JournalReversed", "PostingRejected"],
   evidence: ["JournalPosted", "PeriodLocked"],
-  reporting: ["BookOpened", "AccountAdded", "JournalPosted"],
+  reporting: ["BookOpened", "AccountAdded", "JournalPosted", "JournalConfirmed"],
 };
 
 export interface ConsistencyReport { projection: string; tenant: string; ok: boolean; problems: string[]; fingerprint: string }
@@ -118,6 +118,14 @@ export class OpsAdmin {
       const daily = await rows((t) => t<{ k: string; n: string }[]>`
         SELECT book_id || '|' || account_id AS k, SUM(net)::text AS n FROM reporting.daily WHERE tenant_id = ${tenant} GROUP BY 1`);
       compare(new Map(daily.map((r) => [r.k, BigInt(r.n)])), "balance");
+      // Journals the GL confirmed (JournalConfirmed) must not still be shown as provisional.
+      const confirmed = (await this.cell.store.readEvents({ tenantId: tenant, types: ["JournalConfirmed"], limit: 1_000_000 }))
+        .map((e) => (e.data as EventData<"JournalConfirmed">).journalId);
+      if (confirmed.length) {
+        const [pv] = await rows((t) => t<{ n: number }[]>`
+          SELECT count(DISTINCT journal_id)::int AS n FROM reporting.lines WHERE tenant_id = ${tenant} AND provisional AND journal_id IN ${t(confirmed)}`);
+        if (pv!.n) problems.push(`${pv!.n} journal(s) confirmed by the GL still provisional in the projection`);
+      }
       for (const [book, seqs] of journals) {
         const b = await this.cell.reporting.freshness(tenant, book);
         if (!b.fresh) problems.push(`book ${book}: projected ${b.projectedSeq} of ${b.ledgerSeq} journal(s)${b.contiguous ? "" : " with gaps"}`);

@@ -62,7 +62,8 @@ export interface Plan {
   policy: { ids: string[]; level: string; approver: string; reasons: string[] } | null;
   checks: Check[]; journals: PlanJournal[]; effects: Effect[]; sections: Section[]; data?: unknown;
   notes: string[]; links: [string, string][];
-  basisSeq: number; createdAt: string; createdBy: string; hash: string;
+  /** Book event version the plan was simulated at (absent on plans made before it was recorded). */
+  basisSeq: number; basisVersion?: number; createdAt: string; createdBy: string; hash: string;
   status: "preview" | "proposed" | "committed" | "discarded" | "stale";
   blocked: boolean;
   /** Who may commit: a person always; an agent only when policy grants L3+ and the gate is "policy". */

@@ -9,7 +9,7 @@
  * periods accept only owner or controller; every journal extends the book's hash chain.
  */
 import {
-  GENESIS_HASH, canonical, sha256, type Account, type Envelope, type EventData, type Line,
+  GENESIS_HASH, canonical, isIsoDate, sha256, type Account, type Envelope, type EventData, type Line,
 } from "@kuber/contracts";
 import type { NewEvent } from "@kuber/eventstore";
 
@@ -17,7 +17,11 @@ export class DomainError extends Error {
   constructor(public code: string, message: string) { super(message); }
 }
 
-export interface JournalRecord { lines: Line[]; txnDate: string; narration: string; voucherType: string; provisional: boolean; reversedBy?: string; createdBy: string }
+export interface JournalRecord {
+  lines: Line[]; txnDate: string; narration: string; voucherType: string; provisional: boolean; reversedBy?: string; createdBy: string;
+  /** Source that confirmed a provisional journal (JournalConfirmed); the journal is then no longer provisional. */
+  confirmedBy?: string;
+}
 
 export interface BookState {
   exists: boolean;
@@ -25,13 +29,16 @@ export interface BookState {
   entityId: string;
   accounts: Map<string, Account>;
   locks: { periodEnd: string; level: "soft" | "hard" }[];
+  /** Journals posted (the journal chain position). */
   seq: number;
+  /** Events applied: changes with every journal, account and lock, so it fences the whole aggregate. */
+  version: number;
   lastHash: string;
   journals: Map<string, JournalRecord>;
 }
 
 export const emptyBook = (): BookState => ({
-  exists: false, bookId: "", entityId: "", accounts: new Map(), locks: [], seq: 0, lastHash: GENESIS_HASH, journals: new Map(),
+  exists: false, bookId: "", entityId: "", accounts: new Map(), locks: [], seq: 0, version: 0, lastHash: GENESIS_HASH, journals: new Map(),
 });
 
 export type BookCommand =
@@ -41,12 +48,15 @@ export type BookCommand =
       provisional?: boolean; source?: { stream: string; eventId?: string }; autonomy?: "L0" | "L1" | "L2" | "L3" | "L4" | "human"; confidence?: number }
   | { kind: "ReverseJournal"; journalId: string; reversalJournalId: string; reason: string; onDate?: string }
   | { kind: "CorrectJournal"; journalId: string; fromAccount: string; toAccount: string; reversalJournalId: string; newJournalId: string }
-  | { kind: "LockPeriod"; periodEnd: string; level: "soft" | "hard" };
+  | { kind: "LockPeriod"; periodEnd: string; level: "soft" | "hard" }
+  | { kind: "ConfirmJournal"; journalId: string; source: string; basis?: string };
 
 const PRIVILEGED = new Set(["owner", "controller"]);
 const roleOf = (principal: string) => principal.split(":")[0] ?? "";
 
-export function evolve(s: BookState, e: Envelope): BookState {
+export const evolve = (s: BookState, e: Envelope): BookState => ({ ...apply(s, e), version: e.streamVersion });
+
+function apply(s: BookState, e: Envelope): BookState {
   switch (e.type) {
     case "BookOpened": {
       const d = e.data as EventData<"BookOpened">;
@@ -69,6 +79,13 @@ export function evolve(s: BookState, e: Envelope): BookState {
       const journals = new Map(s.journals);
       const j = journals.get(d.journalId);
       if (j) journals.set(d.journalId, { ...j, reversedBy: d.reversalJournalId });
+      return { ...s, journals };
+    }
+    case "JournalConfirmed": {
+      const d = e.data as EventData<"JournalConfirmed">;
+      const journals = new Map(s.journals);
+      const j = journals.get(d.journalId);
+      if (j) journals.set(d.journalId, { ...j, provisional: false, confirmedBy: d.source });
       return { ...s, journals };
     }
     case "PeriodLocked": {
@@ -123,7 +140,17 @@ export function decide(s: BookState, c: BookCommand, principal: string): NewEven
         { provisional: orig.provisional, autonomy: "human" });
       return [...r.events, repost];
     }
+    case "ConfirmJournal": {
+      // Confirmation changes no amount, account or date: it records that an authoritative source
+      // line evidences the journal, so it is allowed in locked periods and the journal is not rewritten.
+      const j = s.journals.get(c.journalId);
+      if (!j) throw new DomainError("no_journal", `no journal ${c.journalId}`);
+      if (!j.provisional) return [];                                  // idempotent (already confirmed, or never provisional)
+      if (j.reversedBy) throw new DomainError("already_reversed", `${c.journalId} is reversed; it cannot be confirmed`);
+      return [{ type: "JournalConfirmed", data: { bookId: s.bookId, journalId: c.journalId, source: c.source, ...(c.basis ? { basis: c.basis } : {}) } }];
+    }
     case "LockPeriod": {
+      if (!isIsoDate(c.periodEnd)) throw new DomainError("bad_date", `bad period end ${c.periodEnd}`);
       if (!PRIVILEGED.has(roleOf(principal))) throw new DomainError("forbidden", "only an owner or controller can lock a period");
       return [{ type: "PeriodLocked", data: { bookId: s.bookId, periodEnd: c.periodEnd, level: c.level } }];
     }
@@ -170,7 +197,7 @@ export function validateJournal(s: BookState, txnDate: string, lines: Line[], pr
     if (missing.length) throw new DomainError("missing_dimensions", `${l.accountId} requires dimensions ${missing.join(", ")}`);
   }
   if (total !== 0n) throw new DomainError("unbalanced", `journal does not balance: debits minus credits = ${total} paise`);
-  if (Number.isNaN(Date.parse(txnDate + "T00:00:00Z"))) throw new DomainError("bad_date", `bad transaction date ${txnDate}`);
+  if (!isIsoDate(txnDate)) throw new DomainError("bad_date", `bad transaction date ${txnDate}`);
   for (const lock of s.locks) {
     if (txnDate > lock.periodEnd) continue;
     if (lock.level === "hard") throw new DomainError("period_hard_locked", `period ending ${lock.periodEnd} is hard-locked`);

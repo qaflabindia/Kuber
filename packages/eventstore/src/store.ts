@@ -15,7 +15,7 @@
  */
 import type { Sql, TransactionSql } from "postgres";
 import {
-  OWNER, SCHEMA_VERSION, subjectFor, uuid, validateEvent,
+  OWNER, SCHEMA_VERSION, canonical, sha256, subjectFor, uuid, validateEvent,
   type Envelope, type EventData, type EventType, type Meta,
 } from "@kuber/contracts";
 import { CryptoError, type Keyring, type TenantKeys } from "@kuber/crypto";
@@ -32,6 +32,13 @@ export type MetaInput = Omit<Meta, "tenantId" | "cellId" | "occurredAt" | "corre
 export class ConcurrencyError extends Error {
   constructor(public streamId: string, public expected: Expected, public actual: number) {
     super(`stream ${streamId}: expected version ${expected}, found ${actual}`);
+  }
+}
+
+/** The same command id was used for a different request (F04): never silently apply or replay it. */
+export class CommandConflict extends Error {
+  constructor(public scope: string, public commandId: string) {
+    super(`command ${commandId} was already used for a different request`);
   }
 }
 
@@ -181,6 +188,31 @@ export class EventStore {
       const rows = await t<{ stream_id: string }[]>`SELECT DISTINCT stream_id FROM es.events WHERE stream_id IN ${t(streamIds)}`;
       return new Set(rows.map((r) => r.stream_id));
     });
+  }
+
+  /**
+   * Idempotent commands (F04). Call under the transaction that applies the command, after taking
+   * whatever lock serialises it: returns the recorded result when this command id was seen with
+   * the same request, throws CommandConflict when it was seen with a different one, else null.
+   * `request` is hashed with the tenant's index key, so the table holds no readable content.
+   */
+  async priorCommand(tx: TransactionSql, tenantId: string, scope: string, commandId: string, request: unknown): Promise<{ result: unknown } | null> {
+    const hash = await this.requestHash(tenantId, request);
+    const [r] = await tx<{ request_hash: string; result: unknown }[]>`
+      SELECT request_hash, result FROM es.commands WHERE tenant_id = ${tenantId} AND scope = ${scope} AND command_id = ${commandId}`;
+    if (!r) return null;
+    if (r.request_hash !== hash) throw new CommandConflict(scope, commandId);
+    return { result: r.result };
+  }
+
+  async recordCommand(tx: TransactionSql, tenantId: string, scope: string, commandId: string, request: unknown, result: unknown) {
+    await tx`INSERT INTO es.commands (tenant_id, scope, command_id, request_hash, result)
+             VALUES (${tenantId}, ${scope}, ${commandId}, ${await this.requestHash(tenantId, request)}, ${tx.json(result as never)})`;
+  }
+
+  private async requestHash(tenantId: string, request: unknown) {
+    const c = canonical(request);
+    return this.crypto ? (await this.keys(tenantId)).index("command", c) : sha256(c);
   }
 
   /** Read every event after a global position (system scope: rebuilds and catch-up). */

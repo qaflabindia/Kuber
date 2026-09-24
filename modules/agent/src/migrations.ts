@@ -48,4 +48,42 @@ CREATE INDEX rules_pattern_idx ON agent.rules (tenant_id, pattern_idx);`,
   // Sealed account name, shown to the LLM classifier. Rows projected before this migration keep ''
   // and the classifier falls back to the account id.
   sql: `ALTER TABLE agent.accounts ADD COLUMN name TEXT NOT NULL DEFAULT '';`,
+}, {
+  id: "agent-004-draft-posting-states",
+  // A draft is posted only when the GL says so (F07): approval moves it to 'approved' (posting
+  // requested); JournalPosted moves it to 'posted'; PostingRejected returns it to review as
+  // 'rejected_by_gl' with the GL's reason (sealed). Drafts already marked 'posted' keep that
+  // status; they were approved before the GL's answer was tracked.
+  sql: `
+ALTER TABLE agent.drafts DROP CONSTRAINT drafts_status_check;
+ALTER TABLE agent.drafts ADD CONSTRAINT drafts_status_check
+  CHECK (status IN ('queued','awaiting_approval','approved','posted','rejected_by_gl','rejected'));
+ALTER TABLE agent.drafts ADD COLUMN request_id TEXT, ADD COLUMN journal_id TEXT, ADD COLUMN approved_account TEXT,
+  ADD COLUMN gl_rejection TEXT;
+CREATE INDEX drafts_in_flight_journal ON agent.drafts (tenant_id, journal_id) WHERE status = 'approved';
+CREATE INDEX drafts_in_flight_request ON agent.drafts (tenant_id, request_id) WHERE status = 'approved';`,
+}, {
+  id: "agent-004-provisional-matching",
+  // Matching a statement line to a provisional entry needs the counterparty the person named
+  // (sealed), and ambiguous matches wait in match_reviews for a person to decide.
+  sql: `
+CREATE TABLE agent.provisional_sources (
+  tenant_id TEXT NOT NULL, txn_id TEXT NOT NULL, journal_id TEXT NOT NULL, detail TEXT NOT NULL,
+  PRIMARY KEY (tenant_id, txn_id));
+CREATE INDEX provisional_sources_journal ON agent.provisional_sources (tenant_id, journal_id);
+CREATE TABLE agent.match_reviews (
+  tenant_id TEXT NOT NULL, review_id TEXT NOT NULL, txn_id TEXT NOT NULL, book_id TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('open','linked','separate')), candidates JSONB NOT NULL, detail TEXT NOT NULL,
+  journal_id TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), resolved_by TEXT, resolved_at TIMESTAMPTZ,
+  PRIMARY KEY (tenant_id, review_id));
+DO $$
+DECLARE t text;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['provisional_sources', 'match_reviews'] LOOP
+    EXECUTE format('ALTER TABLE agent.%I ENABLE ROW LEVEL SECURITY', t);
+    EXECUTE format('ALTER TABLE agent.%I FORCE ROW LEVEL SECURITY', t);
+    EXECUTE format($p$CREATE POLICY tenant_isolation ON agent.%I USING (tenant_id = current_setting('kuber.tenant', true)) WITH CHECK (tenant_id = current_setting('kuber.tenant', true))$p$, t);
+    EXECUTE format($p$CREATE POLICY system_scope ON agent.%I TO kuber_system_scope USING (true) WITH CHECK (true)$p$, t);
+  END LOOP;
+END $$;`,
 }];

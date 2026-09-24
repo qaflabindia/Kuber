@@ -410,3 +410,32 @@ describe("F15: report freshness and certified snapshots", () => {
     expect((await f.cell.reporting.reproduceSnapshot(T, snap.snapshotId)).matches).toBe(false);
   });
 });
+
+// ====================================================================== rebuild with GL confirmations (F06 JournalConfirmed)
+describe("F12: rebuild covers provisional journals confirmed by the GL", () => {
+  let f: Awaited<ReturnType<typeof fixture>>;
+  const T = "conf", B = "main", ME = "owner:conf";
+  beforeAll(async () => {
+    f = await fixture(T);
+    await f.cell.channels.submitChat(T, B, "Paid 100 to Alice via bank", ME, "2026-10-01");
+    await f.cell.settle();
+    await f.cell.channels.submitStatement(T, B, "Date,Narration,Withdrawal Amt,Deposit Amt\n01/10/2026,UPI/DR/ALICE K/alice@okaxis,100,\n", ME);
+    await f.cell.settle();
+  });
+  afterAll(async () => { await f?.stop(); });
+
+  it("replays JournalConfirmed so the rebuilt projection is not provisional", async () => {
+    const book = await f.cell.store.readStream(T, `${T}/book/${B}`);
+    expect(book.at(-1)!.type).toBe("JournalConfirmed");
+    const live = { reporting: (await f.ops.check("reporting", T))[0]!, agent: (await f.ops.check("agent", T))[0]! };
+    expect(live.reporting).toMatchObject({ ok: true });
+    await f.owner`UPDATE reporting.lines SET provisional = true WHERE tenant_id = ${T}`;
+    expect((await f.ops.check("reporting", T))[0]!.problems.join()).toMatch(/confirmed by the GL still provisional/);
+    for (const name of ["reporting", "agent"] as const) {
+      const [r] = await f.ops.rebuild(name, T);
+      expect(r!.after).toBe(live[name].fingerprint);
+      expect(r!.check.ok).toBe(true);
+    }
+    expect((await f.cell.reporting.recentJournals(T, B))[0]!.provisional).toBe(false);
+  });
+});
