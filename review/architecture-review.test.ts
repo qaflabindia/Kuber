@@ -1,4 +1,5 @@
 /** Audit reproductions: passing means the documented defect was reproduced, NOT fixed.
+ * Since the 2026-09-24 workstreams all 14 fail on their own assertion (defect no longer reproducible).
  * Uses the repository's isolated temporary-database helper. No live tenant data is used.
  * Run: bash scripts/test-docker.sh --config review/vitest.config.ts
  */
@@ -8,7 +9,7 @@ import postgres from "postgres";
 import { Keyring } from "@kuber/crypto";
 import { EventStore, openEnvelope } from "@kuber/eventstore";
 import { uuid } from "@kuber/contracts";
-import { startCell } from "../tests/helpers.ts";
+import { CORE_AUTH_SECRET, enrol, signed, startCell } from "../tests/helpers.ts";
 
 let cell: Cell, stop: (() => Promise<void>) | undefined, ownerUrl: string;
 const tenant = "audit", book = "main", owner = "owner:audit";
@@ -24,6 +25,10 @@ beforeEach(async () => {
   const fixture = await startCell({ value: "2026-11-25" });
   ({ cell, stop } = fixture); ownerUrl = fixture.db.ownerUrl;
   await cell.gl.openBook(tenant, book, tenant, "individual", owner);
+  // Identity (F01/F02) now requires membership; enrol the actors each reproduction uses so it
+  // exercises the documented property rather than failing on the membership check.
+  await enrol(cell, tenant, [owner, "auditor:alice"]);
+  await enrol(cell, tenant, ["agent:main-only"], [book]);
   await cell.settle();
 });
 afterEach(async () => { vi.restoreAllMocks(); await stop?.(); });
@@ -40,12 +45,12 @@ it("A01: an unsigned caller claiming auditor can post a journal through HTTP", a
 });
 
 it("A02: repeating the same HTTP journal command posts twice", async () => {
-  const app = buildServer(cell);
+  const app = buildServer(cell, { auth: { secret: CORE_AUTH_SECRET } });
   try {
-    const request = { method: "POST" as const, url: `/v1/tenants/${tenant}/books/${book}/journals`,
+    const request = () => signed({ method: "POST", url: `/v1/tenants/${tenant}/books/${book}/journals`,
       headers: { "x-kuber-tenant": tenant, "x-kuber-principal": owner, "idempotency-key": "audit-retry" },
-      payload: { txnDate: "2026-10-01", narration: "Retry proof", lines: [{ accountId: "BANK", debit: "100" }, { accountId: "OPENING", credit: "100" }] } };
-    const first = await app.inject(request), second = await app.inject(request);
+      payload: { txnDate: "2026-10-01", narration: "Retry proof", lines: [{ accountId: "BANK", debit: "100" }, { accountId: "OPENING", credit: "100" }] } });
+    const first = await app.inject(request()), second = await app.inject(request());
     expect(first.statusCode).toBe(201); expect(second.statusCode).toBe(201);
     expect(first.json().journalId).not.toBe(second.json().journalId);
     expect((await cell.gl.state(tenant, book)).seq).toBe(2);
@@ -81,6 +86,7 @@ it("A04: another posting between plan validation and execution does not invalida
 
 it("A05: failure after one of two plan postings makes its retry stale", async () => {
   await post("1000000");
+  await enrol(cell, tenant, ["controller:bob"]); // maker-checker: a second person commits the period operation
   const plan = await cell.ops.plan(tenant, book, owner, "rebalance", {
     targets: [{ account: "BANK", pct: 40 }, { account: "CASH", pct: 30 }, { account: "INVEST", pct: 30 }],
     minTransfer: "1", date: "2026-10-01",
@@ -92,9 +98,9 @@ it("A05: failure after one of two plan postings makes its retry stale", async ()
     if (++n === 2) throw new Error("Injected connection failure");
     return execute(...args);
   });
-  await expect(cell.ops.commit(tenant, plan.planId, owner, plan.hash)).rejects.toThrow("after 1 of 2 steps");
+  await expect(cell.ops.commit(tenant, plan.planId, "controller:bob", plan.hash)).rejects.toThrow("after 1 of 2 steps");
   spy.mockRestore();
-  await expect(cell.ops.commit(tenant, plan.planId, owner, plan.hash)).rejects.toThrow("books changed");
+  await expect(cell.ops.commit(tenant, plan.planId, "controller:bob", plan.hash)).rejects.toThrow("books changed");
   expect((await cell.ops.get(tenant, plan.planId)).status).toBe("stale");
   expect((await cell.gl.state(tenant, book)).seq).toBe(2);
 });
