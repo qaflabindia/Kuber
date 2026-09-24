@@ -9,7 +9,7 @@
  * periods accept only owner or controller; every journal extends the book's hash chain.
  */
 import {
-  GENESIS_HASH, canonical, sha256, type Account, type Envelope, type EventData, type Line,
+  GENESIS_HASH, canonical, isIsoDate, sha256, type Account, type Envelope, type EventData, type Line,
 } from "@kuber/contracts";
 import type { NewEvent } from "@kuber/eventstore";
 
@@ -25,13 +25,16 @@ export interface BookState {
   entityId: string;
   accounts: Map<string, Account>;
   locks: { periodEnd: string; level: "soft" | "hard" }[];
+  /** Journals posted (the journal chain position). */
   seq: number;
+  /** Events applied: changes with every journal, account and lock, so it fences the whole aggregate. */
+  version: number;
   lastHash: string;
   journals: Map<string, JournalRecord>;
 }
 
 export const emptyBook = (): BookState => ({
-  exists: false, bookId: "", entityId: "", accounts: new Map(), locks: [], seq: 0, lastHash: GENESIS_HASH, journals: new Map(),
+  exists: false, bookId: "", entityId: "", accounts: new Map(), locks: [], seq: 0, version: 0, lastHash: GENESIS_HASH, journals: new Map(),
 });
 
 export type BookCommand =
@@ -46,7 +49,9 @@ export type BookCommand =
 const PRIVILEGED = new Set(["owner", "controller"]);
 const roleOf = (principal: string) => principal.split(":")[0] ?? "";
 
-export function evolve(s: BookState, e: Envelope): BookState {
+export const evolve = (s: BookState, e: Envelope): BookState => ({ ...apply(s, e), version: e.streamVersion });
+
+function apply(s: BookState, e: Envelope): BookState {
   switch (e.type) {
     case "BookOpened": {
       const d = e.data as EventData<"BookOpened">;
@@ -124,6 +129,7 @@ export function decide(s: BookState, c: BookCommand, principal: string): NewEven
       return [...r.events, repost];
     }
     case "LockPeriod": {
+      if (!isIsoDate(c.periodEnd)) throw new DomainError("bad_date", `bad period end ${c.periodEnd}`);
       if (!PRIVILEGED.has(roleOf(principal))) throw new DomainError("forbidden", "only an owner or controller can lock a period");
       return [{ type: "PeriodLocked", data: { bookId: s.bookId, periodEnd: c.periodEnd, level: c.level } }];
     }
@@ -170,7 +176,7 @@ export function validateJournal(s: BookState, txnDate: string, lines: Line[], pr
     if (missing.length) throw new DomainError("missing_dimensions", `${l.accountId} requires dimensions ${missing.join(", ")}`);
   }
   if (total !== 0n) throw new DomainError("unbalanced", `journal does not balance: debits minus credits = ${total} paise`);
-  if (Number.isNaN(Date.parse(txnDate + "T00:00:00Z"))) throw new DomainError("bad_date", `bad transaction date ${txnDate}`);
+  if (!isIsoDate(txnDate)) throw new DomainError("bad_date", `bad transaction date ${txnDate}`);
   for (const lock of s.locks) {
     if (txnDate > lock.periodEnd) continue;
     if (lock.level === "hard") throw new DomainError("period_hard_locked", `period ending ${lock.periodEnd} is hard-locked`);

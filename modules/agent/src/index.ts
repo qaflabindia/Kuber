@@ -2,12 +2,14 @@
  * Agent module: turns extracted transactions into posting requests or drafts, under policy.
  *
  * Reacts to:  TransactionExtracted (channels), BookOpened / AccountAdded / JournalPosted /
- *             JournalReversed (gl)
+ *             JournalReversed / PostingRejected (gl)
  * Emits:      PartyResolved, ProvisionalConfirmed, TransactionClassified, PolicyDecisionMade,
  *             PostingRequested, DraftQueued, DraftApproved, DraftRejected, RatificationRequested,
  *             Ratified, CorrectionRequested, RuleLearned, AutonomyLimited
  *
- * The agent never writes journals. It requests postings; the GL decides.
+ * The agent never writes journals. It requests postings; the GL decides. A draft's lifecycle
+ * follows the GL's answer: queued|awaiting_approval -> approved (posting requested) -> posted on
+ * JournalPosted, or rejected_by_gl on PostingRejected, which puts it back in review with the reason.
  * Its own tables are updated in the same transaction as the events it appends.
  */
 import type { Sql, TransactionSql } from "postgres";
@@ -30,6 +32,8 @@ const DEDUPE_WINDOW_DAYS = 3;
 const RATIFY_DAYS = 7;
 const CORRECTION_LIMIT_DAYS = 30;
 const KNOWN_AFTER = 3;
+/** Draft states a person can act on: new, or returned by the GL with a reason. */
+const REVIEWABLE = ["queued", "awaiting_approval", "rejected_by_gl"];
 
 export class AgentError extends Error { constructor(public code: string, msg: string) { super(msg); } }
 
@@ -44,6 +48,7 @@ export class Agent {
       case "BookOpened": case "AccountAdded": return void (await once(this.store, "agent", env, (tx) => this.projectAccounts(tx, env)));
       case "JournalPosted": return void (await once(this.store, "agent", env, (tx) => this.projectJournal(tx, env)));
       case "JournalReversed": return void (await once(this.store, "agent", env, (tx) => this.projectReversal(tx, env)));
+      case "PostingRejected": return void (await once(this.store, "agent", env, (tx) => this.onRejected(tx, env)));
       case "TransactionExtracted": return void (await once(this.store, "agent", env, (tx) => this.onExtracted(tx, env)));
       default: return;
     }
@@ -77,6 +82,36 @@ export class Agent {
       await tx`INSERT INTO agent.party_accounts VALUES (${t}, ${d.bookId}, ${party}, ${counter.accountId}, 1)
                ON CONFLICT (tenant_id, book_id, party_id, account_id) DO UPDATE SET n = agent.party_accounts.n + 1`;
     }
+    await this.draftPosted(tx, t, d.journalId);
+  }
+
+  /**
+   * The GL accepted an approved draft's journal: only now is it posted, and only now does the
+   * person's choice teach the classifier (a rejected posting must not raise future autonomy).
+   */
+  private async draftPosted(tx: TransactionSql, t: string, journalId: string) {
+    const [r] = await tx<{ draft_id: string; txn_id: string; proposal: unknown; approved_account: string; resolved_by: string }[]>`
+      UPDATE agent.drafts SET status = 'posted' WHERE tenant_id = ${t} AND journal_id = ${journalId} AND status = 'approved'
+      RETURNING draft_id, txn_id, proposal, approved_account, resolved_by`;
+    if (!r) return;
+    const keys = await this.store.keys(t);
+    const p = openProposal(keys, r.draft_id, r.proposal);
+    if (r.approved_account === SUSPENSE || !p.partyName) return;
+    const events = await this.learn(tx, t, p.partyName, r.approved_account, r.resolved_by, keys);
+    if (p.partyId) await tx`UPDATE agent.parties SET confirmed = true WHERE tenant_id = ${t} AND party_id = ${p.partyId}`;
+    if (events.length) await this.store.append("agent", t, { streamId: `${t}/txn/${r.txn_id}`, expected: "any", events }, { principal: r.resolved_by }, tx);
+  }
+
+  /** The GL refused an approved draft's posting: back to review, with the reason, for a person to fix or reject. */
+  private async onRejected(tx: TransactionSql, env: Envelope) {
+    const t = env.meta.tenantId;
+    const d = env.data as EventData<"PostingRejected">;
+    const [r] = await tx<{ draft_id: string }[]>`
+      SELECT draft_id FROM agent.drafts WHERE tenant_id = ${t} AND request_id = ${d.requestId} AND book_id = ${d.bookId} AND status = 'approved' FOR UPDATE`;
+    if (!r) return;
+    const keys = await this.store.keys(t);
+    await tx`UPDATE agent.drafts SET status = 'rejected_by_gl', gl_rejection = ${keys.seal(d.reason, `agent.drafts.gl_rejection|${r.draft_id}`)}
+             WHERE tenant_id = ${t} AND draft_id = ${r.draft_id}`;
   }
 
   private async projectReversal(tx: TransactionSql, env: Envelope) {
@@ -172,42 +207,44 @@ export class Agent {
   }
 
   // ------------------------------------------------------------------ commands from people
-  /** `commandId` is the ops plan id when the approval comes from a committed plan. */
-  async approveDraft(tenantId: string, draftId: string, principal: string, accountId?: string, commandId?: string) {
-    return this.store.tenantTx(tenantId, async (tx) => {
+  /**
+   * Approve a draft: request its posting. The draft is 'approved' (not posted) until the GL answers.
+   * `commandId` is the ops plan id when the approval comes from a committed plan; `inTx` lets that
+   * plan approve its drafts atomically with its own commit.
+   */
+  async approveDraft(tenantId: string, draftId: string, principal: string, accountId?: string, commandId?: string, inTx?: TransactionSql) {
+    const run = async (tx: TransactionSql) => {
       const keys = await this.store.keys(tenantId);
       const [row] = await tx<{ txn_id: string; book_id: string; status: string; proposal: unknown }[]>`
         SELECT txn_id, book_id, status, proposal FROM agent.drafts WHERE tenant_id = ${tenantId} AND draft_id = ${draftId} FOR UPDATE`;
       if (!row) throw new AgentError("not_found", `no draft ${draftId}`);
       const d = { ...row, proposal: openProposal(keys, draftId, row.proposal) };
-      if (d.status !== "queued" && d.status !== "awaiting_approval") throw new AgentError("not_open", `draft ${draftId} is ${d.status}`);
+      if (!REVIEWABLE.includes(d.status)) throw new AgentError("not_open", `draft ${draftId} is ${d.status}`);
       const final = accountId ?? d.proposal.accountId;
       const accounts = await this.accountSet(tx, tenantId, d.book_id);
       if (!accounts.has(final)) throw new AgentError("no_account", `unknown account ${final}`);
       const lines = d.proposal.lines.map((l) => (l.accountId === d.proposal.accountId ? { ...l, accountId: final } : l));
-      const requestId = `req-${d.txn_id}`;
+      // Same request id on a retry after a GL rejection: the journal id stays deterministic.
+      const requestId = `req-${d.txn_id}`, journalId = journalIdForRequest(tenantId, requestId);
       const events: NewEvent[] = [
         { type: "DraftApproved", data: { draftId, accountId: final } },
         { type: "PostingRequested", data: { requestId, bookId: d.book_id, txnDate: d.proposal.txnDate, narration: d.proposal.narration,
           voucherType: d.proposal.voucherType, lines, provisional: d.proposal.provisional, autonomy: "human",
           confidence: d.proposal.confidence, sourceStream: `${tenantId}/txn/${d.txn_id}` } },
       ];
-      // a person's approval states that this counterparty belongs to this account: learn it
-      if (final !== SUSPENSE && d.proposal.partyName) {
-        events.push(...(await this.learn(tx, tenantId, d.proposal.partyName, final, principal, keys)));
-        if (d.proposal.partyId) await tx`UPDATE agent.parties SET confirmed = true WHERE tenant_id = ${tenantId} AND party_id = ${d.proposal.partyId}`;
-      }
-      await tx`UPDATE agent.drafts SET status = 'posted', resolved_by = ${principal}, resolved_at = now() WHERE tenant_id = ${tenantId} AND draft_id = ${draftId}`;
+      await tx`UPDATE agent.drafts SET status = 'approved', request_id = ${requestId}, journal_id = ${journalId}, approved_account = ${final},
+               gl_rejection = null, resolved_by = ${principal}, resolved_at = now() WHERE tenant_id = ${tenantId} AND draft_id = ${draftId}`;
       await this.store.append("agent", tenantId, { streamId: `${tenantId}/txn/${d.txn_id}`, expected: "any", events }, { principal, commandId }, tx);
-      return { requestId, journalId: journalIdForRequest(tenantId, requestId) };
-    });
+      return { requestId, journalId, status: "approved" as const };
+    };
+    return inTx ? run(inTx) : this.store.tenantTx(tenantId, run);
   }
 
   async rejectDraft(tenantId: string, draftId: string, principal: string, reason: string) {
     return this.store.tenantTx(tenantId, async (tx) => {
       const [d] = await tx<{ txn_id: string }[]>`
         UPDATE agent.drafts SET status = 'rejected', resolved_by = ${principal}, resolved_at = now()
-        WHERE tenant_id = ${tenantId} AND draft_id = ${draftId} AND status IN ('queued','awaiting_approval') RETURNING txn_id`;
+        WHERE tenant_id = ${tenantId} AND draft_id = ${draftId} AND status IN ${tx(REVIEWABLE)} RETURNING txn_id`;
       if (!d) throw new AgentError("not_open", `draft ${draftId} is not open`);
       await this.store.append("agent", tenantId, { streamId: `${tenantId}/txn/${d.txn_id}`, expected: "any",
         events: [{ type: "DraftRejected", data: { draftId, reason } }] }, { principal }, tx);
@@ -271,9 +308,17 @@ export class Agent {
   async queue(tenantId: string) {
     const keys = await this.store.keys(tenantId);
     const rows = await this.store.tenantTx(tenantId, (tx) => tx<QueueRow[]>`
-      SELECT draft_id, txn_id, book_id, status, proposal, decision, created_at FROM agent.drafts
-      WHERE tenant_id = ${tenantId} AND status IN ('queued','awaiting_approval') ORDER BY created_at, draft_id`);
-    return rows.map((r): QueueRow => ({ ...r, proposal: openProposal(keys, r.draft_id, r.proposal) }));
+      SELECT draft_id, txn_id, book_id, status, proposal, decision, created_at, gl_rejection FROM agent.drafts
+      WHERE tenant_id = ${tenantId} AND status IN ${tx(REVIEWABLE)} ORDER BY created_at, draft_id`);
+    return rows.map((r): QueueRow => ({ ...r, proposal: openProposal(keys, r.draft_id, r.proposal),
+      gl_rejection: r.gl_rejection ? openText(keys, r.gl_rejection, `agent.drafts.gl_rejection|${r.draft_id}`) : null }));
+  }
+
+  /** Approved drafts whose posting the GL has not answered yet (period close must wait for them). */
+  async inFlight(tenantId: string, bookId: string) {
+    return this.store.tenantTx(tenantId, (tx) => tx<{ draft_id: string; journal_id: string }[]>`
+      SELECT draft_id, journal_id FROM agent.drafts WHERE tenant_id = ${tenantId} AND book_id = ${bookId} AND status = 'approved'
+      ORDER BY draft_id`);
   }
 
   async openRatifications(tenantId: string) {
@@ -346,7 +391,7 @@ export function narrationKey(narr: string): string | null {
 export type AgentDecision = Decision;
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- proposal and decision are JSON documents */
-interface QueueRow { draft_id: string; txn_id: string; book_id: string; status: string; proposal: any; decision: any; created_at: Date }
+interface QueueRow { draft_id: string; txn_id: string; book_id: string; status: string; proposal: any; decision: any; created_at: Date; gl_rejection: string | null }
 
 // ------------------------------------------------------------------ sealed columns
 /** Open a sealed text column; values written before encryption pass through (the migration seals them). */

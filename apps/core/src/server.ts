@@ -6,11 +6,11 @@
  * forwards `x-kuber-tenant` and `x-kuber-principal` over mutual TLS. This server trusts those
  * headers only from the BFF; signed high-risk commands (section 16.4) are verified there.
  */
-import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { z, ZodError } from "zod";
 import { Account, IsoDate, Principal, parseAmount, uuid, type Line } from "@kuber/contracts";
-import { ConcurrencyError } from "@kuber/eventstore";
-import { DomainError } from "@kuber/gl";
+import { CommandConflict, ConcurrencyError } from "@kuber/eventstore";
+import { DomainError, type BookCommand } from "@kuber/gl";
 import { AgentError } from "@kuber/agent";
 import { OpsError } from "@kuber/ops";
 import type { Cell } from "./cell.ts";
@@ -20,6 +20,9 @@ import { registerMcp } from "./mcp.ts";
 import type { Who } from "./tools.ts";
 
 export interface ServerOptions { copilot?: Copilot; mcpGrants?: Map<string, Who>; clock?: () => string; https?: { key: Buffer; cert: Buffer } }
+
+/** A client's idempotency key: opaque, bounded, printable. */
+const CommandKey = z.string().min(1).max(200).regex(/^[\x21-\x7e]+$/, "printable ASCII, no spaces");
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -54,6 +57,7 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     if (err instanceof AgentError) return reply.code(err.code === "not_found" ? 404 : 409).send({ error: err.code, message: err.message });
     if (err instanceof OpsError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof ConcurrencyError) return reply.code(409).send({ error: "conflict", message: err.message });
+    if (err instanceof CommandConflict) return reply.code(409).send({ error: "idempotency_conflict", message: err.message });
     const status = (err as { statusCode?: number }).statusCode ?? 500;
     if (status >= 500) console.error(err);
     return reply.code(status).send({ error: status >= 500 ? "internal" : "bad_request", message: status >= 500 ? "internal error" : (err as Error).message });
@@ -78,27 +82,42 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     return reply.code(201).send({ accountId: account.accountId });
   });
 
+  // Journal-creating commands are idempotent when the client names them (F04): an Idempotency-Key
+  // header or a commandId in the body. A retry with the same key and request returns the first
+  // result (Idempotent-Replayed: true) without posting again; the same key for a different request is 409.
+  const postOnce = async (req: FastifyRequest<P>, reply: FastifyReply, scope: string, principal: string, body: { commandId?: string },
+                          cmd: Extract<BookCommand, { kind: "PostJournal" }>) => {
+    const tenant = req.params.tenant, book = req.params.book;
+    const header = req.headers["idempotency-key"];
+    const key = CommandKey.optional().parse(typeof header === "string" ? header : undefined);
+    if (key && body.commandId && key !== body.commandId) throw Object.assign(new Error("Idempotency-Key and commandId differ"), { statusCode: 400 });
+    const commandId = key ?? body.commandId;
+    const shape = (ev: { data: unknown }[]) => ({ journalId: cmd.journalId, seq: (ev[0]?.data as { seq?: number } | undefined)?.seq });
+    if (!commandId) return reply.code(201).send(shape(await cell.gl.execute(tenant, book, cmd, { principal })));
+    // The journal id is incidental to the request, so it is left out of what must match.
+    const { journalId: _incidental, ...request } = cmd;
+    const r = await cell.gl.executeOnce(tenant, book, { scope, commandId, request: { principal, ...request } }, cmd, { principal }, shape);
+    return reply.code(201).header("idempotent-replayed", String(r.replayed)).send(r.result);
+  };
+
   app.post<P>("/v1/tenants/:tenant/books/:book/journals", async (req, reply) => {
-    const { tenant, principal } = who(req);
-    const b = z.object({ txnDate: IsoDate, narration: z.string().min(1), voucherType: z.string().default("journal"), lines: z.array(ApiLine).min(2) }).parse(req.body);
-    const journalId = uuid();
-    const ev = await cell.gl.execute(tenant, req.params.book, { kind: "PostJournal", journalId, txnDate: b.txnDate, narration: b.narration,
-      voucherType: b.voucherType, lines: b.lines.map(toLine), autonomy: "human" }, { principal });
-    return reply.code(201).send({ journalId, seq: (ev[0]?.data as { seq?: number } | undefined)?.seq });
+    const { principal } = who(req);
+    const b = z.object({ txnDate: IsoDate, narration: z.string().min(1), voucherType: z.string().default("journal"), lines: z.array(ApiLine).min(2),
+      commandId: CommandKey.optional() }).parse(req.body);
+    return postOnce(req, reply, "journals", principal, b, { kind: "PostJournal", journalId: uuid(), txnDate: b.txnDate, narration: b.narration,
+      voucherType: b.voucherType, lines: b.lines.map(toLine), autonomy: "human" });
   });
 
   app.post<P>("/v1/tenants/:tenant/books/:book/opening-balances", async (req, reply) => {
     const { tenant, principal } = who(req);
-    const b = z.object({ accountId: z.string(), amount: z.string(), asOf: IsoDate }).parse(req.body);
+    const b = z.object({ accountId: z.string(), amount: z.string(), asOf: IsoDate, commandId: CommandKey.optional() }).parse(req.body);
     const st = await cell.gl.state(tenant, req.params.book);
     const acc = st.accounts.get(b.accountId);
     if (!acc) throw new DomainError("no_account", `unknown account ${b.accountId}`);
     const p = parseAmount(b.amount), signed = acc.nature === "asset" ? p : -p;
-    const journalId = uuid();
-    await cell.gl.execute(tenant, req.params.book, { kind: "PostJournal", journalId, txnDate: b.asOf, narration: `Opening balance declared: ${b.accountId}`,
-      voucherType: "opening", autonomy: "human",
-      lines: [{ accountId: b.accountId, amount: signed.toString(), dimensions: {} }, { accountId: "OPENING", amount: (-signed).toString(), dimensions: {} }] }, { principal });
-    return reply.code(201).send({ journalId });
+    return postOnce(req, reply, "opening-balances", principal, b, { kind: "PostJournal", journalId: uuid(), txnDate: b.asOf,
+      narration: `Opening balance declared: ${b.accountId}`, voucherType: "opening", autonomy: "human",
+      lines: [{ accountId: b.accountId, amount: signed.toString(), dimensions: {} }, { accountId: "OPENING", amount: (-signed).toString(), dimensions: {} }] });
   });
 
   app.post<P>("/v1/tenants/:tenant/books/:book/locks", async (req, reply) => {
@@ -171,16 +190,19 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     totals: Object.fromEntries(Object.entries(s.totals).map(([k, v]) => [k, v.toString()])), unit: "paise",
   });
   type R = { Params: { tenant: string; book: string }; Querystring: { asOf?: string; from?: string; to?: string; account?: string } };
-  app.get<R>("/v1/tenants/:tenant/books/:book/reports/trial-balance", async (req) => money(await cell.reporting.trialBalance(who(req).tenant, req.params.book, req.query.asOf ?? null)));
-  app.get<R>("/v1/tenants/:tenant/books/:book/reports/profit-and-loss", async (req) => money(await cell.reporting.profitAndLoss(who(req).tenant, req.params.book, req.query.from ?? null, req.query.to ?? null)));
-  app.get<R>("/v1/tenants/:tenant/books/:book/reports/balance-sheet", async (req) => money(await cell.reporting.balanceSheet(who(req).tenant, req.params.book, req.query.asOf ?? null)));
+  // Report dates are calendar dates too (F08): an impossible one is a 400, not a database error.
+  const dates = (q: unknown) => z.object({ asOf: IsoDate.optional(), from: IsoDate.optional(), to: IsoDate.optional() }).parse(q);
+  app.get<R>("/v1/tenants/:tenant/books/:book/reports/trial-balance", async (req) => money(await cell.reporting.trialBalance(who(req).tenant, req.params.book, dates(req.query).asOf ?? null)));
+  app.get<R>("/v1/tenants/:tenant/books/:book/reports/profit-and-loss", async (req) => { const q = dates(req.query); return money(await cell.reporting.profitAndLoss(who(req).tenant, req.params.book, q.from ?? null, q.to ?? null)); });
+  app.get<R>("/v1/tenants/:tenant/books/:book/reports/balance-sheet", async (req) => money(await cell.reporting.balanceSheet(who(req).tenant, req.params.book, dates(req.query).asOf ?? null)));
   app.get<R>("/v1/tenants/:tenant/books/:book/reports/statement-of-affairs", async (req) => {
     const q = z.object({ from: IsoDate, to: IsoDate }).parse(req.query);
     return money(await cell.reporting.statementOfAffairs(who(req).tenant, req.params.book, q.from, q.to));
   });
   app.get<R>("/v1/tenants/:tenant/books/:book/accounts/:account/lines", async (req) => {
     const { account } = req.params as unknown as { account: string };
-    return cell.reporting.drill(who(req).tenant, req.params.book, account, req.query.from ?? null, req.query.to ?? null);
+    const q = dates(req.query);
+    return cell.reporting.drill(who(req).tenant, req.params.book, account, q.from ?? null, q.to ?? null);
   });
   app.get<P>("/v1/tenants/:tenant/books", async (req) => cell.reporting.books(who(req).tenant));
   app.get<P>("/v1/tenants/:tenant/books/:book/accounts", async (req) => cell.reporting.accounts(who(req).tenant, req.params.book));

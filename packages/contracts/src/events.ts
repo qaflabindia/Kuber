@@ -9,7 +9,20 @@ import { z } from "zod";
 import { MinorString } from "./money.ts";
 
 export const Id = z.string().min(1).max(200).regex(/^[A-Za-z0-9_.:@+\-]+$/);
-export const IsoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+/**
+ * A real calendar date, YYYY-MM-DD. The shape alone is not enough: "2026-02-31" would be kept as
+ * text by the ledger but normalised to 2026-03-03 by PostgreSQL, so the two would disagree on the
+ * period (F08). Every date that enters the system passes through this.
+ */
+export function isIsoDate(s: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!m) return false;
+  const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+  if (y < 1 || mo < 1 || mo > 12 || d < 1) return false;
+  const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  return d <= [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1]!;
+}
+export const IsoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "use YYYY-MM-DD").refine(isIsoDate, "not a real calendar date");
 export const Principal = z.string().regex(/^(owner|controller|preparer|approver|member|auditor|agent|system):[\w.@\-]+$/);
 export const AutonomyLevel = z.enum(["L0", "L1", "L2", "L3", "L4"]);
 export const Nature = z.enum(["asset", "liability", "equity", "income", "expense"]);
@@ -120,6 +133,7 @@ export const OPS = {
   /** A principal committed exactly this plan hash; recorded before its actions run (section 13.7). */
   PlanApproved: z.object({
     planId: Id, bookId: Id, op: z.string(), hash: z.string().length(64), basisSeq: z.number().int().nonnegative(),
+    basisVersion: z.number().int().nonnegative().optional(),
     gate: z.enum(["policy", "human"]), needsPerson: z.boolean(), actions: z.number().int().nonnegative(),
     preparedBy: Principal,
     policy: z.object({ ids: z.array(z.string()), level: AutonomyLevel, approver: z.string(), reasons: z.array(z.string()) }).nullable(),

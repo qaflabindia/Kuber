@@ -110,7 +110,7 @@ export class Cell {
     const opened = (h: (e: Envelope) => Promise<void>) => async (e: Envelope) => h(await openEnvelope(keyring, e, o.legacy ?? "reject"));
     await bus.subscribe({ name: "gl", filter: [s("agent", "PostingRequested"), s("agent", "CorrectionRequested")], handler: opened(gl.handler) });
     await bus.subscribe({ name: "agent", filter: [s("channels", "TransactionExtracted"), s("gl", "BookOpened"), s("gl", "AccountAdded"),
-      s("gl", "JournalPosted"), s("gl", "JournalReversed")], handler: opened(agent.handler) });
+      s("gl", "JournalPosted"), s("gl", "JournalReversed"), s("gl", "PostingRejected")], handler: opened(agent.handler) });
     await bus.subscribe({ name: "evidence", filter: [s("gl", "JournalPosted"), s("gl", "PeriodLocked")], handler: opened(evidence.handler) });
     await bus.subscribe({ name: "reporting", filter: [s("gl", "BookOpened"), s("gl", "AccountAdded"), s("gl", "JournalPosted")], handler: opened(reporting.handler) });
     return new Cell(cellId, sql, systemSql, store, bus, relay, gl, channels, agent, reporting, policies, ops, keyring, evidence);

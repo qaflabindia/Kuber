@@ -4,12 +4,21 @@
  * from other modules. Each Book is one event stream: `<tenant>/book/<bookId>`.
  */
 import { journalIdForRequest, reversalIdForRequest, uuid, type Envelope, type EventData } from "@kuber/contracts";
+import type { TransactionSql } from "postgres";
 import { ConcurrencyError, once, type EventStore, type MetaInput } from "@kuber/eventstore";
 import { DomainError, decide, emptyBook, evolve, verifyChain, type BookCommand, type BookState } from "./book.ts";
 import { SEEDS } from "./seeds.ts";
 
 export { DomainError, verifyChain, validateJournal, type BookCommand, type BookState } from "./book.ts";
 export { SEEDS } from "./seeds.ts";
+
+/** A book inside `GeneralLedger.transact`: its state as of `version`, and a way to change it. */
+export interface BookTx {
+  tx: TransactionSql;
+  state: BookState;
+  version: number;
+  execute(cmd: BookCommand, meta: MetaInput): Promise<Envelope[]>;
+}
 
 export const bookStream = (tenantId: string, bookId: string) => `${tenantId}/book/${bookId}`;
 
@@ -46,25 +55,65 @@ export class GeneralLedger {
    * check remains as a second guard in case anything bypasses the lock.
    */
   async execute(tenantId: string, bookId: string, cmd: BookCommand, meta: MetaInput): Promise<Envelope[]> {
+    return this.transact(tenantId, bookId, (b) => b.execute(cmd, meta));
+  }
+
+  /**
+   * One consistency boundary for work on a book (F03): `fn` runs in a single tenant transaction
+   * holding the book lock, sees the book at `b.version`, and may execute several commands (each
+   * decided against the state its predecessors produced). Everything it does, including the
+   * caller's own rows written on `b.tx`, commits together or not at all. `fn` may be re-run after
+   * a concurrency conflict, so it must not have effects outside the transaction.
+   */
+  async transact<T>(tenantId: string, bookId: string, fn: (b: BookTx) => Promise<T>): Promise<T> {
     const stream = bookStream(tenantId, bookId);
     for (let attempt = 0; ; attempt++) {
       try {
-        const { written, next } = await this.store.tenantTx(tenantId, async (tx) => {
+        let final: { version: number; state: BookState } | null = null;
+        const out = await this.store.tenantTx(tenantId, async (tx) => {
           await tx`SELECT pg_advisory_xact_lock(hashtextextended(${stream}, 0))`;
-          const { state, version } = await this.load(tenantId, stream, tx);
-          const events = decide(state, cmd, meta.principal);
-          if (!events.length) return { written: [] as Envelope[], next: { version, state } };
-          const written = await this.store.append("gl", tenantId, { streamId: stream, expected: version, events }, meta, tx);
-          return { written, next: { version: version + written.length, state: written.reduce(evolve, state) } };
+          const loaded = await this.load(tenantId, stream, tx);
+          const b: BookTx = {
+            tx, state: loaded.state, version: loaded.version,
+            execute: async (cmd, meta) => {
+              const events = decide(b.state, cmd, meta.principal);
+              if (!events.length) return [];
+              const written = await this.store.append("gl", tenantId, { streamId: stream, expected: b.version, events }, meta, tx);
+              b.state = written.reduce(evolve, b.state); b.version += written.length;
+              return written;
+            },
+          };
+          const r = await fn(b);
+          final = { version: b.version, state: b.state };
+          return r;
         });
         // only committed state reaches the cache, and never an older version than it already holds
-        if ((this.cache.get(stream)?.version ?? -1) < next.version) this.remember(stream, next.version, next.state);
-        return written;
+        const f = final as { version: number; state: BookState } | null;
+        if (f && (this.cache.get(stream)?.version ?? -1) < f.version) this.remember(stream, f.version, f.state);
+        return out;
       } catch (e) {
         if (!(e instanceof ConcurrencyError) || attempt >= this.maxRetries) throw e;
         await new Promise((r) => setTimeout(r, 5 + Math.random() * 20 * (attempt + 1)));
       }
     }
+  }
+
+  /**
+   * Execute a client command at most once (F04). `commandId` is the client's idempotency key,
+   * scoped by `scope` (the action); `request` is what the client asked for. A repeat with the same
+   * request returns the first outcome without executing again; a repeat with a different request
+   * throws CommandConflict. The record is written in the transaction that applies the command.
+   */
+  async executeOnce<R>(tenantId: string, bookId: string, idem: { scope: string; commandId: string; request: unknown },
+                       cmd: BookCommand, meta: MetaInput, result: (written: Envelope[]) => R): Promise<{ result: R; replayed: boolean }> {
+    const scope = `gl/${bookId}/${idem.scope}`;
+    return this.transact(tenantId, bookId, async (b) => {
+      const prior = await this.store.priorCommand(b.tx, tenantId, scope, idem.commandId, idem.request);
+      if (prior) return { result: prior.result as R, replayed: true };
+      const r = result(await b.execute(cmd, { ...meta, commandId: meta.commandId ?? idem.commandId }));
+      await this.store.recordCommand(b.tx, tenantId, scope, idem.commandId, idem.request, r);
+      return { result: r, replayed: false };
+    });
   }
 
   openBook(tenantId: string, bookId: string, entityId: string, entityType: string, principal: string) {

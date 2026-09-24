@@ -1,5 +1,5 @@
 /** Channel parsers: bank statement CSV (authoritative) and chat text (user-asserted). Deterministic. */
-import { parseAmount, type RawTxn } from "@kuber/contracts";
+import { isIsoDate, parseAmount, type RawTxn } from "@kuber/contracts";
 
 const COLS: Record<string, string[]> = {
   date: ["date", "txn date", "transaction date", "value date", "tran date"],
@@ -12,7 +12,14 @@ const COLS: Record<string, string[]> = {
 };
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 
+/** A statement date as YYYY-MM-DD; an impossible date (31/02/2026) is refused, not rolled over. */
 export function parseDate(s: string): string {
+  const d = shapeDate(s);
+  if (!isIsoDate(d)) throw new Error(`invalid date ${JSON.stringify(s)}`);
+  return d;
+}
+
+function shapeDate(s: string): string {
   const t = s.trim();
   let m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(t);
   if (m) return `${m[1]}-${m[2]}-${m[3]}`;
