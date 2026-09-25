@@ -9,3 +9,4 @@ export { KeyAdmin, SEALED_COLUMNS, sealColumnsOnce, sealIdentityColumns } from "
 export { PROJECTION_TABLES, RETENTION, pruneOutbox } from "./keys-admin.ts";
 export { OpsAdmin, CONSUMER_INPUTS, type BusConsumerAdmin, type ConsistencyReport } from "./ops-admin.ts";
 export { autonomyErrors, compareCells, dbName, type AutonomyErrorPeriod, type CellComparison } from "./fin-ops.ts";
+export { groupCommand, GROUP_CLI_USAGE } from "./group-cli.ts";

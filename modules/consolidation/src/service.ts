@@ -222,7 +222,7 @@ export class Consolidation {
    * the period (with the IC schedule at the same ledger position), else, unless `certifiedOnly`,
    * the live ledger (never certifiable). A linked entity: its latest readable published pack.
    */
-  async packFor(tenant: string, g: GroupState, e: PerimeterEntry, periodEnd: string, periodStart: string, certifiedOnly: boolean): Promise<EntityPack | { missing: string }> {
+  async packFor(tenant: string, g: GroupState, e: PerimeterEntry, periodEnd: string, periodStart: string, certifiedOnly: boolean, live = false): Promise<EntityPack | { missing: string }> {
     if (e.linkedTenant) {
       const lp = await this.links.latestPack(tenant, e.entityId, periodEnd);
       if (!lp) return { missing: `no certified pack for ${periodEnd} published by linked tenant ${e.linkedTenant}` };
@@ -232,7 +232,7 @@ export class Consolidation {
     if (!e.bookId) return { missing: `${e.entityId} has no book in this tenant and no linked tenant: no pack can exist` };
     const s = await this.d.gl.state(tenant, e.bookId);
     if (!s.exists) return { missing: `book ${e.bookId} of ${e.entityId} does not exist` };
-    const snap = await this.certifiedTb(tenant, e.bookId, periodEnd);
+    const snap = live ? null : await this.certifiedTb(tenant, e.bookId, periodEnd);
     if (snap && snap.verified) {
       // The certified statement gives the balances; the IC schedule is read at the same ledger position.
       const bal = new Map<string, bigint>(snap.statement.rows.map((r) => [r.accountId!, r.section === "Dr" ? BigInt(r.amount) : -BigInt(r.amount)]));
@@ -257,7 +257,7 @@ export class Consolidation {
    * Everything a consolidation needs for one group and period: the perimeter, each entity's pack
    * and the engine result. Entities outside `scope` are left out and named (the permitted subset).
    */
-  async compute(tenant: string, g: GroupState, periodEnd: string, o: { stock?: StockInput[]; certifiedOnly?: boolean; scope?: string[] | null } = {}): Promise<Computation> {
+  async compute(tenant: string, g: GroupState, periodEnd: string, o: { stock?: StockInput[]; certifiedOnly?: boolean; live?: boolean; scope?: string[] | null } = {}): Promise<Computation> {
     const parentBook = g.entities.find((e) => e.entityId === g.parentEntityId)?.bookId;
     const fyStartMonth = parentBook ? (await this.d.gl.state(tenant, parentBook)).config.fiscalYearStartMonth : 4;
     const periodStart = financialYear(periodEnd, fyStartMonth).from;
@@ -268,7 +268,7 @@ export class Consolidation {
     const packs = new Map<string, EntityPack>(), missing: Computation["missing"] = [];
     for (const p of perim) {
       if (p.method === "excluded") continue;
-      const r = await this.packFor(tenant, g, p, periodEnd, periodStart, !!o.certifiedOnly);
+      const r = await this.packFor(tenant, g, p, periodEnd, periodStart, !!o.certifiedOnly, !!o.live);
       if ("missing" in r) missing.push({ entityId: p.entityId, reason: r.missing }); else packs.set(p.entityId, r);
     }
     const result = consolidate(g, periodEnd, periodStart, perim, packs, o.stock ?? []);
@@ -326,9 +326,12 @@ export class Consolidation {
     });
   }
 
-  /** Matched, in-transit, mismatched and disputed IC items for a period, and the reciprocal balance check. */
+  /**
+   * Matched, in-transit, mismatched and disputed IC items for a period, and the reciprocal balance check.
+   * An operational view: each book's ledger as it is now (a linked entity: its latest pack).
+   */
   async mismatches(tenant: string, g: GroupState, periodEnd: string, scope: string[] | null) {
-    const c = await this.compute(tenant, g, periodEnd, { scope });
+    const c = await this.compute(tenant, g, periodEnd, { scope, live: true });
     const disputes = await this.disputeViews(tenant, g.groupId);
     const txns = [...c.packs.values()].flatMap((p) => p.ic.txns).filter((t) => t.txnDate >= c.periodStart);
     const items = matchIc(txns, disputes);
@@ -424,7 +427,7 @@ export class Consolidation {
    * book, for that side's people to approve. `accounts`: per entity, the account the difference goes to.
    * Sides the person cannot prepare plans in are returned as skipped, named.
    */
-  async proposeAdjustments(tenant: string, principal: string, disputeId: string, accounts: Record<string, string>, onBehalfOf?: string) {
+  async proposeAdjustments(tenant: string, principal: string, disputeId: string, accounts: Record<string, string>, o: { date?: string; onBehalfOf?: string } = {}) {
     const d = await this.dispute(tenant, disputeId);
     if (!d) throw new ConsolidationError("no_dispute", `no dispute ${disputeId}`, 404);
     if (d.status !== "resolved") throw new ConsolidationError("not_resolved", "the dispute is not resolved: both sides must record the same position first");
@@ -434,7 +437,7 @@ export class Consolidation {
       const account = accounts[entityId];
       if (!account) { skipped.push({ entityId, reason: "no account given for its adjustment" }); continue; }
       try {
-        const p = await this.d.ops.plan(tenant, this.bookOf(g, entityId), principal, "ic_adjust", { disputeId, account }, onBehalfOf ? { onBehalfOf } : {});
+        const p = await this.d.ops.plan(tenant, this.bookOf(g, entityId), principal, "ic_adjust", { disputeId, account, ...(o.date ? { date: o.date } : {}) }, o.onBehalfOf ? { onBehalfOf: o.onBehalfOf } : {});
         plans.push(p);
       } catch (e) { skipped.push({ entityId, reason: e instanceof Error ? e.message : String(e) }); }
     }

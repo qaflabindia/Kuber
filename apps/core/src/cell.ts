@@ -16,6 +16,7 @@ import { REPORTING_MIGRATIONS, Reporting } from "@kuber/reporting";
 import { Incidents, OPS_MIGRATIONS, Operations } from "@kuber/ops";
 import { EVIDENCE_MIGRATIONS, EvidenceService } from "@kuber/evidence";
 import { IDENTITY_MIGRATIONS, IDENTITY_SEAL_MIGRATION, Identity, type IdentityOptions } from "@kuber/identity";
+import { CONSOLIDATION_MIGRATIONS, Consolidation, LinkedTenants, consolidationOperations } from "@kuber/consolidation";
 import { sealIdentityColumns } from "./keys-admin.ts";
 
 export interface CellOptions {
@@ -54,11 +55,11 @@ export interface CellOptions {
   identity?: Partial<IdentityOptions>;
 }
 
-const SCHEMAS = ["es", "agent", "reporting", "ops", "keys", "evidence", "channels", "identity", "mdm"];
+const SCHEMAS = ["es", "agent", "reporting", "ops", "keys", "evidence", "channels", "identity", "mdm", "consolidation"];
 const ident = (role: string) => { if (!/^[a-z_][a-z0-9_]*$/.test(role)) throw new Error(`invalid role name ${role}`); return role; };
 
 /** Every SQL migration of the cell, in order. */
-export const CELL_MIGRATIONS = [...EVENTSTORE_MIGRATIONS, ...LIFECYCLE_MIGRATIONS, ...AGENT_MIGRATIONS, ...REPORTING_MIGRATIONS, ...OPS_MIGRATIONS, ...EVIDENCE_MIGRATIONS, ...CHANNELS_MIGRATIONS, ...IDENTITY_MIGRATIONS, ...PARTY_MIGRATIONS];
+export const CELL_MIGRATIONS = [...EVENTSTORE_MIGRATIONS, ...LIFECYCLE_MIGRATIONS, ...AGENT_MIGRATIONS, ...REPORTING_MIGRATIONS, ...OPS_MIGRATIONS, ...EVIDENCE_MIGRATIONS, ...CHANNELS_MIGRATIONS, ...IDENTITY_MIGRATIONS, ...PARTY_MIGRATIONS, ...CONSOLIDATION_MIGRATIONS];
 
 /** Migration ids a started cell requires: the SQL migrations and the data migrations run after them. */
 export const requiredMigrationIds = (): string[] => [...CELL_MIGRATIONS.map((m) => m.id), IDENTITY_SEAL_MIGRATION];
@@ -121,6 +122,8 @@ export class Cell {
   incidents!: Incidents;
   /** Party master (FIN-MDM-03): vendors and customers, bank-detail changes and payment holds. */
   parties!: PartyMaster;
+  /** Group consolidation (FIN-GRP-01..04): register, intercompany, eliminations, group close, linked tenants. */
+  consolidation!: Consolidation;
 
   private constructor(
     public readonly cellId: string, public readonly sql: Sql, private readonly systemSql: Sql, public readonly store: EventStore, public readonly bus: Bus,
@@ -188,6 +191,14 @@ export class Cell {
     cell.deadLetters = deadLetters;
     cell.incidents = new Incidents(store, identity);
     cell.parties = parties;
+    // Group consolidation: its operations and their register/close actions go through the ops service.
+    const consolidation = new Consolidation({ store, gl, reporting, ops, clock: o.clock ?? (() => new Date().toISOString().slice(0, 10)),
+      partyEntities: (t, ids) => parties.entities(t, ids),
+      guard: { authorize: (t, p, a, sc, tx) => identity.authorize(t, p, a as never, sc, tx), member: (t, p) => identity.member(t, p) } });
+    consolidation.links = new LinkedTenants(consolidation);
+    ops.register(consolidationOperations(consolidation));
+    ops.registerExtension("consolidation", consolidation.extension);
+    cell.consolidation = consolidation;
     return cell;
   }
 

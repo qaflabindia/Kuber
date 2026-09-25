@@ -31,6 +31,7 @@ import { signalDetailCtx, signalOriginalCtx } from "@kuber/channels";
 import { IDENTITY_SEAL_MIGRATION, accessReviewNoteCtx, autonomyReasonCtx, enrolmentNameCtx, memberNameCtx, relatedPartyNoteCtx } from "@kuber/identity";
 import { incidentDetailCtx } from "@kuber/ops";
 import { bankChangeCtx, partyDetailCtx } from "@kuber/gl";
+import { disputeDetailCtx, groupNameCtx, groupSnapshotCtx, linkedPackCtx, positionNoteCtx, runStockCtx } from "@kuber/consolidation";
 
 export interface SealedColumn {
   table: string; column: string; kind: "text" | "json"; keyCols: string[];
@@ -64,6 +65,13 @@ export const SEALED_COLUMNS: SealedColumn[] = [
   // Party master (FIN-MDM-03): names, terms and tax status history; beneficiary bank details.
   { table: "mdm.parties", column: "detail", kind: "text", keyCols: ["party_id"], ctx: (r) => partyDetailCtx(r.party_id!) },
   { table: "mdm.bank_changes", column: "bank", kind: "text", keyCols: ["change_id"], ctx: (r) => bankChangeCtx(r.change_id!) },
+  // Group consolidation: names, dispute detail and notes, stated inputs, group close bodies, received packs (outer layer).
+  { table: "consolidation.groups", column: "name", kind: "text", keyCols: ["group_id"], ctx: (r) => groupNameCtx(r.group_id!) },
+  { table: "consolidation.disputes", column: "detail", kind: "text", keyCols: ["dispute_id"], ctx: (r) => disputeDetailCtx(r.dispute_id!) },
+  { table: "consolidation.dispute_positions", column: "note", kind: "text", keyCols: ["dispute_id", "entity_id"], ctx: (r) => positionNoteCtx(r.dispute_id!, r.entity_id!) },
+  { table: "consolidation.runs", column: "stock", kind: "text", keyCols: ["run_id"], ctx: (r) => runStockCtx(r.run_id!) },
+  { table: "consolidation.snapshots", column: "body", kind: "text", keyCols: ["snapshot_id"], ctx: (r) => groupSnapshotCtx(r.snapshot_id!) },
+  { table: "consolidation.linked_packs", column: "body", kind: "text", keyCols: ["pack_id"], ctx: (r) => linkedPackCtx(r.pack_id!) },
 ];
 
 /**
@@ -92,6 +100,10 @@ export const RETENTION: Record<string, "purge" | "sealed" | "keys" | "tombstone"
   "identity.related_parties": "purge", "identity.access_reviews": "purge", "identity.autonomy_switches": "purge",
   "ops.plan_approvals": "purge", "ops.incidents": "purge",
   "mdm.parties": "purge", "mdm.bank_changes": "purge", "mdm.reviews": "purge",
+  // Group consolidation (FIN-GRP-01..04): register projections, disputes, runs, group closes, link consent and
+  // received linked packs. The facts are in sealed streams; a linked pack is also unreadable once its subsidiary is shredded.
+  "consolidation.groups": "purge", "consolidation.ic_links": "purge", "consolidation.disputes": "purge", "consolidation.dispute_positions": "purge",
+  "consolidation.runs": "purge", "consolidation.snapshots": "purge", "consolidation.links": "purge", "consolidation.linked_packs": "purge",
   "evidence.balances": "purge", "evidence.records": "purge", "evidence.lookup": "purge",
   "es.outbox": "purge", "es.snapshots": "purge", "es.dead_letters": "purge", "es.commands": "purge", "es.verify_checkpoints": "purge",
   "es.events": "sealed", "keys.tenant_keys": "keys", "keys.shredded": "tombstone",

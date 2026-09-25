@@ -34,6 +34,8 @@ import { Copilot } from "./copilot/index.ts";
 import { HELP } from "./copilot/router.ts";
 import { registerMcp } from "./mcp.ts";
 import { registerFinRoutes } from "./fin-routes.ts";
+import { registerGroupRoutes } from "./group-routes.ts";
+import { ConsolidationError } from "@kuber/consolidation";
 import { SigningRequest, actionLabel, amountReason, draftIntent, lockIntent, planIntent, ratifyIntent } from "./signing.ts";
 import type { Who } from "./tools.ts";
 
@@ -144,6 +146,7 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     if (err instanceof AgentError) return reply.code(err.code === "not_found" ? 404 : 409).send({ error: err.code, message: err.message });
     if (err instanceof IngestionError) return reply.code(422).send({ error: err.code, message: err.message, detail: err.detail });
     if (err instanceof OpsError) return reply.code(err.status).send({ error: err.code, message: err.message });
+    if (err instanceof ConsolidationError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof IncidentError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof ScheduleError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof ConcurrencyError) return reply.code(409).send({ error: "conflict", message: err.message });
@@ -765,6 +768,8 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
 
   // ------------------------------------------------------------ finance controls (FIN-MDM-04/05, FIN-OPS-02/03)
   registerFinRoutes(app, cell, who, attestFor, signatureRequired, Assertion);
+  // ------------------------------------------------------------ group consolidation (FIN-GRP-01..04)
+  registerGroupRoutes(app, cell, who);
 
   return app;
 }
