@@ -1,7 +1,10 @@
 export { Cell, CELL_MIGRATIONS, assertMigrated, migrateCell, requiredMigrationIds, sealWithOwner, type CellOptions } from "./cell.ts";
 export { buildServer } from "./server.ts";
-export { Copilot, type CopilotReply } from "./copilot/index.ts";
-export { route, amountIn, dateIn } from "./copilot/router.ts";
+export { Copilot, MAX_STEPS, TURN_TIMEOUT_MS, type CopilotReply, type CopilotOptions, type HistoryItem } from "./copilot/index.ts";
+export { route, amountIn, dateIn, periodIn, fiscalYear, matchAccounts, resolveAccount, HELP, HELP_GROUPS, ROUTER_VERSION, type Routed, type AccountRef, type Intent, type ReadCall } from "./copilot/router.ts";
+export { llmReasoner, isReasoner, type Reasoner, type NextStep, type NextStepRequest, type ComposeRequest, type ReasonerStep } from "./copilot/reasoner-types.ts";
+export { StubGovernance, createStubGovernance, type CoreGovernance, type StubOptions } from "./copilot/governance/stub.ts";
+export { readTools, readCard, journalLifecycle, attentionCounts, rs } from "./agent-tools.ts";
 export type { LlmProvider, Turn, Message, LlmTool } from "./copilot/provider.ts";
 export { parseGrants } from "./mcp.ts";
 export { kuberTools, planText } from "./tools.ts";

@@ -8,7 +8,7 @@
 
   let { data } = $props();
 
-  interface Exchange { id: number; asked: string; reply: string; cards: Plan[]; suggestions?: string[]; error?: boolean }
+  interface Exchange { id: number; asked: string; reply: string; cards: Plan[]; suggestions?: string[]; error?: boolean; answeredFrom?: string[]; engine?: string }
   let thread = $state<Exchange[]>([]);
   let text = $state("");
   let busy = $state(false);
@@ -23,8 +23,13 @@
   const waiting = $derived((data.pending ?? []).filter((p) => !inThread.has(p.planId)));
   const history = $derived(JSON.stringify(thread.slice(0, 8).reverse().flatMap((x) => [{ role: "user", text: x.asked }, { role: "assistant", text: x.reply }])));
 
-  const START = ["Show my position", "Are the books in order?", "Post the drafts", "What if rent goes up 15000 a month", "Close Oct 2026", "Income and expenses this year"];
-  const suggestions = $derived((data.copilot.suggestions?.length ? data.copilot.suggestions : START).slice(0, 6));
+  // A short, grouped starter set; "help" lists everything the agent can do.
+  const GROUPS: { title: string; items: string[] }[] = [
+    { title: "Ask", items: ["Sales this month", "Expenses by category", "Chart of accounts"] },
+    { title: "Check", items: ["What needs my attention?", "Cash and runway", "Are the books in order?"] },
+  ];
+  /** "kuber_income_breakdown" -> "income breakdown" for the trace line. */
+  const toolLabel = (t: string) => t.replace(/^kuber_/, "").replace(/^ext_/, "external ").replace(/_/g, " ");
 
   $effect(() => { if (page.url.searchParams.has("ask")) input?.focus(); });
 
@@ -49,7 +54,8 @@
     return async ({ result, update }) => {
       busy = false;
       const d = (result.type === "success" || result.type === "failure") ? (result.data ?? {}) as Record<string, any> : {};
-      if (result.type === "success" && d.answer) thread = [{ id: ++seq, asked, reply: d.answer.reply, cards: d.answer.cards, suggestions: d.answer.suggestions }, ...thread];
+      if (result.type === "success" && d.answer) thread = [{ id: ++seq, asked, reply: d.answer.reply, cards: d.answer.cards, suggestions: d.answer.suggestions,
+        answeredFrom: d.answer.answeredFrom, engine: d.answer.engine }, ...thread];
       else thread = [{ id: ++seq, asked, reply: d.message ?? "Kuber could not answer.", cards: [], error: true }, ...thread];
       text = ""; grow();
       await update({ reset: false, invalidateAll: false });
@@ -63,7 +69,10 @@
   <button class="btn primary" disabled={busy || !text.trim()} aria-label="Send">{#if busy}Thinking…{:else}<Icon name="send" size={15} />{/if}</button>
 </form>
 <div class="chips" aria-label="Suggestions">
-  {#each suggestions as s}<button type="button" class="chip" onclick={() => ask(s)} disabled={busy}>{s}</button>{/each}
+  {#each GROUPS as g}
+    <span class="grp faint">{g.title}</span>
+    {#each g.items as s}<button type="button" class="chip" onclick={() => ask(s)} disabled={busy}>{s}</button>{/each}
+  {/each}
   <a class="chip" href="/import"><Icon name="upload" size={13} /> Import a statement</a>
 </div>
 {#if data.copilot.engine === "rules"}
@@ -74,6 +83,9 @@
   <section class="exchange">
     <div class="you"><span class="faint">You</span> {x.asked}</div>
     {#if x.reply}<p class="reply" class:err={x.error}>{x.reply}</p>{/if}
+    {#if x.engine && !x.error}
+      <p class="trace faint">{#if x.answeredFrom?.length}Answered from: {x.answeredFrom.map(toolLabel).join(", ")} · {/if}{x.engine === "rules" ? "built-in rules" : x.engine}</p>
+    {/if}
     {#if x.suggestions?.length}
       <div class="chips">{#each x.suggestions as s}<button type="button" class="chip" onclick={() => ask(s)}>{s}</button>{/each}</div>
     {/if}
@@ -113,7 +125,9 @@
   .exchange { margin-top: 28px; display: grid; gap: 10px; }
   .you { font-size: 14px; color: var(--text); }
   .you .faint { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; margin-right: 8px; }
-  .reply { margin: 0; font-family: var(--serif); font-size: 18px; color: var(--text-2); max-width: 75ch; }
+  .reply { margin: 0; font-family: var(--serif); font-size: 18px; color: var(--text-2); max-width: 75ch; white-space: pre-line; }
+  .trace { margin: -4px 0 0; font-size: 12px; }
+  .grp { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; align-self: center; margin-left: 4px; }
   .reply.err { color: var(--clay); }
   .unavailable { margin: 0; color: var(--clay); font-size: 14px; }
   .cards { display: grid; gap: 14px; }

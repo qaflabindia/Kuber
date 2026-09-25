@@ -24,7 +24,12 @@
   $effect.pre(() => { showDetail = !compact; });
 
   const OP_LABEL: Record<string, string> = { record: "Record", post: "Post", balance: "Balance", reconcile: "Reconcile", allocate: "Allocate",
-    rebalance: "Rebalance", close: "Close", carry_forward: "Carry forward", report: "Report", simulate: "What-if", dashboard: "Position" };
+    rebalance: "Rebalance", close: "Close", carry_forward: "Carry forward", report: "Report", simulate: "What-if", dashboard: "Position",
+    schedules: "Schedules", suspense: "Suspense",
+    // read answers from the agent's tools (kind "read"; nothing to approve)
+    chart_of_accounts: "Chart of accounts", trial_balance: "Trial balance", profit_and_loss: "Profit and loss", balance_sheet: "Balance sheet", ledger: "Ledger",
+    search_journals: "Search", review_queue: "Review", match_reviews: "Match reviews", income_breakdown: "Income", expense_breakdown: "Expenses",
+    cash_position: "Cash", parties: "Parties", policies: "Policy", lifecycle: "Lifecycle", attention: "Attention" };
   const failed = $derived(plan.checks.filter((c) => !c.ok));
   const passed = $derived(plan.checks.filter((c) => c.ok));
   const fmt = (v: unknown, i: number, money?: number[]) => (money?.includes(i) && typeof v === "string" && /^-?\d+$/.test(v) ? inr(v) : String(v ?? ""));
