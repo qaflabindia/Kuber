@@ -73,10 +73,12 @@ export async function enrol(cell: Cell, tenant: string, principals: string[], bo
 }
 
 export interface SignedRequest {
-  method: "GET" | "POST" | "PUT" | "DELETE"; url: string; tenant: string | null; principal: string | null;
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; url: string; tenant: string | null; principal: string | null;
   payload?: unknown; contentType?: string; headers?: Record<string, string>;
   /** Web session id; a fresh random one for requests with a principal unless given (null: none). */
   session?: string | null;
+  /** The BFF's step-up claim: when the person last confirmed with their passkey (epoch ms). */
+  stepUpAt?: number;
 }
 /** A random web session id, as the BFF issues at sign-in. */
 export const newSession = () => randomBytes(24).toString("base64url");
@@ -87,7 +89,7 @@ export function signedInject(app: FastifyInstance, secret = CORE_AUTH_SECRET) {
     const body = r.payload === undefined ? undefined : typeof r.payload === "string" ? r.payload : JSON.stringify(r.payload);
     const headers: Record<string, string> = {
       [AUTH_HEADER]: signRequest(key, { method: r.method, path: r.url, body, tenant: r.tenant, principal: r.principal,
-        session: r.session !== undefined ? r.session : r.principal ? newSession() : null }),
+        session: r.session !== undefined ? r.session : r.principal ? newSession() : null, stepUpAt: r.stepUpAt }),
       ...(body !== undefined ? { "content-type": r.contentType ?? "application/json" } : {}), ...r.headers,
     };
     return app.inject({ method: r.method, url: r.url, headers, ...(body !== undefined ? { payload: body } : {}) } as InjectOptions);

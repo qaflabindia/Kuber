@@ -19,21 +19,26 @@
  * module): membership, role, book scope and separation of duties. Without a guard, nothing passes.
  */
 import type { Sql, TransactionSql } from "postgres";
-import { canonical, sha256, uuid, type EventData, type Line } from "@kuber/contracts";
+import { canonical, planLifecycle, sha256, uuid, type EventData, type Line } from "@kuber/contracts";
 import { tenantRlsFor, type EventStore, type Migration } from "@kuber/eventstore";
 import { DomainError, type BookState } from "@kuber/gl";
 import { AgentError } from "@kuber/agent";
 import { isToken, type TenantKeys } from "@kuber/crypto";
-import { balancesFromState } from "./math.ts";
+import { balancesFromState, paidParties } from "./math.ts";
+import { ScheduleError } from "./schedules.ts";
 import { OPERATIONS } from "./operations.ts";
 import { OPS_FIN_MIGRATIONS } from "./fin-migrations.ts";
+import { FIN_OPERATIONS } from "./fin-operations.ts";
+import { SCHEDULE_MIGRATIONS, Schedules } from "./schedules.ts";
 import type { Action, Effect, OpContext, OpDef, OpName, OpsGuard, Plan, PlanJournal, Services } from "./types.ts";
 
 export * from "./types.ts";
 export { OPERATIONS } from "./operations.ts";
 export { OPS_FIN_MIGRATIONS, incidentDetailCtx } from "./fin-migrations.ts";
 export { IncidentError, Incidents, type Incident, type IncidentInput } from "./incidents.ts";
-export { balancesFromState, splitByWeights, rebalanceTransfers, financialYear, pctToBp } from "./math.ts";
+export { FIN_OPERATIONS } from "./fin-operations.ts";
+export { SCHEDULER, ScheduleError, ScheduleInput, Schedules, occurrencesOf, type RunResult, type ScheduleDef, type ScheduleView } from "./schedules.ts";
+export { balancesFromState, splitByWeights, rebalanceTransfers, financialYear, fiscalStart, paidParties, pctToBp } from "./math.ts";
 
 export const OPS_MIGRATIONS: Migration[] = [{
   id: "ops-001",
@@ -57,7 +62,7 @@ CREATE INDEX plans_open ON ops.plans (tenant_id, book_id, created_at DESC) WHERE
   id: "ops-scale-001-plan-pages",
   // Keyset pages of open plans (F11): newest first, plan id breaks ties.
   sql: `CREATE INDEX IF NOT EXISTS plans_open_page ON ops.plans (tenant_id, book_id, created_at DESC, plan_id DESC) WHERE status = 'proposed';`,
-}, ...OPS_FIN_MIGRATIONS];
+}, ...SCHEDULE_MIGRATIONS, ...OPS_FIN_MIGRATIONS];
 
 export class OpsError extends Error {
   constructor(public code: string, message: string, public status = 409) { super(message); }
@@ -69,9 +74,37 @@ export const isAgent = (principal: string) => /^(agent|system):/.test(principal)
 export const DENY_ALL: OpsGuard = { check: async () => { throw new OpsError("forbidden", "no authorization service configured", 403); } };
 
 export class Operations {
-  readonly defs = new Map<OpName, OpDef<any>>(OPERATIONS.map((d) => [d.name, d]));
+  readonly defs = new Map<OpName, OpDef<any>>([...OPERATIONS, ...FIN_OPERATIONS].map((d) => [d.name, d]));
+  /** Recurring and recognition schedules (FIN-GL-02/03): approved through a plan, run by `runSchedules`. */
+  readonly schedules: Schedules;
   constructor(private sql: Sql, private store: EventStore, private svc: Services, private clock: () => string = () => new Date().toISOString().slice(0, 10),
-    private guard: OpsGuard = DENY_ALL) {}
+    private guard: OpsGuard = DENY_ALL) {
+    this.schedules = new Schedules(store, svc.gl, svc.policies, guard, () => this.clock(), (t, id) => this.get(t, id),
+      svc.parties ? (t, ids, tx) => svc.parties!.holds(t, ids, tx) : undefined);
+  }
+
+  /** Post every approved schedule occurrence due on or before `asOf` (default today), once (`ops run-schedules`). */
+  runSchedules(tenant: string, asOf?: string) { return this.schedules.run(tenant, asOf ?? this.clock()); }
+
+  /**
+   * Plans of a book in the journal lifecycle vocabulary (FIN-GL-01): proposed = submitted,
+   * committed = posted (posting, for draft approvals that post through the agent), discarded or
+   * stale = failed, and a proposed plan whose commit failed = failed, with the reason.
+   */
+  async lifecycle(tenant: string, book: string) {
+    const keys = await this.store.keys(tenant);
+    const rows = await this.store.tenantTx(tenant, (tx) => tx<{ plan_id: string; op: string; status: string; plan: unknown; result: { error?: string } | null;
+      created_at: Date; created_by: string; resolved_by: string | null }[]>`
+      SELECT plan_id, op, status, plan, result, created_at, created_by, resolved_by FROM ops.plans WHERE tenant_id = ${tenant} AND book_id = ${book}
+      ORDER BY created_at, plan_id`);
+    return rows.map((r) => {
+      const p = open<Plan>(keys, r.plan_id, "plan", r.plan);
+      const error = r.status === "proposed" ? r.result?.error ?? null : null;
+      return { id: r.plan_id, source: "plan" as const, op: r.op, storedStatus: r.status, state: planLifecycle(r.status, { error, viaDrafts: r.op === "post", approvalOnly: r.op === "schedule_approve" }),
+        title: p.title, journals: p.journals.map((j) => j.journalId), reason: error ?? (r.status === "stale" ? "the books changed after simulation" : r.status === "discarded" ? "discarded" : null),
+        at: r.created_at, by: r.resolved_by ?? r.created_by };
+    });
+  }
 
   list() {
     return [...this.defs.values()].map(({ name, title, description, kind, gate, event }) => ({ name, title, description, kind, gate, event: event ?? null }));
@@ -85,13 +118,21 @@ export class Operations {
     if (!parsed.success) throw new OpsError("bad_input", parsed.error.issues.map((i) => `${i.path.join(".") || "input"}: ${i.message}`).join("; "), 400);
     const state = await this.svc.gl.state(tenant, book);
     if (!state.exists) throw new OpsError("no_book", `book ${book} does not exist`, 404);
-    const ctx: OpContext = { tenant, book, principal, today: this.clock(), state, svc: this.svc };
+    const ctx: OpContext = { tenant, book, principal, today: this.clock(), state, svc: this.svc, schedules: this.schedules };
     const d = await def.plan(ctx, parsed.data);
 
     const journals = journalsOf(state, d.actions, d.data);
     const effects = effectsOf(state, journals);
     const decision = def.event ? this.svc.policies.decide({ eventCode: def.event, on: ctx.today, amountPaise: d.amountPaise, confidence: 1 }) : null;
     const checks = d.checks ?? [];
+    // FIN-MDM-03 / POL-501: a payment to a party whose bank details changed and are not yet
+    // verified and released is held. Blocking: a held plan is shown, never stored.
+    const paid = paidParties(state.accounts, paymentJournals(d.actions, d.data));
+    if (paid.length && this.svc.parties) {
+      const held = await this.svc.parties.holds(tenant, paid);
+      checks.push({ label: "No payment to a party on hold (POL-501)", ok: held.length === 0, blocking: true,
+        detail: held.length ? `bank details of ${held.map((h) => `${h.partyId} (${h.status})`).join(", ")} changed: verify and release first` : undefined });
+    }
     const blocked = checks.some((c) => c.blocking && !c.ok);
     // A blocked plan is shown, never stored: there is nothing anyone could approve.
     const committable = def.kind === "write" && !blocked;
@@ -192,6 +233,10 @@ export class Operations {
       return { planId, status: "awaiting_person" as const, message: "Autonomous action is halted for this book (kill switch): a person must approve this plan in Kuber." };
     }
     const p = row.plan;
+    // FIN-GL-01: a controlled adjustment to a control account is committed only by an owner or controller.
+    if ((p.data as { controlledAdjustment?: unknown } | undefined)?.controlledAdjustment && !/^(owner|controller):/.test(principal)) {
+      throw new OpsError("forbidden", "a controlled adjustment to a control account needs an owner or controller to commit it", 403);
+    }
     let out: { steps: string[]; replayed?: true };
     try {
       out = await this.svc.gl.transact(tenant, row.book_id, async (b) => {
@@ -203,6 +248,10 @@ export class Operations {
         if (cur!.status !== "proposed") throw new OpsError("not_open", `plan is ${cur!.status}`);
         // Nothing can post between this check and the actions below.
         const moved = row.basis_version !== null ? b.version !== row.basis_version : b.state.seq !== row.basis_seq;
+        // A proposal made before a party's bank details changed is held too, until the change is released.
+        const paying = paidParties(b.state.accounts, paymentJournals(row.actions, p.data));
+        const held = paying.length && this.svc.parties ? await this.svc.parties.holds(tenant, paying, b.tx) : [];
+        if (held.length) throw new OpsError("party_hold", `payments to ${held.map((h) => h.partyId).join(", ")} are held: bank details changed and not yet verified and released (POL-501); nothing was applied`);
         if (moved) throw new OpsError("stale", row.basis_version !== null
           ? `the books changed since this was simulated (version ${row.basis_version} → ${b.version}); simulate again`
           : `the books changed since this was simulated (journal ${row.basis_seq} → ${b.state.seq}); simulate again`);
@@ -226,7 +275,19 @@ export class Operations {
         for (const a of row.actions) {
           if (a.type === "gl") {
             await b.execute(a.command, { principal, commandId: planId });
-            steps.push(a.command.kind === "PostJournal" ? `posted ${a.command.journalId}` : a.command.kind === "LockPeriod" ? `locked ${a.command.level} to ${a.command.periodEnd}` : `added ${a.command.account.accountId}`);
+            const c = a.command;
+            steps.push(c.kind === "PostJournal" ? `posted ${c.journalId}` : c.kind === "LockPeriod" ? `locked ${c.level} to ${c.periodEnd}`
+              : c.kind === "ResolveSuspense" ? `reversed ${c.journalId} as ${c.reversalJournalId}${c.newJournalId ? `, reposted as ${c.newJournalId}` : ""}` : `added ${c.account.accountId}`);
+          } else if (a.type === "approveSchedule") {
+            // FIN-MDM-04: the schedule runs under the authority of the person who approved it (re-checked on every run).
+            await this.schedules.approve(b.tx, tenant, a, approvedBy ?? principal, planId);
+            steps.push(`approved schedule ${a.scheduleId}`);
+          } else if (a.type === "cancelSchedule") {
+            await this.schedules.cancel(b.tx, tenant, a, planId);
+            steps.push(`cancelled schedule ${a.scheduleId} from ${a.effective}`);
+          } else if (a.type === "resolveSuspenseItem") {
+            await this.svc.agent.suspense.markResolved(b.tx, tenant, a.itemId, principal, planId, a);
+            steps.push(`resolved suspense item ${a.itemId}`);
           } else {
             // Draft approvals are atomic with the plan; the posting itself is the GL's decision and
             // shows on the draft (approved -> posted, or back to review with the GL's reason).
@@ -243,6 +304,7 @@ export class Operations {
         throw e;
       }
       if (e instanceof OpsError) throw e;
+      if (e instanceof ScheduleError) throw new OpsError(e.code, e.message, e.status);
       // Nothing was applied: the plan is still proposed, and committing it again is safe.
       const msg = e instanceof Error ? e.message : String(e);
       await this.store.tenantTx(tenant, (tx) => tx`UPDATE ops.plans SET result = ${tx.json({ error: msg } as never)}
@@ -290,8 +352,8 @@ export class Operations {
       invalidatedAt: r.invalidated_at?.toISOString() ?? null, reason: r.invalidated_reason }));
   }
 
-  /** The most recent active approval of this hash by someone other than `principal`. */
-  private async activeApprover(tenant: string, planId: string, hash: string, principal: string): Promise<string | null> {
+  /** The most recent active approval of this hash by someone other than `principal` (whose execution would carry it out). */
+  async activeApprover(tenant: string, planId: string, hash: string, principal: string): Promise<string | null> {
     const [r] = await this.store.tenantTx(tenant, (tx) => tx<{ approver: string }[]>`
       SELECT approver FROM ops.plan_approvals WHERE tenant_id = ${tenant} AND plan_id = ${planId} AND hash = ${hash} AND status = 'active'
         AND approver <> ${principal} ORDER BY approved_at DESC LIMIT 1`);
@@ -314,6 +376,12 @@ export interface AuthorityChange { approvers: string[] | "all"; books: string[] 
 /**
  * FIN-MDM-04, standalone so any process that changes authority (the core, identity-cli) applies it
  * in the change's own transaction. Locks plans before approvals, the order commit() takes them.
+ *
+ * Approved schedules (FIN-GL-02/03) are not touched here: their approval plan is already committed,
+ * so there is no pending approval to invalidate. Instead the runner asks the ops guard again, for
+ * the schedule's approver (role, band, delegation, conflicts, separation), before every run; when the
+ * approver's authority no longer covers the approved amount, occurrences are skipped with the reason
+ * and resume only once authority is restored or the schedule is approved again.
  */
 export async function invalidateApprovals(store: EventStore, tenant: string, change: AuthorityChange, tx: TransactionSql) {
   const meta = { principal: "system:authority-change" };
@@ -347,12 +415,31 @@ export function planParties(plan: Pick<Plan, "data">, actions: Action[]): string
 }
 
 // ---------------------------------------------------------------- derived views of a plan
+/** Journals a plan would post, with their parties: its own PostJournal actions and the drafts it approves. */
+function paymentJournals(actions: Action[], data: unknown): { lines: Line[] }[] {
+  const own = actions.flatMap((a) => (a.type === "gl" && a.command.kind === "PostJournal" ? [{ lines: a.command.lines }] : []));
+  const drafts = (data as { journalsFromDrafts?: { lines: Line[] }[] } | undefined)?.journalsFromDrafts ?? [];
+  return [...own, ...drafts];
+}
+
 function journalsOf(s: BookState, actions: Action[], data: unknown): PlanJournal[] {
   const nm = (id: string) => s.accounts.get(id)?.name ?? (id === "RETAINED" ? "Retained surplus" : id);
   const view = (journalId: string, txnDate: string, narration: string, voucherType: string, lines: Line[]): PlanJournal =>
     ({ journalId, txnDate, narration, voucherType, lines: lines.map((l) => ({ accountId: l.accountId, name: nm(l.accountId), amount: l.amount, ...(Object.keys(l.dimensions ?? {}).length ? { dimensions: l.dimensions } : {}) })) });
   const out: PlanJournal[] = [];
-  for (const a of actions) if (a.type === "gl" && a.command.kind === "PostJournal") out.push(view(a.command.journalId, a.command.txnDate, a.command.narration, a.command.voucherType ?? "journal", a.command.lines));
+  for (const a of actions) {
+    if (a.type !== "gl") continue;
+    const c = a.command;
+    if (c.kind === "PostJournal") out.push(view(c.journalId, c.txnDate, c.narration, c.voucherType ?? "journal", c.lines));
+    if (c.kind === "ResolveSuspense") {
+      // what the ledger will do: the reversal on the resolution date, and the replacement with suspense moved to the target
+      const j = s.journals.get(c.journalId);
+      if (!j) continue;
+      out.push(view(c.reversalJournalId, c.onDate, `Reversal of ${c.journalId}: suspense item resolved`, j.voucherType, j.lines.map((l) => ({ ...l, amount: (-BigInt(l.amount)).toString() }))));
+      if (c.newJournalId && c.toAccount) out.push(view(c.newJournalId, c.onDate, `Suspense resolved: ${j.narration}`, j.voucherType,
+        j.lines.map((l) => (s.accounts.get(l.accountId)?.accountId === "SUSPENSE" || s.accounts.get(l.accountId)?.taxonomyTag === "BS.suspense" ? { ...l, accountId: c.toAccount! } : l))));
+    }
+  }
   const fromDrafts = (data as { journalsFromDrafts?: { txnDate: string; narration: string; lines: Line[] }[] } | undefined)?.journalsFromDrafts ?? [];
   fromDrafts.forEach((j, n) => out.push(view(`draft-${n}`, j.txnDate, j.narration, "journal", j.lines)));
   return out;

@@ -20,6 +20,9 @@
  *                                                 (databases from before propagation); idempotent
  *   ops verify [--full] [--tenant t]              link chains and digests from each stream's verified checkpoint
  *                                                 (--full: from the first event); moves checkpoints of clean streams
+ *   ops run-schedules [--as-of d] [--tenant t]    post approved recurring / recognition schedule occurrences due on or
+ *                                                 before d (default today) once each, as system:scheduler; locked periods
+ *                                                 become exception cases (FIN-GL-02/03); idempotent and safe to run concurrently
  *
  * Finance controls (writes act as a member, `--as <principal>`, and pass the same authorization as the API):
  *   ops access-review [--tenant t] [--since d] [--dormant-days n]      FIN-MDM-05: removed and dormant members,
@@ -140,6 +143,15 @@ try {
       } finally { await nats.close(); }
       break;
     }
+    case "run-schedules": {
+      const asOf = flag("--as-of");
+      if (asOf !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) throw new Error("usage: ops run-schedules [--as-of YYYY-MM-DD] [--tenant t]");
+      const r = await ops.runSchedules(asOf, flag("--tenant"));
+      print(r);
+      console.log(`posted ${r.reduce((n, x) => n + x.posted.length, 0)}, reversed ${r.reduce((n, x) => n + x.reversed.length, 0)}, exceptions ${r.reduce((n, x) => n + x.exceptions.length, 0)}`);
+      process.exitCode = r.some((x) => x.exceptions.length || x.skipped.length) ? 1 : 0;
+      break;
+    }
     case "verify": {
       const v = await ops.verify({ full: args.includes("--full"), tenantId: flag("--tenant") });
       print(v); process.exitCode = v.problems.length ? 1 : 0;
@@ -196,7 +208,7 @@ try {
       break;
     }
     default:
-      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify, bus-consumers, backfill-confirmations, access-review, autonomy, incident, drill-compare");
+      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify, bus-consumers, backfill-confirmations, run-schedules, access-review, autonomy, incident, drill-compare");
       process.exitCode = 2;
   }
 } finally {

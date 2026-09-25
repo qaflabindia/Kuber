@@ -170,6 +170,17 @@ export class OpsAdmin {
    * ProvisionalConfirmed once per such journal (idempotent), for one tenant or every tenant.
    * The events reach the GL through the running core's relay.
    */
+  /**
+   * Run recurring and recognition schedules (FIN-GL-02/03) for every tenant, or one: posts each
+   * approved occurrence due on or before `asOf` once, as system:scheduler under its approval.
+   * Idempotent; safe to run from several places at once.
+   */
+  async runSchedules(asOf?: string, tenant?: string) {
+    const out = [];
+    for (const t of tenant ? [tenant] : await this.tenants()) out.push(await this.cell.ops.runSchedules(t, asOf));
+    return out;
+  }
+
   async backfillConfirmations(tenant?: string): Promise<{ tenant: string; emitted: number }[]> {
     const out = [];
     for (const t of tenant ? [tenant] : await this.tenants()) out.push({ tenant: t, ...(await this.cell.agent.backfillConfirmations(t)) });

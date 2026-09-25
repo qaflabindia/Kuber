@@ -156,7 +156,7 @@ export class Reporting {
   constructor(private sql: Sql, private store: EventStore) {}
 
   handler = async (env: Envelope): Promise<void> => {
-    if (!["BookOpened", "AccountAdded", "JournalPosted", "JournalConfirmed"].includes(env.type)) return;
+    if (!["BookOpened", "AccountAdded", "AccountControlsChanged", "JournalPosted", "JournalConfirmed"].includes(env.type)) return;
     await once(this.store, "reporting", env, (tx) => this.project(tx, env));
   };
 
@@ -169,6 +169,13 @@ export class Reporting {
         await tx`INSERT INTO reporting.accounts VALUES (${t}, ${bookId}, ${a.accountId}, ${a.name}, ${a.nature}, ${a.parentId ?? null}, ${a.taxonomyTag ?? null})
                  ON CONFLICT DO NOTHING`;
       }
+      return;
+    }
+    if (env.type === "AccountControlsChanged") {
+      // A statement mapping change (FIN-MDM-02) regroups the account in statements from now on;
+      // the previous mapping stays in the event history.
+      const c = env.data as EventData<"AccountControlsChanged">;
+      if (c.taxonomyTag !== undefined) await tx`UPDATE reporting.accounts SET taxonomy_tag = ${c.taxonomyTag} WHERE tenant_id = ${t} AND book_id = ${c.bookId} AND account_id = ${c.accountId}`;
       return;
     }
     if (env.type === "JournalConfirmed") {
@@ -209,8 +216,8 @@ export class Reporting {
   readonly projection: Projection = {
     name: "reporting", consumer: "reporting",
     tables: ["reporting.accounts", "reporting.lines", "reporting.daily", "reporting.checkpoints", "reporting.confirmations"],
-    replay: ["BookOpened", "AccountAdded", "JournalPosted", "JournalConfirmed"],
-    inboxTypes: ["BookOpened", "AccountAdded", "JournalPosted", "JournalConfirmed"],
+    replay: ["BookOpened", "AccountAdded", "AccountControlsChanged", "JournalPosted", "JournalConfirmed"],
+    inboxTypes: ["BookOpened", "AccountAdded", "AccountControlsChanged", "JournalPosted", "JournalConfirmed"],
     apply: (tx, env) => this.project(tx, env),
     fingerprint: async (tx, t) => ({
       accounts: await tx`SELECT book_id, account_id, name, nature, parent_id, taxonomy_tag FROM reporting.accounts WHERE tenant_id = ${t} ORDER BY 1, 2`,

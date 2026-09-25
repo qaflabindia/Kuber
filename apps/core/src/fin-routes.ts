@@ -15,6 +15,8 @@ import { IsoDate } from "@kuber/contracts";
 import type { Cell } from "./cell.ts";
 import { autonomyErrors } from "./fin-ops.ts";
 
+/** Whether this request carries a fresh passkey step-up (webid, FIN step-up rule). */
+type StepUp = (req: FastifyRequest) => boolean;
 type Who = (req: FastifyRequest, action: Action, scope?: { book?: string; allBooks?: boolean }) => Promise<{ tenant: string; principal: string; member: Member }>;
 type TP = { Params: { tenant: string } };
 type TI = { Params: { tenant: string; id: string } };
@@ -22,7 +24,7 @@ const Paise = z.string().regex(/^\d{1,18}$/, "whole paise");
 const Principal = z.string().regex(/^[a-z]+:[\w.@-]+$/);
 const When = z.string().refine((s) => !Number.isNaN(new Date(s).getTime()), "a date or timestamp");
 
-export function registerFinRoutes(app: FastifyInstance, cell: Cell, who: Who) {
+export function registerFinRoutes(app: FastifyInstance, cell: Cell, who: Who, stepUpFresh: StepUp = () => false) {
   // ------------------------------------------------------------ FIN-MDM-04 authority matrix
   app.get<TP>("/v1/tenants/:tenant/authority", async (req) => cell.identity.authority.matrix((await who(req, "members.read", { allBooks: true })).tenant));
   app.put<TP>("/v1/tenants/:tenant/authority", async (req) => {
@@ -54,7 +56,10 @@ export function registerFinRoutes(app: FastifyInstance, cell: Cell, who: Who) {
   app.get<TP>("/v1/tenants/:tenant/conflicts", async (req) => cell.identity.authority.relatedParties((await who(req, "members.read", { allBooks: true })).tenant));
   app.post<TP>("/v1/tenants/:tenant/conflicts", async (req, reply) => {
     const { tenant, principal } = await who(req, "conflicts.manage", { allBooks: true });
-    await cell.identity.authority.flagRelatedParty(tenant, principal, z.object({ principal: Principal, partyId: z.string().min(1), note: z.string().min(3) }).parse(req.body));
+    const b = z.object({ principal: Principal, partyId: z.string().min(1), note: z.string().min(3) }).parse(req.body);
+    // Conflicts are keyed by the party master's ids (FIN-MDM-03), the ids journals and plans carry.
+    if (!(await cell.parties.entities(tenant, [b.partyId])).has(b.partyId)) return reply.code(404).send({ error: "no_party", message: `no party ${b.partyId} in the party master` });
+    await cell.identity.authority.flagRelatedParty(tenant, principal, b);
     return reply.code(204).send();
   });
   app.post<TP>("/v1/tenants/:tenant/conflicts/clear", async (req, reply) => {
@@ -63,9 +68,18 @@ export function registerFinRoutes(app: FastifyInstance, cell: Cell, who: Who) {
     return reply.code(204).send();
   });
   // Approve now, execute later: role, band, delegation, conflicts and maker-checker in the ops guard.
-  app.post<TI>("/v1/tenants/:tenant/plans/:id/approve", async (req) => {
+  app.post<TI>("/v1/tenants/:tenant/plans/:id/approve", async (req, reply) => {
     const { tenant, principal } = await who(req, "read");
-    return cell.ops.approve(tenant, req.params.id, principal, z.object({ hash: z.string().length(64) }).parse(req.body).hash);
+    const hash = z.object({ hash: z.string().length(64) }).parse(req.body).hash;
+    // Approving is the decision: the same passkey step-up as committing (period operations, amounts
+    // above the approval limit), asked only after the guard says this person may approve at all.
+    const plan = await cell.ops.get(tenant, req.params.id);
+    if (plan.status === "proposed" && plan.kind === "write") {
+      await cell.identity.check({ step: "approve", tenant, book: plan.bookId, principal, op: { name: plan.op, kind: plan.kind, gate: plan.gate }, plan });
+      const reason = await cell.identity.stepUpReason(tenant, plan);
+      if (reason && !stepUpFresh(req)) return reply.code(403).send({ error: "step_up_required", reason, message: `Confirm with your passkey to approve this (${reason}).` });
+    }
+    return cell.ops.approve(tenant, req.params.id, principal, hash);
   });
   app.get<TI>("/v1/tenants/:tenant/plans/:id/approvals", async (req) => {
     const { tenant, member } = await who(req, "read");

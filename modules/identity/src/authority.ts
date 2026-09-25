@@ -14,8 +14,10 @@
  * Bands: the policy registry cannot express POL-002's bands (its front matter has one
  * amount_limit_inr, null for POL-002; the bands are prose), so they live in a settings table
  * (identity.authority_bands) with DOA_DEFAULTS drawn from POL-002. The matrix is enforced per
- * tenant once switched on (identity.authority_settings.enabled): existing workspaces keep their
- * current approvals until an owner turns it on. Delegations and conflict rules always apply.
+ * tenant once switched on (identity.authority_settings.enabled). Off by default, deliberately: an
+ * authority matrix binds only once the entity has approved it (the owner switching it on, recorded as
+ * AuthorityMatrixChanged, is that approval), so POL-002's illustrative bands never bind by accident.
+ * Delegations, conflict rules and the re-check at execution always apply.
  *
  * Every change is an identity event (same transaction), and every change that can alter someone's
  * authority notifies the authority-change hooks (the ops module invalidates approvals that relied on it).

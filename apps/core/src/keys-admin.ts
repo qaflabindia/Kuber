@@ -30,6 +30,7 @@ import { accountNameCtx, matchReviewCtx, provisionalSourceCtx } from "@kuber/age
 import { signalDetailCtx, signalOriginalCtx } from "@kuber/channels";
 import { IDENTITY_SEAL_MIGRATION, accessReviewNoteCtx, autonomyReasonCtx, enrolmentNameCtx, memberNameCtx, relatedPartyNoteCtx } from "@kuber/identity";
 import { incidentDetailCtx } from "@kuber/ops";
+import { bankChangeCtx, partyDetailCtx } from "@kuber/gl";
 
 export interface SealedColumn {
   table: string; column: string; kind: "text" | "json"; keyCols: string[];
@@ -46,6 +47,7 @@ export const SEALED_COLUMNS: SealedColumn[] = [
   { table: "reporting.lines", column: "narration", kind: "text", keyCols: ["journal_id", "line_no"], ctx: (r) => narrationCtx(r.journal_id!) },
   { table: "ops.plans", column: "plan", kind: "json", keyCols: ["plan_id"], ctx: (r) => `ops.plans.plan|${r.plan_id}` },
   { table: "ops.plans", column: "actions", kind: "json", keyCols: ["plan_id"], ctx: (r) => `ops.plans.actions|${r.plan_id}` },
+  { table: "ops.schedules", column: "definition", kind: "json", keyCols: ["schedule_id"], ctx: (r) => `ops.schedules.definition|${r.schedule_id}` },
   { table: "agent.provisional_sources", column: "detail", kind: "text", keyCols: ["txn_id"], ctx: (r) => provisionalSourceCtx(r.txn_id!) },
   { table: "agent.match_reviews", column: "detail", kind: "text", keyCols: ["review_id"], ctx: (r) => matchReviewCtx(r.review_id!) },
   { table: "channels.signals", column: "original", kind: "text", keyCols: ["signal_id"], ctx: (r) => signalOriginalCtx(r.signal_id!) },
@@ -59,6 +61,9 @@ export const SEALED_COLUMNS: SealedColumn[] = [
   { table: "identity.access_reviews", column: "note", kind: "text", keyCols: ["item_id"], ctx: (r) => accessReviewNoteCtx(r.item_id!) },
   { table: "identity.autonomy_switches", column: "reason", kind: "text", keyCols: ["book_id"], ctx: (r) => autonomyReasonCtx(r.book_id!) },
   { table: "ops.incidents", column: "detail", kind: "text", keyCols: ["incident_id"], ctx: (r) => incidentDetailCtx(r.incident_id!) },
+  // Party master (FIN-MDM-03): names, terms and tax status history; beneficiary bank details.
+  { table: "mdm.parties", column: "detail", kind: "text", keyCols: ["party_id"], ctx: (r) => partyDetailCtx(r.party_id!) },
+  { table: "mdm.bank_changes", column: "bank", kind: "text", keyCols: ["change_id"], ctx: (r) => bankChangeCtx(r.change_id!) },
 ];
 
 /**
@@ -76,7 +81,7 @@ export const RETENTION: Record<string, "purge" | "sealed" | "keys" | "tombstone"
   "agent.drafts": "purge", "agent.ratifications": "purge", "agent.accounts": "purge", "agent.overrides": "purge",
   "agent.provisional_sources": "purge", "agent.match_reviews": "purge", "reporting.confirmations": "purge",
   "channels.signals": "purge",
-  "ops.plans": "purge",
+  "ops.plans": "purge", "ops.schedules": "purge", "ops.schedule_occurrences": "purge", "agent.suspense_items": "purge",
   // Identity (members, passkeys, invitation codes, separation settings): personal data with no
   // value once the tenant's books are unreadable. Credentials before members (foreign key).
   "identity.credentials": "purge", "identity.enrolments": "purge", "identity.members": "purge", "identity.settings": "purge",
@@ -86,6 +91,7 @@ export const RETENTION: Record<string, "purge" | "sealed" | "keys" | "tombstone"
   "identity.authority_settings": "purge", "identity.authority_bands": "purge", "identity.delegations": "purge",
   "identity.related_parties": "purge", "identity.access_reviews": "purge", "identity.autonomy_switches": "purge",
   "ops.plan_approvals": "purge", "ops.incidents": "purge",
+  "mdm.parties": "purge", "mdm.bank_changes": "purge", "mdm.reviews": "purge",
   "evidence.balances": "purge", "evidence.records": "purge", "evidence.lookup": "purge",
   "es.outbox": "purge", "es.snapshots": "purge", "es.dead_letters": "purge", "es.commands": "purge", "es.verify_checkpoints": "purge",
   "es.events": "sealed", "keys.tenant_keys": "keys", "keys.shredded": "tombstone",

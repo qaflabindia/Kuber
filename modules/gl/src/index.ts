@@ -6,14 +6,17 @@
 import { GENESIS_HASH, journalIdForRequest, reversalIdForRequest, uuid, type Envelope, type EventData } from "@kuber/contracts";
 import type { TransactionSql } from "postgres";
 import { ConcurrencyError, once, type EventStore, type MetaInput } from "@kuber/eventstore";
-import { DomainError, decide, emptyBook, evolve, verifyChain, type BookCommand, type BookState } from "./book.ts";
+import { DomainError, decide, emptyBook, evolve, verifyChain, type BookCommand, type BookState, type DecideContext } from "./book.ts";
 import { SEEDS } from "./seeds.ts";
 import { SnapshotStore, approxBytes } from "./snapshot.ts";
 
-export { DomainError, verifyChain, validateJournal, type BookCommand, type BookState, type JournalRecord } from "./book.ts";
+export { DomainError, verifyChain, validateJournal, checkEntity, type BookCommand, type BookState, type DecideContext, type JournalRecord } from "./book.ts";
+export * from "./parties.ts";
 export { JournalMap } from "./journals.ts";
 export { BOOK_SNAPSHOT_SCHEMA, SnapshotStore } from "./snapshot.ts";
 export { SEEDS } from "./seeds.ts";
+export { assertBookCurrency, checkManualControl, checkSuspenseClearing, isSuspense, suspenseLines } from "./controls.ts";
+export * as schedules from "./schedules.ts";
 
 /** A book inside `GeneralLedger.transact`: its state as of `version`, and a way to change it. */
 export interface BookTx {
@@ -24,6 +27,10 @@ export interface BookTx {
 }
 
 export const bookStream = (tenantId: string, bookId: string) => `${tenantId}/book/${bookId}`;
+/** Postings the GL refused (PostingRejected), per book: the durable "failed" state of the journal lifecycle. */
+export const rejectionStream = (tenantId: string, bookId: string) => `${tenantId}/gl-rejections/${bookId}`;
+
+export interface Rejection { requestId: string; reason: string; source: string | null; principal: string; at: string; eventId: string }
 
 export interface GlOptions {
   maxRetries?: number;
@@ -39,6 +46,11 @@ export interface GlOptions {
    * agent turns them into drafts for a person. People's postings are unaffected.
    */
   autonomyGate?: (tenantId: string, bookId: string) => Promise<boolean>;
+  /**
+   * Legal entity of registered parties (the party master, FIN-MDM-01/03), read in the book's
+   * transaction before a journal naming parties is decided. Without it, party entities are not checked.
+   */
+  partyEntities?: (tenantId: string, partyIds: string[], tx: TransactionSql) => Promise<ReadonlyMap<string, string>>;
 }
 
 interface CacheEntry { version: number; state: BookState; bytes: number; snapshotVersion: number }
@@ -59,6 +71,7 @@ export class GeneralLedger {
   private cacheEntries: number;
   private cacheBytes: number;
   private snapshotEvery: number;
+  private partyEntities?: GlOptions["partyEntities"];
   readonly snapshots: SnapshotStore;
   private autonomyGate?: GlOptions["autonomyGate"];
 
@@ -71,6 +84,14 @@ export class GeneralLedger {
     this.snapshotEvery = o.snapshotEvery ?? envInt("KUBER_SNAPSHOT_EVERY", 500);
     this.snapshots = new SnapshotStore(store);
     this.autonomyGate = o.autonomyGate;
+    this.partyEntities = o.partyEntities;
+  }
+
+  /** Facts from outside the book that `decide` needs for this command (FIN-MDM-01: party entities). */
+  private async contextFor(tenantId: string, cmd: BookCommand, tx: TransactionSql): Promise<DecideContext> {
+    if (!this.partyEntities || cmd.kind !== "PostJournal") return {};
+    const ids = [...new Set(cmd.lines.map((l) => l.partyId).filter((p): p is string => !!p))];
+    return ids.length ? { partyEntities: await this.partyEntities(tenantId, ids, tx) } : {};
   }
 
   private async load(tenantId: string, stream: string, tx: TransactionSql): Promise<CacheEntry> {
@@ -158,7 +179,7 @@ export class GeneralLedger {
           const b: BookTx = {
             tx, state: loaded.state, version: loaded.version,
             execute: async (cmd, meta) => {
-              const events = decide(b.state, cmd, meta.principal);
+              const events = decide(b.state, cmd, meta.principal, await this.contextFor(tenantId, cmd, tx));
               if (!events.length) return [];
               const written = await this.store.append("gl", tenantId, { streamId: stream, expected: b.version, events }, meta, tx);
               b.state = written.reduce(evolve, b.state); b.version += written.length;
@@ -199,10 +220,12 @@ export class GeneralLedger {
     });
   }
 
-  openBook(tenantId: string, bookId: string, entityId: string, entityType: string, principal: string) {
+  /** Open a book from the entity type's seed chart. `config`: FIN-MDM-01 configuration (defaults otherwise). */
+  openBook(tenantId: string, bookId: string, entityId: string, entityType: string, principal: string,
+           config: Omit<Extract<BookCommand, { kind: "OpenBook" }>, "kind" | "bookId" | "entityId" | "entityType" | "accounts"> = {}) {
     const accounts = SEEDS[entityType];
     if (!accounts) throw new DomainError("bad_entity_type", `unknown entity type ${entityType}`);
-    return this.execute(tenantId, bookId, { kind: "OpenBook", bookId, entityId, entityType, accounts }, { principal });
+    return this.execute(tenantId, bookId, { kind: "OpenBook", bookId, entityId, entityType, accounts, ...config }, { principal });
   }
 
   /**
@@ -231,6 +254,25 @@ export class GeneralLedger {
       },
     });
     return { broken: brokenJournal ?? r.problems[0] ?? null, problems: r.problems, from: r.from, to: r.to, events: r.events, checkpointed: r.checkpointed };
+  }
+
+  /**
+   * Record that a posting attempt was refused (FIN-GL-01): a manual journal refused at the API, or
+   * an occurrence the scheduler could not post. Nothing reaches the book; the attempt stays visible
+   * as "failed" with its reason. `requestId` is the caller's command id when it has one.
+   */
+  async recordRejection(tenantId: string, bookId: string, r: { requestId: string; reason: string; source?: string }, meta: MetaInput) {
+    await this.store.append("gl", tenantId, { streamId: rejectionStream(tenantId, bookId), expected: "any",
+      events: [{ type: "PostingRejected", data: { bookId, requestId: r.requestId, reason: r.reason.slice(0, 2000), ...(r.source ? { source: r.source } : {}) } }] }, meta);
+  }
+
+  /** Refused postings of a book, oldest first. */
+  async rejections(tenantId: string, bookId: string): Promise<Rejection[]> {
+    const events = await this.store.readStream(tenantId, rejectionStream(tenantId, bookId));
+    return events.filter((e) => e.type === "PostingRejected").map((e) => {
+      const d = e.data as EventData<"PostingRejected">;
+      return { requestId: d.requestId, reason: d.reason, source: d.source ?? null, principal: e.meta.principal, at: e.recordedAt, eventId: e.eventId };
+    });
   }
 
   /** Event handler: postings and corrections requested by other modules. */
@@ -271,7 +313,7 @@ export class GeneralLedger {
       } catch (e) {
         if (!(e instanceof DomainError)) throw e;          // infrastructure failure: let the bus retry
         await this.store.append("gl", tenant, {
-          streamId: `${tenant}/gl-rejections/${bookId}`, expected: "any",
+          streamId: rejectionStream(tenant, bookId), expected: "any",
           events: [{ type: "PostingRejected", data: { bookId, requestId, reason: `${e.code}: ${e.message}`, source: env.streamId } }],
         }, meta);
       }

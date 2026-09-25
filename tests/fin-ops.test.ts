@@ -28,8 +28,8 @@ const clock = { value: "2026-11-25" };
 let nowMs: number | null = null;
 let cell: Cell, app: FastifyInstance, stop: () => Promise<void>, db: { url: string; ownerUrl: string; systemUrl: string };
 let owner: postgres.Sql, send: ReturnType<typeof signedInject>;
-const as = (tenant: string, principal: string, method: SignedRequest["method"], url: string, payload?: unknown) =>
-  send({ method, url: `/v1/tenants/${tenant}${url}`, tenant, principal, payload });
+const as = (tenant: string, principal: string, method: SignedRequest["method"], url: string, payload?: unknown, stepUpAt?: number) =>
+  send({ method, url: `/v1/tenants/${tenant}${url}`, tenant, principal, payload, stepUpAt });
 
 let n = 0;
 const rec = (amount: string, extra: Record<string, unknown> = {}) =>
@@ -71,14 +71,20 @@ describe("FIN-MDM-04 authority matrix", () => {
     await expect(commit(p, P.asha)).rejects.toThrow(/other than its preparer/);
     const r = await as(T, P.asha, "POST", `/plans/${p.planId}/approve`, { hash: p.hash });
     expect(r.statusCode).toBe(403);
-    // A checker approves; the maker may then execute exactly that approval.
-    expect((await as(T, P.kiran, "POST", `/plans/${p.planId}/approve`, { hash: p.hash })).json()).toMatchObject({ status: "approved", approvedBy: P.kiran });
+    // A checker approves (with a fresh passkey step-up, as for committing above the limit)…
+    expect((await as(T, P.kiran, "POST", `/plans/${p.planId}/approve`, { hash: p.hash })).json()).toMatchObject({ error: "step_up_required" });
+    expect((await as(T, P.kiran, "POST", `/plans/${p.planId}/approve`, { hash: p.hash }, Date.now())).json()).toMatchObject({ status: "approved", approvedBy: P.kiran });
+    // …and the maker may then execute exactly that approval.
     const done = await commit(p, P.asha);
     expect(done).toMatchObject({ status: "committed", approvedBy: P.kiran });
     const approved = (await cell.store.readStream(T, `${T}/plan/${p.planId}`, 0)).find((e) => e.type === "PlanApproved")!;
     expect(approved.meta.principal).toBe(P.asha);
     expect((approved.data as EventData<"PlanApproved">).approvedBy).toBe(P.kiran);
     expect((await cell.ops.approvals(T, p.planId)).map((a) => [a.approver, a.status])).toEqual([[P.kiran, "used"]]);
+    // Over HTTP too, without a step-up of their own (the approver confirmed when approving).
+    const viaHttp = await prep(P.asha, "31,000");
+    await approve(viaHttp, P.kiran);
+    expect((await as(T, P.asha, "POST", `/plans/${viaHttp.planId}/commit`, { hash: viaHttp.hash })).json()).toMatchObject({ status: "committed", approvedBy: P.kiran });
     // An agent can never record or carry out an approval.
     await enrol(cell, T, ["agent:helper"], [B]);
     const q = await prep(P.asha, "40,000");
@@ -211,6 +217,11 @@ describe("FIN-MDM-04 authority matrix", () => {
   });
 
   it("FIN-MDM-04: a related-party flag blocks that member from approving plans that pay that party", async () => {
+    // Conflicts are keyed by the party master's ids (FIN-MDM-03), which `record` carries as `party`.
+    for (const [partyId, name] of [["p.acme", "Acme"], ["p.other", "Other Co"], ["p.acme2", "Acme Two"]] as const) {
+      await cell.parties.register(T, P.asha, { partyId, entityId: T, kind: "vendor", name });
+    }
+    expect((await as(T, P.asha, "POST", "/conflicts", { principal: P.neel, partyId: "p.unknown", note: "not in the master" })).statusCode).toBe(404);
     expect((await as(T, P.meena, "POST", "/conflicts", { principal: P.neel, partyId: "p.acme", note: "brother-in-law runs Acme" })).statusCode).toBe(403);
     expect((await as(T, P.asha, "POST", "/conflicts", { principal: P.neel, partyId: "p.acme", note: "brother-in-law runs Acme" })).statusCode).toBe(204);
     expect((await as(T, P.auditor, "GET", "/conflicts")).json()).toEqual([expect.objectContaining({ principal: P.neel, partyId: "p.acme", note: "brother-in-law runs Acme" })]);
@@ -243,6 +254,51 @@ describe("FIN-MDM-04 authority matrix", () => {
     await expect(cell.ops.commit(S, p.planId, "owner:lone", p.hash)).rejects.toThrow(/other than its preparer/);
     await cell.identity.setSettings(S, "owner:lone", { soloOwner: true, sodLimitPaise: null });
     expect((await cell.ops.commit(S, p.planId, "owner:lone", p.hash)).status).toBe("committed");
+  });
+});
+
+// ====================================================================== FIN-MDM-04 / FIN-OPS-03 with schedules (FIN-GL-02)
+describe("FIN-MDM-04 and FIN-OPS-03 with scheduled occurrences", () => {
+  const T = "sch", B = "main", OWNER = "owner:ravi", ASHA = "controller:asha", DEV = "preparer:dev";
+  const AMOUNT = 1_200_000n;                                                                                   // ₹12,000 a month
+  const def = { name: "Software subscription", kind: "recurring", start: "2026-10-01", end: "2027-03-31",
+    lines: [{ accountId: "BIZEXP", amount: AMOUNT.toString() }, { accountId: "BANK", amount: (-AMOUNT).toString() }] };
+  let scheduleId = "";
+  beforeAll(async () => {
+    await enrol(cell, T, [OWNER, ASHA, DEV]);
+    await cell.gl.openBook(T, B, T, "company", OWNER);
+    await opening(T, B, OWNER);
+    await cell.settle();
+  });
+
+  it("FIN-MDM-04: a schedule approval follows approve-then-execute, and every occurrence re-checks the approver's authority", async () => {
+    scheduleId = (await cell.ops.schedules.create(T, B, DEV, def)).scheduleId;
+    const p = await cell.ops.plan(T, B, DEV, "schedule_approve", { scheduleId });
+    await expect(cell.ops.approve(T, p.planId, DEV, p.hash)).rejects.toThrow(/preparer may not plan.approve.period/);
+    await cell.ops.approve(T, p.planId, ASHA, p.hash);
+    expect(await cell.ops.commit(T, p.planId, DEV, p.hash)).toMatchObject({ status: "committed", approvedBy: ASHA });
+    // The schedule runs under the approver's authority, not the executor's.
+    expect(await cell.ops.schedules.get(T, scheduleId)).toMatchObject({ status: "approved", approvedBy: ASHA, approvalPlanId: p.planId });
+    expect((await cell.ops.runSchedules(T, "2026-10-31")).posted).toHaveLength(1);
+    // The approver's authority drops below the approved amount: further occurrences stop (the run re-checks it)…
+    await cell.identity.authority.setMatrix(T, OWNER, true);
+    await cell.identity.authority.setBand(T, OWNER, { action: "plan.approve.period", book: null, role: "controller", maxPaise: "1000000" });   // ₹10,000
+    const stopped = await cell.ops.runSchedules(T, "2026-11-30");
+    expect(stopped.posted).toEqual([]);
+    expect(stopped.skipped).toEqual([expect.objectContaining({ scheduleId, reason: expect.stringMatching(/approval no longer valid: .*above controller:asha's authority of ₹10,000 for plan.approve.period/) })]);
+    // …and resume, dates unchanged, once it is restored.
+    await cell.identity.authority.setBand(T, OWNER, { action: "plan.approve.period", book: null, role: "controller", maxPaise: null });
+    expect((await cell.ops.runSchedules(T, "2026-11-30")).posted).toHaveLength(1);
+  });
+
+  it("FIN-OPS-03: the kill switch holds scheduled occurrences until a person resumes it", async () => {
+    await cell.identity.autonomy.set(T, OWNER, { book: B, halted: true, reason: "month-end freeze" });
+    const held = await cell.ops.runSchedules(T, "2026-12-31");
+    expect(held.posted).toEqual([]);
+    expect(held.skipped).toEqual([expect.objectContaining({ scheduleId, reason: expect.stringMatching(/kill switch/) })]);
+    expect((await cell.ops.schedules.get(T, scheduleId))!.occurrences.find((o) => o.period === "2026-12" && o.kind === "post")!.status).not.toBe("posted");
+    await cell.identity.autonomy.set(T, ASHA, { book: B, halted: false, reason: "freeze lifted" });
+    expect((await cell.ops.runSchedules(T, "2026-12-31")).posted).toHaveLength(1);
   });
 });
 

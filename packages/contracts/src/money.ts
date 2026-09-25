@@ -59,3 +59,16 @@ export function formatINR(p: bigint): string {
 }
 
 export const sum = (xs: Iterable<bigint>): bigint => { let s = 0n; for (const x of xs) s += x; return s; };
+
+// ------------------------------------------------------------------ currency (FIN-GL-04)
+/**
+ * The G0 pilot is single-currency: every book is INR and every amount is integer paise, i.e. the
+ * currency's minor unit at exponent 2. Foreign currency (FIN-GL-04: rates, revaluation, realised and
+ * unrealised gains) is deferred; until then a journal that names any other currency is refused
+ * rather than silently read as rupees.
+ */
+export const BOOK_CURRENCY = "INR" as const;
+/** Minor-unit exponent per supported currency: amounts are integers in 10^-exponent units. */
+export const CURRENCY_EXPONENT: Readonly<Record<string, number>> = Object.freeze({ INR: 2 });
+/** True when `currency` (absent means the book currency) is the one currency a G0 book accepts. */
+export const isBookCurrency = (currency?: string | null): boolean => currency === undefined || currency === null || currency === BOOK_CURRENCY;

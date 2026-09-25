@@ -43,6 +43,11 @@ export interface Claims {
   sid?: string | null;
   method: string; path: string; bh: string;
   iat: number; exp: number; nonce: string;
+  /**
+   * Step-up (optional): when the BFF last saw this principal pass a fresh, user-verified passkey
+   * assertion (epoch ms). Only the core decides whether a request needs it; see `stepUpFresh`.
+   */
+  su?: number;
 }
 
 export class AuthError extends Error {
@@ -68,6 +73,8 @@ export interface SignInput {
   /** The web session this request is made for (16 to 128 base64url characters). */
   session?: string | null;
   issuer?: string; now?: number; ttlMs?: number;
+  /** Time of the principal's last verified passkey step-up (epoch ms), if any. */
+  stepUpAt?: number;
 }
 
 /** Shape of a session id: opaque, random, URL-safe. */
@@ -80,6 +87,7 @@ export function signRequest(key: Buffer, i: SignInput): string {
     v: 1, iss: i.issuer ?? ISSUER, aud: AUDIENCE, tenant: i.tenant, principal: i.principal, sid: i.session ?? null,
     method: i.method.toUpperCase(), path: i.path, bh: bodyHash(i.body), iat: now,
     exp: now + Math.min(i.ttlMs ?? MAX_TTL_MS, MAX_TTL_MS), nonce: randomBytes(16).toString("base64url"),
+    ...(typeof i.stepUpAt === "number" && i.principal ? { su: i.stepUpAt } : {}),
   };
   const payload = Buffer.from(JSON.stringify(claims), "utf8").toString("base64url");
   return `${SCHEME} ${payload}.${mac(key, payload).toString("base64url")}`;
@@ -167,4 +175,16 @@ export async function verifyRequestAsync(key: Buffer, replay: ReplayStore, i: Ve
   catch (e) { throw new ReplayStoreUnavailable(`replay store unavailable: ${e instanceof Error ? e.message : String(e)}`); }
   if (!fresh) throw new AuthError("replayed", "service assertion was already used");
   return c;
+}
+
+/** How long a passkey step-up authorizes sensitive approvals. */
+export const STEP_UP_MAX_AGE_MS = 5 * 60_000;
+
+/**
+ * True when verified claims carry a step-up no older than `maxAgeMs` (and not dated in the
+ * future beyond the tolerated skew), for a signed-in principal.
+ */
+export function stepUpFresh(c: Pick<Claims, "su" | "principal">, now = Date.now(), maxAgeMs = STEP_UP_MAX_AGE_MS): boolean {
+  if (!c.principal || typeof c.su !== "number" || !Number.isFinite(c.su)) return false;
+  return c.su <= now + SKEW_MS && now - c.su <= maxAgeMs;
 }

@@ -1,4 +1,5 @@
 import { tenantRlsFor, type Migration } from "@kuber/eventstore";
+import { SUSPENSE_MIGRATIONS } from "./suspense.ts";
 
 /** The agent module's own schema. Only the agent module reads or writes these tables. */
 export const AGENT_MIGRATIONS: Migration[] = [{
@@ -108,4 +109,4 @@ CREATE INDEX IF NOT EXISTS match_reviews_open_book_page ON agent.match_reviews (
   sql: `
 ALTER TABLE agent.ratifications DROP CONSTRAINT ratifications_status_check;
 ALTER TABLE agent.ratifications ADD CONSTRAINT ratifications_status_check CHECK (status IN ('open','ratified','corrected','withdrawn'));`,
-}];
+}, ...SUSPENSE_MIGRATIONS];
