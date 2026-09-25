@@ -255,7 +255,8 @@ export const AGENT = {
   /** `journalId` null: the line is a different transaction and is processed as new. */
   MatchReviewResolved: z.object({ reviewId: Id, txnId: Id, journalId: Id.nullable() }),
   TransactionClassified: z.object({ txnId: Id, accountId: Id, confidence: z.number(), source: z.string() }),
-  PolicyDecisionMade: z.object({ txnId: Id, decision: Decision }),
+  /** `on`: the agent's decision date (selects the policies in force); absent on events recorded before it was added. */
+  PolicyDecisionMade: z.object({ txnId: Id, decision: Decision, on: IsoDate.optional() }),
   PostingRequested: z.object({
     requestId: Id, bookId: Id, txnDate: IsoDate, narration: z.string(), voucherType: z.string(),
     lines: z.array(Line).min(2), provisional: z.boolean(), autonomy: z.union([AutonomyLevel, z.literal("human")]),

@@ -20,6 +20,8 @@ import type { ParamSpace } from "../core/space.ts";
 
 export const ACTION_TYPES = ["receipt", "payment"] as const;
 export type ActionType = (typeof ACTION_TYPES)[number];
+/** Segments a recorded decision can belong to: the tunable action types, and ops plans (never tuned). */
+export const SEGMENT_TYPES = [...ACTION_TYPES, "plan"] as const;
 
 /**
  * What a recorded decision was. Everything but `bookkeeping` is excluded from tuning and never
@@ -61,7 +63,7 @@ export const AutonomyFeatures = z.object({
   eventCode: z.string().regex(/^EVT-[A-Z-]+$/),
   /** Decision date (the agent's clock), which selects the policies in force. */
   on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  actionType: z.enum(ACTION_TYPES),
+  actionType: z.enum(SEGMENT_TYPES),
   /** The book's entity type (e.g. freelancer, company): the entity segment. */
   entitySegment: z.string().regex(/^[a-z_]+$/),
   klass: z.enum(DECISION_CLASSES),

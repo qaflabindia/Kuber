@@ -312,7 +312,7 @@ export class Agent {
     if ((decision.action === "post" || decision.action === "post_then_ratify") && (await this.guard.autonomyHalted?.(t, d.bookId, tx))) {
       decision = { ...decision, level: "L1", action: "draft", reasons: [...decision.reasons, HALTED_REASON] };
     }
-    events.push({ type: "PolicyDecisionMade", data: { txnId: d.txnId, decision: decision as Decision } });
+    events.push({ type: "PolicyDecisionMade", data: { txnId: d.txnId, decision: decision as Decision, on: this.clock() } });
     const meta = { ...baseMeta, policyIds: decision.policyIds };
 
     if ((decision.action === "post" || decision.action === "post_then_ratify") && c.accountId !== SUSPENSE) {

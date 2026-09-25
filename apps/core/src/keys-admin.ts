@@ -91,6 +91,9 @@ export const RETENTION: Record<string, "purge" | "sealed" | "keys" | "tombstone"
   "identity.authority_settings": "purge", "identity.authority_bands": "purge", "identity.delegations": "purge",
   "identity.related_parties": "purge", "identity.access_reviews": "purge", "identity.autonomy_switches": "purge",
   "ops.plan_approvals": "purge", "ops.incidents": "purge",
+  // Dream-RSI: approved autonomy tuning, classification outcomes (relax counters) and proposals.
+  // Thresholds, booleans and hashes; their history is in the sealed agent and dream streams.
+  "agent.autonomy_tuning": "purge", "agent.autonomy_outcomes": "purge", "dream.proposals": "purge",
   "mdm.parties": "purge", "mdm.bank_changes": "purge", "mdm.reviews": "purge",
   "evidence.balances": "purge", "evidence.records": "purge", "evidence.lookup": "purge",
   "es.outbox": "purge", "es.snapshots": "purge", "es.dead_letters": "purge", "es.commands": "purge", "es.verify_checkpoints": "purge",

@@ -19,7 +19,8 @@
     "identity": "tsx apps/core/src/identity-cli.ts",
     "ops": "tsx apps/core/src/ops-cli.ts",
     "test:llm": "bash scripts/test-llm.sh",
-    "register": "tsx scripts/check-register.ts"
+    "register": "tsx scripts/check-register.ts",
+    "dream": "tsx apps/core/src/dream-cli.ts"
   },
   "devDependencies": {
     "@kuber/crypto": "workspace:*",
@@ -40,6 +41,7 @@
     "@kuber/channels": "workspace:*",
     "@kuber/contracts": "workspace:*",
     "@kuber/core": "workspace:*",
+    "@kuber/dream-rsi": "workspace:*",
     "@kuber/eventstore": "workspace:*",
     "@kuber/evidence": "workspace:*",
     "@kuber/gl": "workspace:*",
