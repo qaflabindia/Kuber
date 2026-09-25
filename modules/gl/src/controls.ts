@@ -3,8 +3,9 @@
  * small. Each function is pure and throws DomainError when a posting must be refused.
  *
  *   FIN-GL-04  single currency: a journal naming any currency other than the book's (INR) is refused.
- *   FIN-GL-01  control accounts: a manual entry to a control account must be a controlled adjustment,
- *              flagged by an owner or controller, and every control line carries its party.
+ *   FIN-GL-01  control accounts: a manual entry to a control account is a subledger posting (it names a
+ *              registered master party) or a controlled adjustment flagged by an owner or controller,
+ *              with the party on every control line.
  *   FIN-GL-05  suspense: amounts leave suspense only through a suspense resolution (which reverses
  *              the original and posts its replacement), never through a balancing journal.
  */
@@ -21,9 +22,15 @@ export function assertBookCurrency(currency: string | undefined) {
     `journal currency ${currency} is not supported: this book is ${BOOK_CURRENCY} only (amounts in paise, exponent ${CURRENCY_EXPONENT[BOOK_CURRENCY]}); foreign currency is deferred (FIN-GL-04)`);
 }
 
-/** A manual (person-entered) journal: control accounts only as a controlled adjustment by an owner or controller. */
-export function checkManualControl(s: BookState, lines: Line[], principal: string, adjustment: { reason: string } | undefined) {
-  const control = lines.filter((l) => s.accounts.get(l.accountId)?.isControl);
+/**
+ * A manual (person-entered) journal to a control account. A control line naming a party registered
+ * in the party master (`registered`, FIN-MDM-03) is a subledger posting: it is the party's own
+ * account moving (paying a supplier, a customer's receipt) and needs nothing more. Any other control
+ * line is allowed only as a controlled adjustment flagged by an owner or controller, with its party.
+ */
+export function checkManualControl(s: BookState, lines: Line[], principal: string, adjustment: { reason: string } | undefined,
+                                   registered?: ReadonlyMap<string, string>) {
+  const control = lines.filter((l) => s.accounts.get(l.accountId)?.isControl && !(l.partyId && registered?.has(l.partyId)));
   if (!control.length) return;
   const ids = [...new Set(control.map((l) => l.accountId))].join(", ");
   if (!adjustment) {

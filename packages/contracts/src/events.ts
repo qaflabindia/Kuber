@@ -62,11 +62,43 @@ export const Meta = z.object({
 });
 export type Meta = z.infer<typeof Meta>;
 
+// ------------------------------------------------------------------ Book configuration (FIN-MDM-01)
+export const BookPurpose = z.enum(["personal", "business"]);
+export const FunctionalCurrency = z.object({ code: z.literal("INR"), exponent: z.literal(2) });
+const BookConfigFields = {
+  /** The legal (reporting) entity the book belongs to: not a branch and not a dimension. */
+  legalEntityId: Id.optional(),
+  /** Accounting framework label, e.g. "Ind AS", "AS (ICAI)", "ITR"; free text, "unspecified" by default. */
+  framework: z.string().min(1).max(60).optional(),
+  functionalCurrency: FunctionalCurrency.optional(),
+  /** Month the fiscal year starts (1 = January, 4 = April). */
+  fiscalYearStartMonth: z.number().int().min(1).max(12).optional(),
+  purpose: BookPurpose.optional(),
+};
+export interface BookConfig {
+  legalEntityId: string; entityType: string; basis: string; framework: string;
+  functionalCurrency: { code: "INR"; exponent: 2 }; fiscalYearStartMonth: number; purpose: "personal" | "business";
+}
+const PERSONAL_ENTITY_TYPES = new Set(["individual", "household"]);
+/** Configuration of a book from its BookOpened data, applying the defaults for books opened before FIN-MDM-01. */
+export function bookConfigOf(d: { entityId: string; entityType: string; basis: string; legalEntityId?: string; framework?: string;
+  functionalCurrency?: { code: "INR"; exponent: 2 }; fiscalYearStartMonth?: number; purpose?: "personal" | "business" }): BookConfig {
+  return {
+    legalEntityId: d.legalEntityId ?? d.entityId, entityType: d.entityType, basis: d.basis, framework: d.framework ?? "unspecified",
+    functionalCurrency: d.functionalCurrency ?? { code: "INR", exponent: 2 }, fiscalYearStartMonth: d.fiscalYearStartMonth ?? 4,
+    purpose: d.purpose ?? (PERSONAL_ENTITY_TYPES.has(d.entityType) ? "personal" : "business"),
+  };
+}
+
 // ------------------------------------------------------------------ GL events
 export const GL = {
   BookOpened: z.object({
     bookId: Id, entityId: Id, entityType: z.string(), basis: z.enum(["statutory", "management", "tax", "budget", "scenario"]),
     currency: z.literal("INR"), accounts: z.array(Account),
+    // FIN-MDM-01 book configuration. Optional: books opened before these existed replay with the
+    // defaults in BOOK_DEFAULTS (legal entity = entityId, INR/2, April fiscal year, framework
+    // "unspecified", purpose from the entity type).
+    ...BookConfigFields,
   }),
   AccountAdded: z.object({ bookId: Id, account: Account }),
   JournalPosted: z.object({
@@ -92,6 +124,49 @@ export const GL = {
   JournalConfirmed: z.object({ bookId: Id, journalId: Id, source: z.string(), basis: z.string().optional() }),
   PostingRejected: z.object({ bookId: Id, requestId: Id, reason: z.string(), source: z.string().optional() }),
   PeriodLocked: z.object({ bookId: Id, periodEnd: IsoDate, level: z.enum(["soft", "hard"]) }),
+  /** FIN-MDM-02: no new ordinary entries; reversals and corrections of earlier journals still post. */
+  AccountClosed: z.object({ bookId: Id, accountId: Id, reason: z.string().min(1) }),
+  /**
+   * FIN-MDM-02: an account's statement mapping or mandatory dimensions changed. The previous values
+   * are recorded, so the history of the chart is the event stream (nothing is overwritten).
+   */
+  AccountControlsChanged: z.object({ bookId: Id, accountId: Id, taxonomyTag: z.string().min(1).optional(), requiredDims: z.array(z.string().min(1)).optional(),
+    previous: z.object({ taxonomyTag: z.string().nullable(), requiredDims: z.array(z.string()) }), reason: z.string().optional() }),
+} as const;
+
+// ------------------------------------------------------------------ Party master (FIN-MDM-03)
+/** Beneficiary bank details. Sealed at rest in events and in the party projection. */
+export const BankDetails = z.object({
+  accountNumber: z.string().regex(/^[0-9]{6,20}$/, "account number: 6 to 20 digits"),
+  ifsc: z.string().regex(/^[A-Z]{4}0[A-Z0-9]{6}$/, "not an IFSC code"),
+  holderName: z.string().min(1).max(200),
+});
+export type BankDetails = z.infer<typeof BankDetails>;
+export const PartyTerms = z.object({ creditDays: z.number().int().min(0).max(3650), msme: z.boolean().optional() });
+export const TaxStatus = z.object({
+  gstin: z.string().regex(/^[0-9]{2}[A-Z0-9]{10}[0-9A-Z]{3}$/, "not a GSTIN").optional(),
+  pan: z.string().regex(/^[A-Z]{5}[0-9]{4}[A-Z]$/, "not a PAN").optional(),
+  gstRegistered: z.boolean(), tdsSection: z.string().optional(),
+});
+export const PartyKind = z.enum(["vendor", "customer", "both"]);
+export const PARTY = {
+  /** A counterparty of one legal entity. Identity, terms and tax status are effective-dated from `effectiveFrom`. */
+  PartyRegistered: z.object({ partyId: Id, entityId: Id, kind: PartyKind, name: z.string().min(1).max(200), effectiveFrom: IsoDate,
+    terms: PartyTerms.optional(), taxStatus: TaxStatus.optional() }),
+  /** New identity, terms or tax status from `effectiveFrom`; earlier versions stay in force for earlier dates. */
+  PartyDetailsChanged: z.object({ partyId: Id, effectiveFrom: IsoDate, name: z.string().min(1).max(200).optional(),
+    terms: PartyTerms.optional(), taxStatus: TaxStatus.optional() }),
+  /** Maker: new beneficiary bank details requested. Payments to the party are held until released (POL-501). */
+  BankChangeRequested: z.object({ partyId: Id, changeId: Id, effectiveFrom: IsoDate, bank: BankDetails,
+    /** Keyed blind index of the account (no plaintext): finds shared identifiers across parties. */
+    accountIdx: z.string(), source: z.string().max(500).optional() }),
+  /** Checker: out-of-band verification recorded by a different person from the maker. */
+  BankChangeVerified: z.object({ partyId: Id, changeId: Id, method: z.enum(["call_back", "penny_drop", "name_match", "document"]), reference: z.string().min(1).max(200) }),
+  /** Fresh approval after verification: the new details are in force and the hold lifts. */
+  BankChangeReleased: z.object({ partyId: Id, changeId: Id }),
+  BankChangeRejected: z.object({ partyId: Id, changeId: Id, reason: z.string().min(1) }),
+  /** Two parties share an identifier (the same bank account): a person reviews; parties are never merged. */
+  PartyReviewRaised: z.object({ reviewId: Id, partyId: Id, otherPartyId: Id, reason: z.enum(["shared_bank_account"]) }),
 } as const;
 
 // ------------------------------------------------------------------ Channels events
@@ -206,8 +281,12 @@ export const IDENTITY = {
   MemberAdded: z.object({ principal: Principal, role: z.string(), books: Books, source: z.string(), displayName: z.string(),
     reactivated: z.boolean().default(false) }),
   MemberRemoved: z.object({ principal: Principal }),
-  /** Role or book scope of an active member changed. */
-  MemberRoleChanged: z.object({ principal: Principal, role: z.string(), books: Books, previousRole: z.string(), previousBooks: Books }),
+  /**
+   * Role or book scope of an active member changed. A role change re-keys the principal (its prefix
+   * is its role): `principal` is then the successor and `previousPrincipal` the one it replaced.
+   */
+  MemberRoleChanged: z.object({ principal: Principal, role: z.string(), books: Books, previousRole: z.string(), previousBooks: Books,
+    previousPrincipal: Principal.optional() }),
   /** `invitation` is the SHA-256 of the one-time code (the code itself is never recorded). */
   InvitationIssued: z.object({ invitation: z.string(), principal: Principal, role: z.string(), books: Books, expiresAt: z.string() }),
   InvitationRedeemed: z.object({ invitation: z.string(), principal: Principal, credentialId: z.string() }),
@@ -219,7 +298,7 @@ export const IDENTITY = {
   SessionRevoked: z.object({ session: z.string(), principal: Principal.nullable() }),
 } as const;
 
-export const ALL_EVENTS = { ...GL, ...CHANNELS, ...AGENT, ...OPS, ...EVIDENCE, ...IDENTITY } as const;
+export const ALL_EVENTS = { ...GL, ...PARTY, ...CHANNELS, ...AGENT, ...OPS, ...EVIDENCE, ...IDENTITY } as const;
 export type EventType = keyof typeof ALL_EVENTS;
 export type EventData<T extends EventType> = z.infer<(typeof ALL_EVENTS)[T]>;
 
@@ -227,6 +306,7 @@ export type EventData<T extends EventType> = z.infer<(typeof ALL_EVENTS)[T]>;
 export type Module = "gl" | "channels" | "agent" | "ops" | "evidence" | "identity";
 export const OWNER: Record<EventType, Module> = Object.fromEntries([
   ...Object.keys(GL).map((k) => [k, "gl"]),
+  ...Object.keys(PARTY).map((k) => [k, "gl"]),                  // the GL owns master data (chart and parties)
   ...Object.keys(CHANNELS).map((k) => [k, "channels"]),
   ...Object.keys(AGENT).map((k) => [k, "agent"]),
   ...Object.keys(OPS).map((k) => [k, "ops"]),

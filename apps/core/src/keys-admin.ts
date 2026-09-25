@@ -29,6 +29,7 @@ import { narrationCtx, snapshotCtx } from "@kuber/reporting";
 import { accountNameCtx, matchReviewCtx, provisionalSourceCtx } from "@kuber/agent";
 import { signalDetailCtx, signalOriginalCtx } from "@kuber/channels";
 import { IDENTITY_SEAL_MIGRATION, enrolmentNameCtx, memberNameCtx } from "@kuber/identity";
+import { bankChangeCtx, partyDetailCtx } from "@kuber/gl";
 
 export interface SealedColumn {
   table: string; column: string; kind: "text" | "json"; keyCols: string[];
@@ -54,6 +55,9 @@ export const SEALED_COLUMNS: SealedColumn[] = [
   // Personal data in the identity schema: the names people and invitations are shown by.
   { table: "identity.members", column: "display_name", kind: "text", keyCols: ["principal"], ctx: (r) => memberNameCtx(r.principal!) },
   { table: "identity.enrolments", column: "display_name", kind: "text", keyCols: ["token_hash"], ctx: (r) => enrolmentNameCtx(r.token_hash!) },
+  // Party master (FIN-MDM-03): names, terms and tax status history; beneficiary bank details.
+  { table: "mdm.parties", column: "detail", kind: "text", keyCols: ["party_id"], ctx: (r) => partyDetailCtx(r.party_id!) },
+  { table: "mdm.bank_changes", column: "bank", kind: "text", keyCols: ["change_id"], ctx: (r) => bankChangeCtx(r.change_id!) },
 ];
 
 /**
@@ -76,6 +80,7 @@ export const RETENTION: Record<string, "purge" | "sealed" | "keys" | "tombstone"
   // value once the tenant's books are unreadable. Credentials before members (foreign key).
   "identity.credentials": "purge", "identity.enrolments": "purge", "identity.members": "purge", "identity.settings": "purge",
   "identity.sessions": "purge",
+  "mdm.parties": "purge", "mdm.bank_changes": "purge", "mdm.reviews": "purge",
   "evidence.balances": "purge", "evidence.records": "purge", "evidence.lookup": "purge",
   "es.outbox": "purge", "es.snapshots": "purge", "es.dead_letters": "purge", "es.commands": "purge", "es.verify_checkpoints": "purge",
   "es.events": "sealed", "keys.tenant_keys": "keys", "keys.shredded": "tombstone",

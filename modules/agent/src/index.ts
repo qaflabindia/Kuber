@@ -48,6 +48,12 @@ const REVIEWABLE = ["queued", "awaiting_approval", "rejected_by_gl"];
 export class Agent {
   /** FIN-GL-05: suspense items as cases (source, owner, age, resolution). */
   readonly suspense: SuspenseCases;
+  /**
+   * Payment holds from the party master (FIN-MDM-03, POL-501): parties among `partyIds` with an
+   * unreleased bank-detail change. A draft paying such a party cannot be approved. Set by the cell.
+   */
+  paymentHolds?: (tenantId: string, partyIds: string[], tx: TransactionSql) => Promise<{ partyId: string; changeId: string; status: string }[]>;
+
   constructor(private sql: Sql, private store: EventStore, private policies: PolicyEngine,
               private clock: () => string = () => new Date().toISOString().slice(0, 10),
               private llm?: LlmClassifier, private guard: ModuleGuard = DENY_ALL_GUARD) {
@@ -290,6 +296,10 @@ export class Agent {
       const accounts = await this.accountSet(tx, tenantId, d.book_id);
       if (!accounts.has(final)) throw new AgentError("no_account", `unknown account ${final}`);
       const lines = d.proposal.lines.map((l) => (l.accountId === d.proposal.accountId ? { ...l, accountId: final } : l));
+      if (d.proposal.direction === "out" && this.paymentHolds) {
+        const held = await this.paymentHolds(tenantId, lines.map((l) => l.partyId).filter((p): p is string => !!p), tx);
+        if (held.length) throw new AgentError("party_hold", `payments to ${held.map((h) => h.partyId).join(", ")} are held: bank details changed and not yet verified and released (POL-501)`);
+      }
       // Same request id on a retry after a GL rejection: the journal id stays deterministic.
       const requestId = `req-${d.txn_id}`, journalId = journalIdForRequest(tenantId, requestId);
       const events: NewEvent[] = [
@@ -681,7 +691,7 @@ export class Agent {
 }
 
 interface Proposal { txnDate: string; narration: string; voucherType: string; lines: Line[]; provisional: boolean;
-  accountId: string; confidence: number; partyName?: string | null; partyId?: string | null }
+  accountId: string; confidence: number; partyName?: string | null; partyId?: string | null; direction?: "in" | "out" }
 
 export function narrationKey(narr: string): string | null {
   const stop = new Set(["upi", "neft", "imps", "rtgs", "txn", "ref", "the", "and", "paid", "payment", "transfer", "cash",

@@ -522,3 +522,58 @@ describe("FIN-GL-05: suspense", () => {
     } finally { await app.close(); }
   });
 });
+
+// ====================================================================== with the party master (FIN-MDM-03)
+describe("FIN-GL-01/02 with the party master", () => {
+  const B = "glmdm";
+  const BANK = { accountNumber: "50100099998888", ifsc: "HDFC0001234", holderName: "Vendor V" };
+  beforeAll(async () => {
+    clock.value = "2026-10-01";
+    await openBook(B, [acct("RENT", "expense")]);
+    await cell.parties.register(T, PREPARER, { partyId: "V-FIN", entityId: T, kind: "vendor", name: "Vendor V" });
+  });
+
+  it("FIN-GL-01 a control-account line naming a registered master party is a subledger posting; an unregistered party still needs a controlled adjustment", async () => {
+    await cell.gl.execute(T, B, { kind: "PostJournal", journalId: uuid(), txnDate: "2026-10-02", narration: "Bill", lines: [L("BIZEXP", 50_000n), L("CREDITORS", -50_000n, { partyId: "V-FIN" })] }, { principal: OWNER });
+    const pay = { date: "2026-10-03", narration: "Pay vendor", amount: "500", direction: "out", account: "CREDITORS", via: "BANK" };
+    const registered = await cell.ops.plan(T, B, OWNER, "record", { ...pay, party: "V-FIN" });
+    expect(registered.blocked).toBe(false);
+    expect(registered.checks.find((c) => c.label.startsWith("Control account"))).toBeUndefined();
+    const unregistered = await cell.ops.plan(T, B, OWNER, "record", { ...pay, party: "p.unknown" });
+    expect(unregistered.blocked).toBe(true);
+    expect(unregistered.checks.find((c) => !c.ok)!.detail).toMatch(/control account/);
+    // the ledger applies the same rule to manual journals
+    const manual = (party: string) => cell.gl.execute(T, B, { kind: "PostJournal", journalId: uuid(), txnDate: "2026-10-03", narration: "x", entry: "manual",
+      lines: [L("CREDITORS", 100n, { partyId: party }), L("BANK", -100n)] }, { principal: OWNER });
+    await expect(manual("p.unknown")).rejects.toThrow(/controlled adjustment/);
+    expect(await manual("V-FIN")).toHaveLength(1);
+  });
+
+  it("FIN-GL-02 a scheduled payment to a party on hold waits, unclaimed, until the bank change is released", async () => {
+    const s = await cell.ops.schedules.create(T, B, PREPARER, { name: "Office rent", kind: "recurring", start: "2026-10-01", end: "2026-11-30", day: 5,
+      lines: [L("RENT", 2_000_000n, { partyId: "V-FIN" }), L("BANK", -2_000_000n)] });
+    await planCommit(B, "schedule_approve", { scheduleId: s.scheduleId }, PREPARER, CONTROLLER);
+    const ch = await cell.parties.requestBankChange(T, PREPARER, "V-FIN", { bank: BANK });
+    const held = await cell.ops.runSchedules(T, "2026-10-05");
+    expect(held.posted).toEqual([]);
+    expect(held.skipped).toEqual([{ scheduleId: s.scheduleId, reason: expect.stringMatching(/held \(POL-501\)/) }]);
+    expect(held.exceptions).toEqual([]);
+    await cell.parties.verifyBankChange(T, APPROVER, "V-FIN", ch.changeId, { method: "call_back", reference: "number on file" });
+    await cell.parties.releaseBankChange(T, OWNER, "V-FIN", ch.changeId);
+    const r = await cell.ops.runSchedules(T, "2026-10-05");
+    expect(r.posted).toEqual([S.occurrenceJournalId(T, s.scheduleId, "2026-10", "post")]);
+    expect((await cell.gl.state(T, B)).journals.get(r.posted[0]!)!.txnDate).toBe("2026-10-05");   // its own date, not moved
+  });
+
+  it("FIN-GL-05 the suspense roll-forward defaults to the book's fiscal year", async () => {
+    const B2 = "glcal";
+    await cell.gl.openBook(T, B2, T, "company", OWNER, { fiscalYearStartMonth: 1 });
+    await cell.gl.execute(T, B2, { kind: "PostJournal", journalId: uuid(), txnDate: "2026-02-10", narration: "Unknown", lines: [L("SUSPENSE", 700n), L("BANK", -700n)] }, { principal: OWNER });
+    await cell.settle();
+    clock.value = "2026-10-01";
+    const p = await cell.ops.plan(T, B2, OWNER, "suspense", {});
+    expect((p.data as { rollForward: { from: string; additions: string } }).rollForward).toMatchObject({ from: "2026-01-01", additions: "700" });
+    const s = await cell.ops.schedules.reconciliation(T, B2);
+    expect(s.rows).toEqual([]);
+  });
+});

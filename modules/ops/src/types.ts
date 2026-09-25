@@ -8,7 +8,7 @@
  */
 import type { z } from "zod";
 import type { Account } from "@kuber/contracts";
-import type { BookCommand, BookState, GeneralLedger } from "@kuber/gl";
+import type { BookCommand, BookState, GeneralLedger, PartyMaster } from "@kuber/gl";
 import type { PolicyEngine } from "@kuber/policy";
 import type { Agent } from "@kuber/agent";
 import type { Reporting } from "@kuber/reporting";
@@ -17,7 +17,9 @@ export type OpName = "record" | "post" | "balance" | "reconcile" | "allocate" | 
   // finance requirements: recurring and recognition schedules (FIN-GL-02/03), suspense resolution (FIN-GL-05)
   | "schedule_approve" | "schedule_cancel" | "schedules" | "resolve_suspense" | "suspense";
 
-export interface Services { gl: GeneralLedger; reporting: Reporting; agent: Agent; policies: PolicyEngine }
+export interface Services { gl: GeneralLedger; reporting: Reporting; agent: Agent; policies: PolicyEngine;
+  /** Party master payment holds (FIN-MDM-03). Without it, no party is treated as held. */
+  parties?: Pick<PartyMaster, "holds"> & Partial<Pick<PartyMaster, "entities">> }
 
 export interface OpContext {
   tenant: string; book: string; principal: string; today: string;

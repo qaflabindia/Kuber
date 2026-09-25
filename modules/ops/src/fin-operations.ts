@@ -11,7 +11,7 @@
 import { z } from "zod";
 import { IsoDate, stableId, type Line } from "@kuber/contracts";
 import { isSuspense, validateJournal, type BookState } from "@kuber/gl";
-import { balancesFromState, financialYear } from "./math.ts";
+import { balancesFromState, financialYear, fiscalStart } from "./math.ts";
 import { maxOccurrence, occurrencesOf, releaseJournalId, type ScheduleView } from "./schedules.ts";
 import type { Action, Check, OpContext, OpDef, Section } from "./types.ts";
 
@@ -198,10 +198,10 @@ export const resolveSuspense: OpDef<z.infer<typeof ResolveInput>> = {
 
 export const suspenseReport: OpDef<{ from?: string; to?: string }> = {
   name: "suspense", title: "Suspense items and roll-forward", kind: "read", gate: "policy",
-  description: "Every suspense item with its source, owner, age and resolution, and the roll-forward for a period: opening + additions − resolved = closing, tied to the GL suspense balance.",
+  description: "Every suspense item with its source, owner, age and resolution, and the roll-forward for a period (default: the book's fiscal year to date): opening + additions − resolved = closing, tied to the GL suspense balance.",
   input: z.object({ from: IsoDate.optional(), to: IsoDate.optional() }),
   async plan(ctx, i) {
-    const fy = financialYear(ctx.today);
+    const fy = financialYear(ctx.today, fiscalStart(ctx.state));           // the book's fiscal year (FIN-MDM-01)
     const from = i.from ?? fy.from, to = i.to ?? ctx.today;
     const items = await ctx.svc.agent.suspense.list(ctx.tenant, ctx.book, { asOf: to });
     const rf = await ctx.svc.agent.suspense.rollForward(ctx.tenant, ctx.book, from, to);

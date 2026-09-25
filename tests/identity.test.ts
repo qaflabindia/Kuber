@@ -14,7 +14,7 @@ import postgres from "postgres";
 import { Keyring } from "@kuber/crypto";
 import { EventStore } from "@kuber/eventstore";
 import { KeyAdmin, buildServer, kuberTools, Copilot, type Cell } from "@kuber/core";
-import { AUDIENCE, AUTH_HEADER, ISSUER, ReplayCache, authKey, bodyHash, signRequest, verifyRequest } from "@kuber/auth";
+import { AUDIENCE, AUTH_HEADER, ISSUER, ReplayCache, STEP_UP_MAX_AGE_MS, authKey, bodyHash, signRequest, stepUpFresh, verifyRequest } from "@kuber/auth";
 import { ACTIONS, Identity, ROLES, can, identityStream, permissionTable, type Action, type Role } from "@kuber/identity";
 import type { Plan } from "@kuber/ops";
 import { CORE_AUTH_SECRET, enrol, newSession, signedInject, startCell, type SignedRequest } from "./helpers.ts";
@@ -60,6 +60,22 @@ describe("service assertions (BFF → core)", () => {
     expect(() => verify(`KH1 ${tampered}.${signRequest(key, base).split(".")[1]}`)).toThrow(/signature/);
     expect(bodyHash(undefined)).toBe(bodyHash(""));
   });
+
+  it("carries an optional step-up time inside the MAC, for a signed-in principal only", () => {
+    const now = Date.now();
+    const c = verify(signRequest(key, { ...base, stepUpAt: now - 1000 }));
+    expect(c.su).toBe(now - 1000);
+    expect(stepUpFresh(c, now)).toBe(true);
+    expect(verify(signRequest(key, base)).su).toBeUndefined();
+    expect(verify(signRequest(key, { ...base, principal: null, stepUpAt: now })).su).toBeUndefined();
+    expect(stepUpFresh({ principal: "owner:x", su: now - STEP_UP_MAX_AGE_MS - 1 }, now)).toBe(false);   // stale
+    expect(stepUpFresh({ principal: "owner:x", su: now + 120_000 }, now)).toBe(false);                   // future-dated
+    expect(stepUpFresh({ principal: "owner:x" }, now)).toBe(false);
+    expect(stepUpFresh({ principal: null, su: now }, now)).toBe(false);
+    // The step-up claim and the session claim travel together.
+    const both = verify(signRequest(key, { ...base, session: "s".repeat(24), stepUpAt: now }));
+    expect(both).toMatchObject({ sid: "s".repeat(24), su: now });
+  });
 });
 
 // ---------------------------------------------------------------- permissions (pure)
@@ -67,8 +83,9 @@ describe("role permissions", () => {
   const expected: Record<Role, Action[]> = {
     owner: [...ACTIONS],
     controller: ACTIONS.filter((a) => a !== "members.manage" && a !== "settings.manage"),
-    preparer: ["read", "capture", "plan.prepare", "copilot"],
-    approver: ["read", "draft.decide", "journal.ratify", "plan.prepare", "plan.approve", "plan.discard", "copilot"],
+    // FIN-MDM-03: a preparer is the maker of party changes; an approver verifies and releases them.
+    preparer: ["read", "capture", "plan.prepare", "copilot", "party.manage"],
+    approver: ["read", "draft.decide", "journal.ratify", "plan.prepare", "plan.approve", "plan.discard", "copilot", "party.bank.verify", "party.bank.release"],
     auditor: ["read", "members.read"],
     member: ["read", "capture", "plan.prepare", "copilot"],
   };
@@ -88,11 +105,12 @@ const P = { owner: "owner:ravi", controller: "controller:asha", controller2: "co
 const clock = { value: "2026-11-25" };
 let cell: Cell, app: FastifyInstance, stop: () => Promise<void>, ownerUrl: string;
 let send: ReturnType<typeof signedInject>;
-const as = (principal: string | null, method: SignedRequest["method"], url: string, payload?: unknown, tenant: string | null = T) =>
-  send({ method, url, tenant, principal, payload });
+const as = (principal: string | null, method: SignedRequest["method"], url: string, payload?: unknown, tenant: string | null = T, stepUpAt?: number) =>
+  send({ method, url, tenant, principal, payload, stepUpAt });
 const journal = { txnDate: "2026-10-01", narration: "Office rent", lines: [{ accountId: "BANK", credit: "100" }, { accountId: "OPENING", debit: "100" }] };
 const recordInput = (amount: string | number = 100) => ({ date: "2026-10-01", narration: "Supplies", amount, direction: "out", account: "BIZEXP", via: "BANK" });
 const seq = async (book = B) => (await cell.gl.state(T, book)).seq;
+const rebalance = (bank: number) => ({ targets: [{ account: "BANK", pct: bank }, { account: "INVEST", pct: 100 - bank }] });
 
 beforeAll(async () => {
   let db: { ownerUrl: string };
@@ -201,7 +219,7 @@ describe("F02: roles, book scope and maker-checker", () => {
     expect(p.blocked).toBe(false);
     await expect(cell.ops.commit(T, p.planId, P.controller, p.hash)).rejects.toThrow(/period operation: it needs approval by someone other than its preparer/);
     await expect(cell.ops.commit(T, p.planId, P.approver, p.hash)).rejects.toThrow(/approver may not plan.approve.period/);
-    const r = await as(P.controller2, "POST", `/v1/tenants/${T}/plans/${p.planId}/commit`, { hash: p.hash });
+    const r = await as(P.controller2, "POST", `/v1/tenants/${T}/plans/${p.planId}/commit`, { hash: p.hash }, T, Date.now());
     expect(r.statusCode).toBe(200);
     expect(r.json().status).toBe("committed");
   });
@@ -277,6 +295,102 @@ describe("F02: roles, book scope and maker-checker", () => {
     const own = await kuberTools(cell, { tenant: T, book: B, principal: P.agent }).find((t) => t.name === "kuber_record")!.run(recordInput());
     const r = await commit.run({ planId: own.plan!.planId, hash: own.plan!.hash });
     expect(r.text).toMatch(/Committed/);
+  });
+
+  describe("passkey step-up for sensitive approvals", () => {
+    const commit = (who: string, p: { planId: string; hash: string }, stepUpAt?: number) =>
+      as(who, "POST", `/v1/tenants/${T}/plans/${p.planId}/commit`, { hash: p.hash }, T, stepUpAt);
+
+    it("a period operation is refused without a step-up claim, and with a stale one; a fresh one commits", async () => {
+      const p = await cell.ops.plan(T, B, P.controller, "rebalance", rebalance(60));
+      const before = await seq();
+      const none = await commit(P.controller2, p);
+      expect(none.statusCode).toBe(403);
+      expect(p).toMatchObject({ gate: "human", status: "proposed", blocked: false });
+      expect(none.json()).toMatchObject({ error: "step_up_required", reason: "this is a period operation" });
+      const stale = await commit(P.controller2, p, Date.now() - STEP_UP_MAX_AGE_MS - 60_000);
+      expect(stale.statusCode).toBe(403);
+      expect(stale.json().error).toBe("step_up_required");
+      expect((await commit(P.controller2, p, Date.now() + 10 * 60_000)).json().error).toBe("step_up_required");   // future-dated
+      expect((await cell.ops.get(T, p.planId)).status).toBe("proposed");
+      expect(await seq()).toBe(before);
+      const ok = await commit(P.controller2, p, Date.now() - 60_000);
+      expect(ok.statusCode).toBe(200);
+      expect(ok.json().status).toBe("committed");
+    });
+
+    it("an amount above the approval limit needs a step-up; below it the path is unchanged", async () => {
+      await cell.identity.setSettings(T, P.owner, { soloOwner: false, sodLimitPaise: "5000000" });     // ₹50,000
+      try {
+        const big = await cell.ops.plan(T, B, P.controller, "record", recordInput("60,000"));
+        expect((await commit(P.approver, big)).json().error).toBe("step_up_required");
+        expect((await commit(P.approver, big, Date.now() - STEP_UP_MAX_AGE_MS - 1000)).json().error).toBe("step_up_required");
+        expect((await commit(P.approver, big, Date.now())).json().status).toBe("committed");
+        const small = await cell.ops.plan(T, B, P.controller, "record", recordInput(500));
+        const r = await commit(P.approver, small);
+        expect(r.statusCode).toBe(200);
+        expect(r.json().status).toBe("committed");
+      } finally { await cell.identity.setSettings(T, P.owner, { soloOwner: false, sodLimitPaise: null }); }
+    });
+
+    it("someone who may not approve is refused as such, not asked for a passkey", async () => {
+      const p = await cell.ops.plan(T, B, P.controller, "rebalance", rebalance(50));
+      const r = await commit(P.approver, p);
+      expect(r.statusCode).toBe(403);
+      expect(r.json().error).toBe("forbidden");
+      expect((await commit(P.controller, p, Date.now())).json().message).toMatch(/other than its preparer/);    // step-up does not bypass maker-checker
+      await cell.ops.discard(T, p.planId, P.controller);
+    });
+  });
+
+  describe("member management", () => {
+    it("changes book scope in place, and a role by re-keying the principal", async () => {
+      await enrol(cell, T, ["preparer:sam"]);
+      const url = (p: string) => `/v1/tenants/${T}/members/${encodeURIComponent(p)}`;
+      const scoped = await as(P.owner, "PATCH", url("preparer:sam"), { books: [B] });
+      expect(scoped.statusCode).toBe(200);
+      expect(scoped.json()).toMatchObject({ principal: "preparer:sam", books: [B] });
+      expect((await as("preparer:sam", "GET", `/v1/tenants/${T}/books/${B2}/accounts`)).statusCode).toBe(403);
+      const promoted = await as(P.owner, "PATCH", url("preparer:sam"), { role: "controller", books: null });
+      expect(promoted.statusCode).toBe(200);
+      expect(promoted.json()).toMatchObject({ principal: "controller:sam", role: "controller", books: null, status: "active" });
+      expect((await as("preparer:sam", "GET", `/v1/tenants/${T}/books`)).statusCode).toBe(403);
+      expect((await as("controller:sam", "GET", `/v1/tenants/${T}/books/${B2}/accounts`)).statusCode).toBe(200);
+      const list = (await as(P.auditor, "GET", `/v1/tenants/${T}/members`)).json() as { principal: string; status: string; displayName: string }[];
+      expect(list.find((m) => m.principal === "preparer:sam")?.status).toBe("revoked");
+      expect(list.find((m) => m.principal === "controller:sam")?.displayName).toBe("sam");               // sealed name re-sealed for the successor
+      const changes = (await cell.store.readStream(T, identityStream(T))).filter((e) => e.type === "MemberRoleChanged").slice(-2);
+      expect(changes.map((e) => e.data)).toMatchObject([
+        { principal: "preparer:sam", role: "preparer", books: [B], previousRole: "preparer", previousBooks: null },
+        { principal: "controller:sam", role: "controller", books: null, previousRole: "preparer", previousBooks: [B], previousPrincipal: "preparer:sam" },
+      ]);
+      expect(changes.map((e) => e.meta.principal)).toEqual([P.owner, P.owner]);
+      expect((await as(P.owner, "PATCH", url("controller:sam"), {})).statusCode).toBe(400);
+      expect((await as(P.owner, "PATCH", url("member:nobody"), { books: null })).statusCode).toBe(404);
+      expect((await as(P.owner, "PATCH", url(P.agent), { books: null })).statusCode).toBe(400);
+    });
+
+    it("maker-checker follows a person through a role change", async () => {
+      await enrol(cell, T, ["controller:lee"]);
+      const p = await cell.ops.plan(T, B, "controller:lee", "rebalance", rebalance(55));
+      await cell.identity.changeMember(T, P.owner, "controller:lee", { role: "owner" });
+      await expect(cell.ops.commit(T, p.planId, "owner:lee", p.hash)).rejects.toThrow(/other than its preparer \(controller:lee\)/);
+      await cell.identity.changeMember(T, P.owner, "owner:lee", { role: "controller" });              // and back again
+      await expect(cell.ops.commit(T, p.planId, "controller:lee", p.hash)).rejects.toThrow(/other than its preparer/);
+      await cell.ops.discard(T, p.planId, "controller:lee");
+    });
+
+    it("only owners change members; the last owner stays an owner; auditors may list passkeys", async () => {
+      const url = `/v1/tenants/${T}/members/${encodeURIComponent(P.controller2)}`;
+      expect((await as(P.controller, "PATCH", url, { role: "preparer" })).statusCode).toBe(403);
+      expect((await as(P.auditor, "PATCH", url, { role: "preparer" })).statusCode).toBe(403);
+      expect((await as(P.owner, "PATCH", url, { role: "root" })).statusCode).toBe(400);
+      expect((await as(P.owner, "PATCH", `/v1/tenants/${T}/members/${encodeURIComponent(P.owner)}`, { role: "controller" })).statusCode).toBe(409);
+      expect((await as(P.auditor, "GET", `/v1/tenants/${T}/credentials`)).statusCode).toBe(200);
+      expect((await as(P.member, "GET", `/v1/tenants/${T}/credentials`)).statusCode).toBe(403);
+      expect((await as(P.controller, "POST", `/v1/tenants/${T}/credentials/nope/revoke`, {})).statusCode).toBe(404);     // only their own passkeys
+      expect((await as(P.owner, "POST", `/v1/tenants/${T}/credentials/nope/revoke`, {})).statusCode).toBe(404);
+    });
   });
 
   it("only owners manage members and separation settings", async () => {
@@ -385,7 +499,51 @@ describe("passkeys", () => {
     expect(r.statusCode).toBe(201);
     expect(r.json()).toMatchObject({ principal: "auditor:ca-firm", role: "auditor", books: ["main"] });
     expect((await ceremony(W, "registration/options", { displayName: "CA Firm", enrolment: token })).statusCode).toBe(403);
-    expect((await as("auditor:ca-firm", "GET", `/v1/tenants/${W}/me`, undefined, W)).json().role).toBe("auditor");
+    const me = (await as("auditor:ca-firm", "GET", `/v1/tenants/${W}/me`, undefined, W)).json();
+    expect(me.role).toBe("auditor");
+    expect(me.permissions).toEqual(["read", "members.read"]);
+  });
+
+  it("step-up: re-confirms the signed-in person with their own passkey only", async () => {
+    const su = (principal: string, path: string, payload: unknown = {}) => as(principal, "POST", `/v1/tenants/${W}/identity/stepup/${path}`, payload, W);
+    const opts = (await su("owner:priya-rao", "options")).json();
+    expect(opts.userVerification).toBe("required");
+    expect(opts.allowCredentials.map((c: { id: string }) => c.id)).toEqual([b64u(owner.credId)]);
+    const ok = await su("owner:priya-rao", "verify", { response: owner.get(opts) });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().principal).toBe("owner:priya-rao");
+    expect(Math.abs(ok.json().at - Date.now())).toBeLessThan(60_000);
+    // Another member's step-up challenge cannot be answered with the owner's passkey, nor a sign-in challenge.
+    const theirs = (await su("auditor:ca-firm", "options")).json();
+    expect((await su("auditor:ca-firm", "verify", { response: owner.get(theirs) })).statusCode).toBe(401);
+    const signin = (await ceremony(W, "authentication/options")).json();
+    expect((await su("owner:priya-rao", "verify", { response: owner.get(signin) })).statusCode).toBe(401);
+    // Unauthenticated ceremonies (no principal) cannot step up; nor can the dev path when disabled.
+    expect((await ceremony(W, "stepup/options")).statusCode).toBe(401);
+    expect((await su("owner:priya-rao", "verify", { dev: true })).statusCode).toBe(403);
+  });
+
+  it("a role change keeps the person's passkey; a revoked passkey no longer signs in", async () => {
+    const auditor = new SoftAuthenticator();
+    const inv = await cell.identity.invite(W, "owner:priya-rao", { role: "auditor", displayName: "Second CA" });
+    const ro = (await ceremony(W, "registration/options", { displayName: "Second CA", enrolment: inv.token })).json();
+    expect((await ceremony(W, "registration/verify", { displayName: "Second CA", enrolment: inv.token, response: auditor.create(ro) })).statusCode).toBe(201);
+    const changed = await as("owner:priya-rao", "PATCH", `/v1/tenants/${W}/members/${encodeURIComponent("auditor:second-ca")}`, { role: "approver" }, W);
+    expect(changed.json().principal).toBe("approver:second-ca");
+    const creds = (await as("owner:priya-rao", "GET", `/v1/tenants/${W}/credentials`, undefined, W)).json() as { credentialId: string; principal: string }[];
+    expect(creds.find((c) => c.credentialId === b64u(auditor.credId))?.principal).toBe("approver:second-ca");
+    const o1 = (await ceremony(W, "authentication/options")).json();
+    expect((await ceremony(W, "authentication/verify", { response: auditor.get(o1) })).json().principal).toBe("approver:second-ca");
+    expect((await as("owner:priya-rao", "POST", `/v1/tenants/${W}/credentials/${b64u(auditor.credId)}/revoke`, {}, W)).statusCode).toBe(204);
+    expect((await cell.store.readStream(W, identityStream(W))).filter((e) => e.type === "CredentialRevoked").at(-1))
+      .toMatchObject({ meta: { principal: "owner:priya-rao" }, data: { principal: "approver:second-ca", credentialId: b64u(auditor.credId) } });
+    const o2 = (await ceremony(W, "authentication/options")).json();
+    expect((await ceremony(W, "authentication/verify", { response: auditor.get(o2) })).statusCode).toBe(401);
+    expect((await as("approver:second-ca", "POST", `/v1/tenants/${W}/identity/stepup/options`, {}, W)).json().error).toBe("no_passkey");
+    // The only owner keeps their last passkey.
+    const last = await as("owner:priya-rao", "POST", `/v1/tenants/${W}/credentials/${b64u(owner.credId)}/revoke`, {}, W);
+    expect(last.statusCode).toBe(409);
+    expect(last.json().error).toBe("last_owner_passkey");
   });
 
   it("development sign-in is off unless explicitly enabled, and never takes over a workspace with people", async () => {

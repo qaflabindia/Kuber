@@ -1,6 +1,8 @@
 <script lang="ts">
   import { enhance } from "$app/forms";
   import { invalidateAll } from "$app/navigation";
+  import type { SubmitFunction } from "@sveltejs/kit";
+  import { confirmWithPasskey } from "$lib/stepup";
   import { date, inr } from "$lib/format";
   import type { Plan } from "$lib/server/api";
   import Icon from "./Icon.svelte";
@@ -13,6 +15,9 @@
   let showDetail = $state(true);
   let message = $state<string | null>(null);
   let busy = $state(false);
+  let commitForm = $state<HTMLFormElement>();
+  // A passkey confirmation lasts five minutes on the server; the card re-asks a little sooner.
+  let stepUpUntil = 0, retried = false;
   $effect.pre(() => { status = plan.status; });
   $effect.pre(() => { showDetail = !compact; });
 
@@ -45,6 +50,33 @@
     else if (result.type === "failure") { message = (d.message as string) ?? "That didn't work."; if (d.code === "stale") status = "stale"; }
     await update({ reset: false, invalidateAll: false });
   }; };
+
+  /**
+   * Approving a period operation, or an amount above the approval limit, needs a fresh passkey
+   * confirmation. Period operations ask up front; for amounts the core says so, and the card asks
+   * once and posts again. Everything else posts exactly as before.
+   */
+  const stepUp = async (): Promise<boolean> => {
+    busy = true; message = "Confirm with your passkey to approve this.";
+    const problem = await confirmWithPasskey();
+    busy = false; message = problem;
+    if (!problem) stepUpUntil = Date.now() + 4.5 * 60_000;
+    return !problem;
+  };
+  const commitSubmit: SubmitFunction = async ({ cancel }) => {
+    if (plan.gate === "human" && Date.now() >= stepUpUntil && !(await stepUp())) { cancel(); return; }
+    const done = settle();
+    return async (o) => {
+      const d = (o.result.type === "failure" ? o.result.data : undefined) ?? {};
+      if (d.code === "step_up_required" && !retried) {
+        busy = false; retried = true;
+        if (await stepUp()) commitForm?.requestSubmit(); else retried = false;
+        return;
+      }
+      retried = false;
+      await done(o as never);
+    };
+  };
 </script>
 
 <article class="card panel" class:done={status === "committed"} class:off={status === "discarded" || status === "stale"}>
@@ -128,11 +160,11 @@
           <input type="hidden" name="planId" value={plan.planId} />
           <button class="btn quiet sm" disabled={busy}>Discard</button>
         </form>
-        <form method="POST" action="/?/commit" use:enhance={settle}>
+        <form method="POST" action="/?/commit" use:enhance={commitSubmit} bind:this={commitForm}>
           <input type="hidden" name="planId" value={plan.planId} />
           <input type="hidden" name="hash" value={plan.hash} />
-          <button class="btn primary sm" disabled={busy || plan.blocked} title={plan.blocked ? "Resolve the blocking checks first" : "Posts exactly what is shown"}>
-            <Icon name="check" size={14} /> {plan.op === "close" ? "Approve and close" : plan.op === "carry_forward" || (plan.op === "reconcile" && !plan.journals.length) ? "Sign off" : "Approve and post"}
+          <button class="btn primary sm" disabled={busy || plan.blocked} title={plan.blocked ? "Resolve the blocking checks first" : plan.gate === "human" ? "Confirm with your passkey, then post exactly what is shown" : "Posts exactly what is shown"}>
+            <Icon name={plan.gate === "human" ? "shield" : "check"} size={14} /> {plan.op === "close" ? "Approve and close" : plan.op === "carry_forward" || (plan.op === "reconcile" && !plan.journals.length) ? "Sign off" : "Approve and post"}
           </button>
         </form>
       </div>

@@ -24,7 +24,7 @@ import type { EventStore, Migration } from "@kuber/eventstore";
 import { DomainError, assertBookCurrency, checkManualControl, isSuspense, schedules as S, validateJournal, type BookState, type GeneralLedger } from "@kuber/gl";
 import type { PolicyEngine } from "@kuber/policy";
 import { isToken, type TenantKeys } from "@kuber/crypto";
-import { balancesFromState } from "./math.ts";
+import { balancesFromState, financialYear, fiscalStart, paidParties } from "./math.ts";
 import type { OpsGuard, Plan } from "./types.ts";
 
 export const SCHEDULER = "system:scheduler";
@@ -152,7 +152,9 @@ export interface RunResult { tenant: string; asOf: string; posted: string[]; rev
 
 export class Schedules {
   constructor(private store: EventStore, private gl: GeneralLedger, private policies: PolicyEngine, private guard: OpsGuard,
-              private clock: () => string, private getPlan: (tenant: string, planId: string) => Promise<Plan>) {}
+              private clock: () => string, private getPlan: (tenant: string, planId: string) => Promise<Plan>,
+              /** Party master payment holds (FIN-MDM-03, POL-501); without it no party is held. */
+              private holds?: (tenant: string, partyIds: string[], tx: TransactionSql) => Promise<{ partyId: string; status: string }[]>) {}
 
   private currentPolicyVersion() {
     const p = this.policies.policies.find((x) => x.policyId === SCHEDULE_POLICY);
@@ -346,6 +348,13 @@ export class Schedules {
           data: { scheduleId: r.schedule_id, bookId: r.book_id, occurrenceId: o.occurrenceId, period: o.period, kind: o.kind, dueOn: o.dueOn, reason } }] }, meta, b.tx);
         out.exceptions.push({ occurrenceId: o.occurrenceId, reason });
       };
+      // POL-501: an occurrence that pays a party whose bank details changed waits (unclaimed) until the change is released.
+      const paying = o.kind === "post" ? paidParties(b.state.accounts, [o]) : [];
+      const held = paying.length && this.holds ? await this.holds(tenant, paying, b.tx) : [];
+      if (held.length) {
+        out.skipped.push({ scheduleId: r.schedule_id, reason: `${o.period}: payments to ${held.map((h) => h.partyId).join(", ")} are held (POL-501); it will post once the bank change is released` });
+        return;
+      }
       if (o.amount > BigInt(r.approved_amount ?? "0")) return raise(`amount ${o.amount} paise is above the approved ${r.approved_amount} paise`);
       try {
         if (o.kind === "post") {
@@ -377,7 +386,8 @@ export class Schedules {
     const to = opts.to ?? this.clock();
     const periods = [...new Set(views.flatMap((v) => S.periodsBetween(v.definition.start, v.definition.end)))].filter((p) => S.periodStart(p) <= to).sort();
     const accounts = [...new Set(views.map((v) => v.definition.recognition!.balanceAccount))].sort();
-    const rows: { period: string; accountId: string; scheduled: string; recognizedInGl: string; scheduleBalance: string; glBalance: string; difference: string; reconciled: boolean }[] = [];
+    const fyStart = fiscalStart(state);
+    const rows: { period: string; fiscalYear: string; accountId: string; scheduled: string; recognizedInGl: string; scheduleBalance: string; glBalance: string; difference: string; reconciled: boolean }[] = [];
     for (const p of periods) {
       const end = S.periodEnd(p);
       const gl = balancesFromState(state, { to: end });
@@ -397,7 +407,7 @@ export class Schedules {
           scheduleBalance += r.type === "prepaid" ? BigInt(r.total) - through - released : -through;
         }
         const glBal = gl.get(acc) ?? 0n;
-        rows.push({ period: p, accountId: acc, scheduled: scheduled.toString(), recognizedInGl: recognized.toString(), scheduleBalance: scheduleBalance.toString(),
+        rows.push({ period: p, fiscalYear: financialYear(end, fyStart).label, accountId: acc, scheduled: scheduled.toString(), recognizedInGl: recognized.toString(), scheduleBalance: scheduleBalance.toString(),
           glBalance: glBal.toString(), difference: (glBal - scheduleBalance).toString(), reconciled: glBal === scheduleBalance && scheduled === recognized });
       }
     }

@@ -17,14 +17,14 @@
  */
 import { Readable } from "node:stream";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
-import { AUTH_HEADER, AuthError, ReplayCache, ReplayStoreUnavailable, authKey, verifyRequestAsync, type Claims, type ReplayStore } from "@kuber/auth";
-import { AccessDenied, IdentityError, can, inScope, type Action, type Member } from "@kuber/identity";
+import { AUTH_HEADER, AuthError, ReplayCache, ReplayStoreUnavailable, STEP_UP_MAX_AGE_MS, authKey, stepUpFresh, verifyRequestAsync, type Claims, type ReplayStore } from "@kuber/auth";
+import { ACTIONS, AccessDenied, IdentityError, ROLES, can, inScope, type Action, type Member } from "@kuber/identity";
 import { z, ZodError } from "zod";
-import { Account, Id, IsoDate, JOURNAL_STATES, Principal, parseAmount, uuid, type Line } from "@kuber/contracts";
+import { Account, BankDetails, BookPurpose, Id, IsoDate, JOURNAL_STATES, PartyKind, PartyTerms, Principal, TaxStatus, parseAmount, uuid, type Line } from "@kuber/contracts";
 import { CommandConflict, ConcurrencyError, GuardDenied } from "@kuber/eventstore";
 import { DomainError, type BookCommand } from "@kuber/gl";
 import { AgentError } from "@kuber/agent";
-import { OpsError, ScheduleError } from "@kuber/ops";
+import { OpsError, ScheduleError, financialYear, fiscalStart } from "@kuber/ops";
 import { StaleReportError, type ReportBasis, type ReportOptions } from "@kuber/reporting";
 import { IngestionError } from "@kuber/channels";
 import type { Cell } from "./cell.ts";
@@ -138,8 +138,13 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
 
   app.post<P>("/v1/tenants/:tenant/books", async (req, reply) => {
     const { tenant, principal } = await who(req, "book.open", { allBooks: true });
-    const b = z.object({ bookId: z.string(), entityId: z.string(), entityType: z.enum(["individual", "household", "freelancer", "company"]) }).parse(req.body);
-    const ev = await cell.gl.openBook(tenant, b.bookId, b.entityId, b.entityType, principal);
+    const b = z.object({ bookId: z.string(), entityId: z.string(), entityType: z.enum(["individual", "household", "freelancer", "company"]),
+      // FIN-MDM-01 configuration (defaults: legal entity = entityId, INR/2, April year, framework "unspecified", purpose by entity type)
+      legalEntityId: z.string().min(1).optional(), framework: z.string().min(1).max(60).optional(),
+      basis: z.enum(["statutory", "management", "tax", "budget", "scenario"]).optional(),
+      fiscalYearStartMonth: z.number().int().min(1).max(12).optional(), purpose: BookPurpose.optional() }).parse(req.body);
+    const { bookId, entityId, entityType, ...config } = b;
+    const ev = await cell.gl.openBook(tenant, bookId, entityId, entityType, principal, config);
     return reply.code(201).send({ events: ev.map((e) => e.type) });
   });
 
@@ -148,6 +153,67 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     const account = Account.parse(req.body);
     await cell.gl.execute(tenant, req.params.book, { kind: "AddAccount", account }, { principal });
     return reply.code(201).send({ accountId: account.accountId });
+  });
+
+  // FIN-MDM-02: close an account (no new ordinary entries), or change its statement mapping / mandatory dimensions.
+  type A = { Params: { tenant: string; book: string; account: string } };
+  app.post<A>("/v1/tenants/:tenant/books/:book/accounts/:account/close", async (req, reply) => {
+    const { tenant, principal } = await who(req, "account.close");
+    const b = z.object({ reason: z.string().min(1) }).parse(req.body);
+    await cell.gl.execute(tenant, req.params.book, { kind: "CloseAccount", accountId: req.params.account, reason: b.reason }, { principal });
+    return reply.code(201).send({ accountId: req.params.account, closed: true });
+  });
+  app.post<A>("/v1/tenants/:tenant/books/:book/accounts/:account/controls", async (req, reply) => {
+    const { tenant, principal } = await who(req, "account.close");
+    const b = z.object({ taxonomyTag: z.string().min(1).optional(), requiredDims: z.array(z.string().min(1)).optional(), reason: z.string().optional() }).parse(req.body);
+    await cell.gl.execute(tenant, req.params.book, { kind: "ChangeAccountControls", accountId: req.params.account, ...b }, { principal });
+    return reply.code(201).send({ accountId: req.params.account });
+  });
+
+  // FIN-MDM-03 party master. Tenant-wide (a party belongs to a legal entity, not a book); the module
+  // checks the same rights again inside its transaction, and separation of maker and checker.
+  type PP = { Params: { tenant: string; party: string } };
+  type PC = { Params: { tenant: string; party: string; change: string } };
+  app.post<P>("/v1/tenants/:tenant/parties", async (req, reply) => {
+    const { tenant, principal } = await who(req, "party.manage", { allBooks: true });
+    const b = z.object({ partyId: z.string().regex(/^[A-Za-z0-9_.:@+-]{1,200}$/), entityId: z.string().min(1), kind: PartyKind, name: z.string().min(1),
+      effectiveFrom: IsoDate.optional(), terms: PartyTerms.optional(), taxStatus: TaxStatus.optional() }).parse(req.body);
+    return reply.code(201).send(await cell.parties.register(tenant, principal, b));
+  });
+  app.get<{ Params: { tenant: string } }>("/v1/tenants/:tenant/parties/reviews", async (req) => {
+    const { tenant } = await who(req, "read", { allBooks: true });
+    return cell.parties.reviews(tenant);
+  });
+  app.get<PP & { Querystring: { asOf?: string } }>("/v1/tenants/:tenant/parties/:party", async (req, reply) => {
+    const { tenant } = await who(req, "read", { allBooks: true });
+    const p = await cell.parties.get(tenant, req.params.party, req.query.asOf ? IsoDate.parse(req.query.asOf) : undefined);
+    if (!p) return reply.code(404).send({ error: "not_found", message: `no party ${req.params.party}` });
+    const { bank, ...rest } = p;                                       // bank details are shown masked
+    return { ...rest, bank: bank ? { ifsc: bank.ifsc, holderName: bank.holderName, accountNumber: `••••${bank.accountNumber.slice(-4)}` } : null };
+  });
+  app.post<PP>("/v1/tenants/:tenant/parties/:party/details", async (req) => {
+    const { tenant, principal } = await who(req, "party.manage", { allBooks: true });
+    const b = z.object({ effectiveFrom: IsoDate, name: z.string().min(1).optional(), terms: PartyTerms.optional(), taxStatus: TaxStatus.optional() }).parse(req.body);
+    return cell.parties.changeDetails(tenant, principal, req.params.party, b);
+  });
+  app.post<PP>("/v1/tenants/:tenant/parties/:party/bank-changes", async (req, reply) => {
+    const { tenant, principal } = await who(req, "party.manage", { allBooks: true });
+    const b = z.object({ bank: BankDetails, effectiveFrom: IsoDate.optional(), source: z.string().max(500).optional() }).parse(req.body);
+    return reply.code(201).send(await cell.parties.requestBankChange(tenant, principal, req.params.party, b));
+  });
+  app.post<PC>("/v1/tenants/:tenant/parties/:party/bank-changes/:change/verify", async (req) => {
+    const { tenant, principal } = await who(req, "party.bank.verify", { allBooks: true });
+    const b = z.object({ method: z.enum(["call_back", "penny_drop", "name_match", "document"]), reference: z.string().min(1).max(200) }).parse(req.body);
+    return cell.parties.verifyBankChange(tenant, principal, req.params.party, req.params.change, b);
+  });
+  app.post<PC>("/v1/tenants/:tenant/parties/:party/bank-changes/:change/release", async (req) => {
+    const { tenant, principal } = await who(req, "party.bank.release", { allBooks: true });
+    return cell.parties.releaseBankChange(tenant, principal, req.params.party, req.params.change);
+  });
+  app.post<PC>("/v1/tenants/:tenant/parties/:party/bank-changes/:change/reject", async (req) => {
+    const { tenant, principal } = await who(req, "party.bank.verify", { allBooks: true });
+    const b = z.object({ reason: z.string().min(1) }).parse(req.body);
+    return cell.parties.rejectBankChange(tenant, principal, req.params.party, req.params.change, b.reason);
   });
 
   // Journal-creating commands are idempotent when the client names them (F04): an Idempotency-Key
@@ -428,7 +494,11 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     await cell.identity.revokeCredential(tenant, principal, req.params.id, { anyMember });
     return reply.code(204).send();
   });
-  app.get<P>("/v1/tenants/:tenant/me", async (req) => (await who(req, "read")).member);
+  // The member and what their role allows, so surfaces show only what the core would accept.
+  app.get<P>("/v1/tenants/:tenant/me", async (req) => {
+    const { member } = await who(req, "read");
+    return { ...member, permissions: ACTIONS.filter((a) => can(member.role, a)) };
+  });
   app.get<P>("/v1/tenants/:tenant/members", async (req) => { const { tenant } = await who(req, "members.read", { allBooks: true }); return cell.identity.members(tenant); });
   app.post<P>("/v1/tenants/:tenant/members/invitations", async (req, reply) => {
     const { tenant, principal } = await who(req, "members.manage", { allBooks: true });
@@ -440,6 +510,27 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     const { tenant, principal } = await who(req, "members.manage", { allBooks: true });
     await cell.identity.revoke(tenant, principal, req.params.principal);
     return reply.code(204).send();
+  });
+  type M = { Params: { tenant: string; principal: string } };
+  // A role and/or book-scope change; a role change answers with the successor principal.
+  app.patch<M>("/v1/tenants/:tenant/members/:principal", async (req) => {
+    const { tenant, principal } = await who(req, "members.manage", { allBooks: true });
+    const b = z.object({ role: z.enum(ROLES).optional(), books: z.array(z.string().min(1).max(64)).min(1).nullable().optional() })
+      .refine((x) => x.role !== undefined || x.books !== undefined, "change role, books or both").parse(req.body);
+    return cell.identity.changeMember(tenant, principal, req.params.principal, b);
+  });
+  // Every active member's passkeys (member management); revocation is the one route above.
+  app.get<P>("/v1/tenants/:tenant/credentials", async (req) => { const { tenant } = await who(req, "members.read", { allBooks: true }); return cell.identity.credentials(tenant); });
+  // Step-up: a signed-in person re-confirms with their own passkey before a sensitive approval.
+  // The BFF then carries the time of that confirmation in its signed assertions (claim `su`).
+  app.post<P>("/v1/tenants/:tenant/identity/stepup/options", async (req) => {
+    const { tenant, principal } = await who(req, "read");
+    return cell.identity.stepUpOptions(tenant, principal);
+  });
+  app.post<P>("/v1/tenants/:tenant/identity/stepup/verify", async (req) => {
+    const { tenant, principal } = await who(req, "read");
+    const b = z.union([z.object({ response: Json }), z.object({ dev: z.literal(true) })]).parse(req.body);
+    return "dev" in b ? cell.identity.devStepUp(tenant, principal) : cell.identity.stepUp(tenant, principal, { response: b.response as never });
   });
   app.get<P>("/v1/tenants/:tenant/settings/separation", async (req) => cell.identity.settings((await who(req, "read")).tenant));
   app.put<P>("/v1/tenants/:tenant/settings/separation", async (req) => {
@@ -470,6 +561,17 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   app.post<T>("/v1/tenants/:tenant/plans/:id/commit", async (req, reply) => {
     const { tenant, principal } = await who(req, "read");          // role, book and maker-checker: ops guard
     const b = z.object({ hash: z.string().length(64) }).parse(req.body);
+    // Period operations and amounts above the approval limit need a fresh passkey step-up. The
+    // guard runs first, so nobody is asked for a passkey for a plan they could not approve anyway.
+    const plan = await cell.ops.get(tenant, req.params.id);
+    if (plan.status === "proposed" && plan.kind === "write" && !principal.startsWith("agent:")) {
+      await cell.identity.check({ step: "commit", tenant, book: plan.bookId, principal, op: { name: plan.op, kind: plan.kind, gate: plan.gate }, plan });
+      const reason = await cell.identity.stepUpReason(tenant, plan);
+      if (reason && !stepUpFresh(claimsOf.get(req)!)) {
+        return reply.code(403).send({ error: "step_up_required", reason,
+          message: `Confirm with your passkey to approve this (${reason}); a confirmation lasts ${STEP_UP_MAX_AGE_MS / 60_000} minutes.` });
+      }
+    }
     const r = await cell.ops.commit(tenant, req.params.id, principal, b.hash);
     return reply.code(r.status === "committed" ? 200 : 202).send(r);
   });
@@ -536,8 +638,11 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   });
   app.get<R>("/v1/tenants/:tenant/books/:book/suspense/roll-forward", async (req) => {
     const t = await reader(req);
-    const q = z.object({ from: IsoDate, to: IsoDate }).parse(req.query);
-    return cell.agent.suspense.rollForward(t, req.params.book, q.from, q.to);
+    // default: the book's fiscal year to date (FIN-MDM-01 fiscal year start)
+    const q = z.object({ from: IsoDate.optional(), to: IsoDate.optional() }).parse(req.query);
+    const to = q.to ?? clock();
+    const from = q.from ?? financialYear(to, fiscalStart(await cell.gl.state(t, req.params.book))).from;
+    return cell.agent.suspense.rollForward(t, req.params.book, from, to);
   });
   app.post<T>("/v1/tenants/:tenant/suspense/items/:id/assign", async (req) => {
     const { tenant, principal } = await who(req, "draft.decide");
