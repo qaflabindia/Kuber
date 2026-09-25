@@ -230,7 +230,10 @@ REVOKE INSERT, UPDATE ON es.verify_checkpoints FROM ${role};
 -- re-wrapping and shredding are operator actions that run with the owner role.
 REVOKE UPDATE ON keys.tenant_keys FROM ${role};
 REVOKE INSERT, UPDATE ON keys.shredded FROM ${role};
-GRANT SELECT, INSERT ON public.schema_migrations TO ${role};`;
+-- The migration ledger is written only by the owner (the one-shot migrate step); runtime roles
+-- read it to check that every migration is applied (F14).
+REVOKE ALL ON public.schema_migrations FROM ${role};
+GRANT SELECT ON public.schema_migrations TO ${role};`;
 
 /**
  * The system role: the same privileges as the application role (no event updates, no key

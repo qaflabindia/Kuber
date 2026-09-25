@@ -17,9 +17,10 @@ echo "2/7 encrypted backup before upgrading"
 ./scripts/backup.sh
 
 echo "3/7 build images"
-./kuber build core web tools
+./kuber build migrate core web tools
 
-echo "4/7 restart core (applies migrations on boot) and web"
+echo "4/7 apply migrations (one-shot migrate service, owner credentials), then restart core and web"
+./kuber up --force-recreate --exit-code-from migrate migrate || { echo "migrate failed"; ./kuber logs --tail 80 migrate; exit 1; }
 ./kuber up -d --force-recreate core web
 for i in $(seq 1 90); do
   curl -sf --cacert "$DIR/certs/ca.crt" https://localhost:8080/healthz >/dev/null 2>&1 && break

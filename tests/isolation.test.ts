@@ -5,7 +5,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import postgres, { type Sql } from "postgres";
-import { Cell, type Cell as CellT } from "@kuber/core";
+import { Cell, requiredMigrationIds, type Cell as CellT } from "@kuber/core";
 import { MemoryKms } from "@kuber/crypto";
 import { ROLE_SCOPED_POLICIES_SQL, SYSTEM_SCOPE_ROLE, once } from "@kuber/eventstore";
 import { APP_ROLE, POLICY_DIR, SYSTEM_ROLE, startCell } from "./helpers.ts";
@@ -100,5 +100,40 @@ describe("database-role separation", () => {
       await expect(Cell.start({ databaseUrl: db.url, migrationUrl: db.ownerUrl, systemDatabaseUrl: db.systemUrl,
         policyDir: POLICY_DIR, kms: new MemoryKms() })).rejects.toThrow(/member of kuber_system_scope/);
     } finally { await owner.unsafe(`REVOKE ${SYSTEM_SCOPE_ROLE} FROM ${APP_ROLE}`); }
+  });
+});
+
+describe("F14: runtime roles cannot migrate", () => {
+  it("the application and system roles can read schema_migrations but not write it", async () => {
+    for (const role of [app, sys]) {
+      expect((await role<{ n: number }[]>`SELECT count(*)::int AS n FROM public.schema_migrations`)[0]!.n).toBeGreaterThan(10);
+      await expect(role`INSERT INTO public.schema_migrations (id) VALUES ('zz-suppressed')`).rejects.toThrow(/permission denied/);
+      await expect(role`UPDATE public.schema_migrations SET applied_at = now() WHERE false`).rejects.toThrow(/permission denied/);
+      await expect(role`DELETE FROM public.schema_migrations WHERE false`).rejects.toThrow(/permission denied/);
+      await expect(role.unsafe("TRUNCATE public.schema_migrations")).rejects.toThrow(/permission denied/);
+    }
+    const [g] = await owner<{ w: boolean }[]>`
+      SELECT has_table_privilege(${APP_ROLE}, 'public.schema_migrations', 'INSERT, UPDATE, DELETE, TRUNCATE') AS w`;
+    expect(g!.w).toBe(false);
+  });
+
+  it("a cell started without migrationUrl only checks the migrations, and starts when all are applied", async () => {
+    const c = await Cell.start({ databaseUrl: db.url, systemDatabaseUrl: db.systemUrl, policyDir: POLICY_DIR, kms: new MemoryKms() });
+    await c.close();
+  });
+
+  it("a cell started without migrationUrl refuses to run while a migration is pending, and says how to apply it", async () => {
+    const ids = requiredMigrationIds();
+    const pending = [ids.at(-2)!, ids.at(-1)!];                 // the last SQL migration and the identity seal
+    const removed = await owner<{ id: string; applied_at: Date }[]>`DELETE FROM public.schema_migrations WHERE id IN ${owner(pending)} RETURNING id, applied_at`;
+    expect(removed).toHaveLength(2);
+    try {
+      const err = await Cell.start({ databaseUrl: db.url, systemDatabaseUrl: db.systemUrl, policyDir: POLICY_DIR, kms: new MemoryKms() })
+        .then(() => null, (e: Error) => e);
+      expect(err?.message).toContain(`database migrations are pending (2: ${pending.join(", ")})`);
+      expect(err?.message).toMatch(/no migration credentials: run the migrate step as the owner first \(`\.\/kuber up migrate`/);
+    } finally {
+      for (const r of removed) await owner`INSERT INTO public.schema_migrations (id, applied_at) VALUES (${r.id}, ${r.applied_at})`;
+    }
   });
 });

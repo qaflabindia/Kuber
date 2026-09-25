@@ -24,7 +24,7 @@ SQL
 
 echo "3/7 restart postgres, nats and valkey with TLS and authentication"
 ./kuber up -d --build postgres nats valkey
-./kuber build core web tools >/dev/null
+./kuber build migrate core web tools >/dev/null
 until ./kuber exec -T postgres pg_isready -U kuber -d kuber >/dev/null 2>&1; do sleep 1; done
 
 echo "4/7 encrypt everything written before encryption existed"
@@ -36,7 +36,8 @@ echo "5/7 purge plaintext messages from the broker (events live in PostgreSQL)"
 echo "6/7 verify: link chains, digests, no plaintext left"
 ./kuber run --rm tools verify
 
-echo "7/7 start core and web"
+echo "7/7 apply migrations (one-shot migrate service), then start core and web"
+./kuber up --exit-code-from migrate migrate || { echo "migrate failed"; ./kuber logs --tail 80 migrate; exit 1; }
 ./kuber up -d core web
 ./scripts/backup.sh
 ./kuber ps

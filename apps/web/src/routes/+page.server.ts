@@ -9,7 +9,8 @@ export const load: PageServerLoad = async ({ locals }) => {
   const a = api(s);
   const [position, pending, copilot] = await Promise.all([
     a.plan(s.book!, "dashboard", {}).catch(() => null),
-    a.plans(s.book!).catch(() => []),
+    // null = could not load (shown as unavailable), not "no plans waiting" (F15).
+    a.plans(s.book!).catch(() => null),
     a.copilotInfo().catch(() => ({ engine: "rules", suggestions: [] as string[] })),
   ]);
   return { position, pending, copilot };

@@ -13,7 +13,7 @@
     "test:integration": "KUBER_INTEGRATION=1 vitest run tests/integration",
     "dev": "tsx watch apps/core/src/main.ts",
     "start": "tsx apps/core/src/main.ts",
-    "migrate": "tsx packages/eventstore/src/migrate-cli.ts",
+    "migrate": "tsx apps/core/src/migrate-cli.ts",
     "demo": "tsx apps/core/src/demo.ts",
     "keys": "tsx apps/core/src/keys-cli.ts",
     "identity": "tsx apps/core/src/identity-cli.ts",

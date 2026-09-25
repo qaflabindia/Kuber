@@ -15,22 +15,27 @@ import { AGENT_MIGRATIONS, Agent, type LlmClassifier } from "@kuber/agent";
 import { REPORTING_MIGRATIONS, Reporting } from "@kuber/reporting";
 import { Incidents, OPS_MIGRATIONS, Operations } from "@kuber/ops";
 import { EVIDENCE_MIGRATIONS, EvidenceService } from "@kuber/evidence";
-import { IDENTITY_MIGRATIONS, Identity, type IdentityOptions } from "@kuber/identity";
+import { IDENTITY_MIGRATIONS, IDENTITY_SEAL_MIGRATION, Identity, type IdentityOptions } from "@kuber/identity";
 import { sealIdentityColumns } from "./keys-admin.ts";
 
 export interface CellOptions {
   /** Application connection: must be a role without SUPERUSER or BYPASSRLS, or tenant isolation does not apply. */
   databaseUrl: string;
-  /** Owner connection used only for migrations and grants. Defaults to databaseUrl (development only). */
+  /**
+   * Owner connection, used only to apply migrations and grants before starting (tests, operator
+   * tools). Absent in the deployed core (F14): migrations run in the one-shot migrate step
+   * (`pnpm migrate`, the `migrate` Compose service) and the core, with its own role, only checks
+   * that every migration is applied, refusing to start otherwise.
+   */
   migrationUrl?: string;
-  /** Application role name to grant privileges to after migrating. */
+  /** Application role name to grant privileges to after migrating (with migrationUrl). */
   appRole?: string;
   /**
    * System connection (outbox relay, catch-up reads): a role in kuber_system_scope that sees every
    * tenant. Tenant requests never use it. Defaults to the owner connection (development only).
    */
   systemDatabaseUrl?: string;
-  /** System login role to create or update while migrating, and grant system scope to. */
+  /** System login role to create or update while migrating, and grant system scope to (with migrationUrl). */
   systemRole?: { name: string; password?: string };
   cellId?: string;
   bus?: "memory" | { natsUrl: string; caFile?: string; retentionDays?: number; token?: string; maxDeliver?: number };
@@ -52,6 +57,27 @@ export interface CellOptions {
 const SCHEMAS = ["es", "agent", "reporting", "ops", "keys", "evidence", "channels", "identity", "mdm"];
 const ident = (role: string) => { if (!/^[a-z_][a-z0-9_]*$/.test(role)) throw new Error(`invalid role name ${role}`); return role; };
 
+/** Every SQL migration of the cell, in order. */
+export const CELL_MIGRATIONS = [...EVENTSTORE_MIGRATIONS, ...LIFECYCLE_MIGRATIONS, ...AGENT_MIGRATIONS, ...REPORTING_MIGRATIONS, ...OPS_MIGRATIONS, ...EVIDENCE_MIGRATIONS, ...CHANNELS_MIGRATIONS, ...IDENTITY_MIGRATIONS, ...PARTY_MIGRATIONS];
+
+/** Migration ids a started cell requires: the SQL migrations and the data migrations run after them. */
+export const requiredMigrationIds = (): string[] => [...CELL_MIGRATIONS.map((m) => m.id), IDENTITY_SEAL_MIGRATION];
+
+/**
+ * Check, with the runtime role, that every migration is applied (F14: the core holds no owner
+ * credentials and cannot migrate). Throws with the pending ids and how to apply them.
+ */
+export async function assertMigrated(sql: Sql): Promise<void> {
+  const [t] = await sql<{ exists: boolean }[]>`SELECT to_regclass('public.schema_migrations') IS NOT NULL AS exists`;
+  const done = t?.exists ? new Set((await sql<{ id: string }[]>`SELECT id FROM public.schema_migrations`).map((r) => r.id)) : new Set<string>();
+  const pending = requiredMigrationIds().filter((id) => !done.has(id));
+  if (pending.length) {
+    throw new Error(`database migrations are pending (${pending.length}: ${pending.slice(0, 5).join(", ")}${pending.length > 5 ? ", ..." : ""}); `
+      + "this process has no migration credentials: run the migrate step as the owner first "
+      + "(`./kuber up migrate`, or MIGRATION_URL=<owner url> pnpm migrate), or pass migrationUrl");
+  }
+}
+
 /**
  * Apply every module's migrations as the owner, then grant the application role its privileges
  * and, if given, create or update the system role and grant it system scope.
@@ -59,7 +85,7 @@ const ident = (role: string) => { if (!/^[a-z_][a-z0-9_]*$/.test(role)) throw ne
 export async function migrateCell(ownerUrl: string, appRole?: string, systemRole?: CellOptions["systemRole"]) {
   const owner = postgres(ownerUrl, { max: 1, onnotice: () => undefined });
   try {
-    await migrate(owner, [...EVENTSTORE_MIGRATIONS, ...LIFECYCLE_MIGRATIONS, ...AGENT_MIGRATIONS, ...REPORTING_MIGRATIONS, ...OPS_MIGRATIONS, ...EVIDENCE_MIGRATIONS, ...CHANNELS_MIGRATIONS, ...IDENTITY_MIGRATIONS, ...PARTY_MIGRATIONS]);
+    await migrate(owner, CELL_MIGRATIONS);
     if (appRole) {
       await owner.unsafe(appGrants(ident(appRole), SCHEMAS));
       await owner.unsafe(channelsGrants(ident(appRole)));
@@ -81,6 +107,12 @@ export async function migrateCell(ownerUrl: string, appRole?: string, systemRole
   } finally { await owner.end(); }
 }
 
+/** Data migrations that need keys, run as the owner after the SQL migrations. */
+export async function sealWithOwner(ownerUrl: string, keyring: Keyring): Promise<void> {
+  const owner = postgres(ownerUrl, { max: 1, onnotice: () => undefined });
+  try { await sealIdentityColumns(owner, keyring); } finally { await owner.end(); }
+}
+
 export class Cell {
   /** Module handlers by consumer name (plaintext envelopes), for dead-letter retry. */
   consumers: Record<string, (e: Envelope) => Promise<void>> = {};
@@ -100,20 +132,22 @@ export class Cell {
 
   static async start(o: CellOptions): Promise<Cell> {
     const cellId = o.cellId ?? "local";
-    const ownerUrl = o.migrationUrl ?? o.databaseUrl;
-    await migrateCell(ownerUrl, o.appRole, o.systemRole);
+    if (o.migrationUrl) await migrateCell(o.migrationUrl, o.appRole, o.systemRole);
+    else if (o.systemRole) console.warn("WARNING: systemRole is ignored without migrationUrl; the migrate step creates the system role");
     const sql = postgres(o.databaseUrl, { max: o.poolSize ?? 10, onnotice: () => undefined });
     const [r] = await sql<{ bypass: boolean; system: boolean }[]>`
       SELECT (rolsuper OR rolbypassrls) AS bypass, pg_has_role(current_user, ${SYSTEM_SCOPE_ROLE}, 'MEMBER') AS system
       FROM pg_roles WHERE rolname = current_user`;
     if (r?.bypass) console.warn("WARNING: the application role bypasses row-level security; tenant isolation is not enforced by the database");
     else if (r?.system) { await sql.end(); throw new Error(`the application role is a member of ${SYSTEM_SCOPE_ROLE}: tenant requests could read every tenant`); }
-    if (!o.systemDatabaseUrl) console.warn("WARNING: no systemDatabaseUrl; system work (relay, catch-up reads) runs as the database owner");
-    const systemSql = postgres(o.systemDatabaseUrl ?? ownerUrl, { max: 3, onnotice: () => undefined });
+    if (!o.migrationUrl) {
+      try { await assertMigrated(sql); } catch (e) { await sql.end(); throw e; }
+    }
+    if (!o.systemDatabaseUrl) console.warn("WARNING: no systemDatabaseUrl; system work (relay, catch-up reads) runs as the owner or application connection");
+    const systemSql = postgres(o.systemDatabaseUrl ?? o.migrationUrl ?? o.databaseUrl, { max: 3, onnotice: () => undefined });
     const keyring = new Keyring(sql, o.kms);
     // Data migrations that need keys: seal identity display names stored before they were encrypted.
-    const owner = postgres(ownerUrl, { max: 1, onnotice: () => undefined });
-    try { await sealIdentityColumns(owner, keyring); } finally { await owner.end(); }
+    if (o.migrationUrl) await sealWithOwner(o.migrationUrl, keyring);
     const store = new EventStore(sql, cellId, { keyring, legacy: o.legacy ?? "reject" }, systemSql);
     const partitions = o.busPartitions ?? busPartitions();
     // Exhausted deliveries (on any lane) are recorded in es.dead_letters under the module's name (see `ops dead-letters`).

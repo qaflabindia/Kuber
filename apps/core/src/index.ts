@@ -1,4 +1,4 @@
-export { Cell, type CellOptions } from "./cell.ts";
+export { Cell, CELL_MIGRATIONS, assertMigrated, migrateCell, requiredMigrationIds, sealWithOwner, type CellOptions } from "./cell.ts";
 export { buildServer } from "./server.ts";
 export { Copilot, type CopilotReply } from "./copilot/index.ts";
 export { route, amountIn, dateIn } from "./copilot/router.ts";

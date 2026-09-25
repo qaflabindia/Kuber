@@ -3,19 +3,14 @@
   import { page } from "$app/state";
   import { goto } from "$app/navigation";
   import Icon from "$lib/components/Icon.svelte";
+  import { integrityLabel, waitingRail } from "$lib/shell";
 
   let { data, children } = $props();
 
   // No menu: the rail lists only what is waiting for the person, and disappears when nothing is.
-  const waiting = $derived.by(() => {
-    const sh = data.shell;
-    if (!sh) return [];
-    const items: { href: string; label: string; icon: string; count: number; tone: string }[] = [];
-    if (sh.pendingPlans) items.push({ href: "/", label: sh.pendingPlans === 1 ? "Plan to approve" : "Plans to approve", icon: "confirm", count: sh.pendingPlans, tone: "brass" });
-    if (sh.reviewCount) items.push({ href: "/review", label: "Entries to review", icon: "review", count: sh.reviewCount, tone: sh.awaitingApproval ? "clay" : "brass" });
-    if (sh.confirmCount) items.push({ href: "/confirm", label: "Postings to confirm", icon: "confirm", count: sh.confirmCount, tone: "brass" });
-    return items;
-  });
+  // When the counts could not be loaded it says so (F15), rather than showing an empty queue.
+  const rail = $derived(data.shell ? waitingRail(data.shell) : { state: "items" as const, items: [] });
+  const waiting = $derived(rail.state === "items" ? rail.items : []);
   const onCanvas = $derived(page.url.pathname === "/");
 
   const ROLE: Record<string, string> = { owner: "Owner", controller: "Controller", preparer: "Preparer", approver: "Approver", auditor: "Auditor", member: "Member" };
@@ -46,7 +41,17 @@
         <span class="kbd">⌘K</span>
       </button>
 
-      {#if waiting.length}
+      {#if rail.state === "unavailable"}
+        <div class="waiting" aria-label="Waiting for you">
+          <div class="wl">Waiting for you</div>
+          <div class="item unavailable" role="status"
+            title="Kuber could not load what is waiting for you. This is not an empty queue: reload, or check that the core is running.">
+            <Icon name="alert" size={16} />
+            <span>Counts unavailable</span>
+            <span class="count clay">?</span>
+          </div>
+        </div>
+      {:else if waiting.length}
         <div class="waiting" aria-label="Waiting for you">
           <div class="wl">Waiting for you</div>
           {#each waiting as item (item.href + item.label)}
@@ -60,9 +65,10 @@
       {/if}
 
       <div class="rail-foot">
-        <div class="integrity" class:ok={data.shell.intact} title="Every posted journal is chained with SHA-256; this is recomputed on each visit.">
+        <div class="integrity" class:ok={data.shell.intact === true} class:unknown={data.shell.intact === null}
+          title={data.shell.intact === null ? "The integrity check could not run on this visit; this does not mean the ledger is intact or broken." : "Every posted journal is chained with SHA-256; this is recomputed on each visit."}>
           <Icon name="shield" size={16} />
-          <span>{data.shell.intact ? "Ledger verified" : "Ledger check failed"}</span>
+          <span>{integrityLabel(data.shell.intact)}</span>
         </div>
       </div>
       <div class="who" aria-label="Your account" role="group">
@@ -125,6 +131,10 @@
   .rail-foot { margin-top: auto; display: grid; gap: 14px; }
   .integrity { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--clay); padding: 0 8px; }
   .integrity.ok { color: var(--sage); }
+  .integrity.unknown { color: var(--text-3); }
+  .waiting .item { display: flex; align-items: center; gap: 10px; height: 38px; padding: 0 12px; font-weight: 500; font-size: 13.5px; }
+  .waiting .item span:nth-child(2) { flex: 1; }
+  .waiting .unavailable { color: var(--clay); }
   .who { display: flex; align-items: center; gap: 10px; padding: 10px 8px 0; border-top: 1px solid var(--line-soft); }
   .avatar { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; background: var(--ink-3);
     color: var(--brass-2); font-family: var(--serif); font-size: 16px; border: 1px solid var(--line); }

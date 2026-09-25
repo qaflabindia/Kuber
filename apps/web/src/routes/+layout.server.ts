@@ -1,5 +1,6 @@
 import { redirect } from "@sveltejs/kit";
 import { api, members } from "$lib/server/api";
+import { shellState } from "$lib/shell";
 import type { LayoutServerLoad } from "./$types";
 
 /**
@@ -13,24 +14,12 @@ export const load: LayoutServerLoad = async ({ locals, url }) => {
   if (!s.book) return { session: s, shell: null };
 
   const a = api(s);
-  // Counts, not lists: the shell's cost does not grow with the queue (F11).
+  // Counts, not lists: the shell's cost does not grow with the queue (F11). A call that fails is
+  // "unavailable" (null), never zero: an unanswered control must not read as "nothing waiting" (F15).
   const [attention, journals, verify, me] = await Promise.all([
-    a.attention(s.book).catch(() => ({ drafts: 0, awaitingApproval: 0, ratifications: 0, plans: 0 })),
-    a.journals(s.book, 1).catch(() => []), a.verify(s.book).catch(() => ({ intact: false, firstBrokenJournal: null })),
+    a.attention(s.book).catch(() => null),
+    a.journals(s.book, 1).catch(() => null), a.verify(s.book).catch(() => null),
     members(s).me().catch(() => null),
   ]);
-  return {
-    session: s,
-    shell: {
-      reviewCount: attention.drafts,
-      awaitingApproval: attention.awaitingApproval,
-      confirmCount: attention.ratifications,
-      hasJournals: journals.length > 0,
-      intact: verify.intact,
-      pendingPlans: attention.plans,
-      // From the core's answer for this member (role changes show at once), not the session.
-      role: me?.role ?? s.role,
-      canSeeMembers: !!me?.permissions.includes("members.read"),
-    },
-  };
+  return { session: s, shell: shellState({ attention, journals, verify, me }, s.role) };
 };

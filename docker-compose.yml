@@ -61,18 +61,39 @@ services:
     ports: ["127.0.0.1:6379:6379"]
     volumes: ["${KUBER_HOME:?missing}/certs:/certs:ro"]
 
+  # One-shot migrate step (F14): the only service that runs with the owner credentials at start.
+  # Applies migrations and grants, creates the system role, seals legacy identity columns, exits.
+  migrate:
+    build: .
+    command: ["npx", "tsx", "apps/core/src/migrate-cli.ts"]
+    environment:
+      <<: *need
+      MIGRATION_URL: postgres://kuber:${PG_PASSWORD:?missing}@postgres:5432/kuber?sslmode=verify-full
+      APP_ROLE: kuber_app
+      SYSTEM_ROLE: kuber_system
+      SYSTEM_DB_PASSWORD: ${SYSTEM_DB_PASSWORD:?run ./scripts/secure-setup.sh to add it}
+      NODE_EXTRA_CA_CERTS: /certs/ca.crt
+      KUBER_REQUIRE_TLS: "true"
+      KUBER_MASTER_KEY_FILE: /run/kuber/master.keys
+      NODE_ENV: production
+    volumes:
+      - ${KUBER_HOME:?missing}/master.keys:/kuber/master.keys:ro
+      - ${KUBER_HOME:?missing}/certs:/certs:ro
+    tmpfs: ["/run/kuber:size=1m,mode=0700"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+
   core:
     build: .
+    # No owner credentials here (F14): the core connects as kuber_app and kuber_system, checks that
+    # the migrate step applied every migration, and refuses to start otherwise.
     environment: &core-env
       <<: *need
       DATABASE_URL: postgres://kuber_app:${APP_DB_PASSWORD:?missing}@postgres:5432/kuber?sslmode=verify-full
-      MIGRATION_URL: postgres://kuber:${PG_PASSWORD:?missing}@postgres:5432/kuber?sslmode=verify-full
-      APP_ROLE: kuber_app
       # System connection (outbox relay, catch-up reads): the only role that sees every tenant.
-      # The core creates it on start and sets this password.
+      # The migrate service creates it and sets its password.
       SYSTEM_DATABASE_URL: postgres://kuber_system:${SYSTEM_DB_PASSWORD:?run ./scripts/secure-setup.sh to add it}@postgres:5432/kuber?sslmode=verify-full
-      SYSTEM_ROLE: kuber_system
-      SYSTEM_DB_PASSWORD: ${SYSTEM_DB_PASSWORD:?missing}
       NATS_URL: tls://nats:4222
       NATS_TLS_CA: /certs/ca.crt
       NATS_TOKEN: ${NATS_TOKEN:?missing}
@@ -111,6 +132,7 @@ services:
     ports: ["127.0.0.1:8080:8080"]      # HTTPS; the browser talks only to web
     depends_on:
       postgres: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
       nats: { condition: service_started }
       valkey: { condition: service_started }
     restart: unless-stopped
@@ -138,6 +160,9 @@ services:
     user: "0:0"                                     # operator tool: reads and rewrites the mounted key file
     environment:
       <<: *core-env
+      # Operator tool: runs with the owner connection (not given to the core).
+      MIGRATION_URL: postgres://kuber:${PG_PASSWORD:?missing}@postgres:5432/kuber?sslmode=verify-full
+      APP_ROLE: kuber_app
       KUBER_MASTER_KEY_FILE: /kuber/master.keys
     volumes:
       - ${KUBER_HOME:?missing}:/kuber              # read-write: rotate-master rewrites master.keys

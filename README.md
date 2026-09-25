@@ -98,7 +98,7 @@ Everything in containers:
 
 ```bash
 ./scripts/secure-setup.sh                   # once: master key, certificates, passwords in ~/.kuber
-./kuber up -d --build                       # postgres, nats, valkey (TLS), core (HTTPS) on :8080, web on :3000
+./kuber up -d --build                       # postgres, nats, valkey (TLS), migrate (one-shot), core (HTTPS) on :8080, web on :3000
 curl --cacert ~/.kuber/certs/ca.crt https://localhost:8080/healthz
 ./kuber logs -f core
 ```
@@ -116,11 +116,11 @@ Database roles:
 
 | Role | Used by | Sees |
 | --- | --- | --- |
-| `kuber` (owner, `MIGRATION_URL`) | migrations, key tools | every tenant |
+| `kuber` (owner, `MIGRATION_URL`) | the one-shot `migrate` step, key and ops tools; never the core | every tenant |
 | `kuber_app` (`DATABASE_URL`) | API requests, event handlers | the tenant in `kuber.tenant` only |
 | `kuber_system` (`SYSTEM_DATABASE_URL`) | outbox relay, catch-up reads, storage checks | every tenant; no event or key updates |
 
-The core creates `kuber_system` on start with `SYSTEM_DB_PASSWORD`; `./kuber` and `./scripts/secure-setup.sh` add that password to an existing `secrets.env`.
+Migrations run before the core, not inside it (F14): the Compose `migrate` service (`pnpm migrate` outside Docker) applies every migration and grant as the owner, creates `kuber_system` with `SYSTEM_DB_PASSWORD`, seals legacy identity columns, and exits; `core` starts only after it completes successfully and receives no `MIGRATION_URL`. Without `MIGRATION_URL` the core only checks, as `kuber_app`, that every migration is applied, and refuses to start while any is pending. The runtime roles can read `public.schema_migrations` but not write it. `./kuber` and `./scripts/secure-setup.sh` add `SYSTEM_DB_PASSWORD` to an existing `secrets.env`.
 
 ## Data protection
 

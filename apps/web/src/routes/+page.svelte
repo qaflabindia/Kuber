@@ -20,7 +20,7 @@
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
   const first = $derived(data.session?.name?.split(" ")[0] ?? "");
   const inThread = $derived(new Set(thread.flatMap((x) => x.cards.map((c) => c.planId))));
-  const waiting = $derived(data.pending.filter((p) => !inThread.has(p.planId)));
+  const waiting = $derived((data.pending ?? []).filter((p) => !inThread.has(p.planId)));
   const history = $derived(JSON.stringify(thread.slice(0, 8).reverse().flatMap((x) => [{ role: "user", text: x.asked }, { role: "assistant", text: x.reply }])));
 
   const START = ["Show my position", "Are the books in order?", "Post the drafts", "What if rent goes up 15000 a month", "Close Oct 2026", "Income and expenses this year"];
@@ -81,7 +81,12 @@
   </section>
 {/each}
 
-{#if waiting.length}
+{#if data.pending === null}
+  <section class="block">
+    <h2>Waiting for your approval</h2>
+    <p class="unavailable" role="status">Plans waiting for approval could not be loaded. This is not an empty list: reload, or check that the core is running.</p>
+  </section>
+{:else if waiting.length}
   <section class="block">
     <h2>Waiting for your approval</h2>
     <div class="cards">{#each waiting as p (p.planId)}<PlanCard plan={p} compact />{/each}</div>
@@ -110,6 +115,7 @@
   .you .faint { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; margin-right: 8px; }
   .reply { margin: 0; font-family: var(--serif); font-size: 18px; color: var(--text-2); max-width: 75ch; }
   .reply.err { color: var(--clay); }
+  .unavailable { margin: 0; color: var(--clay); font-size: 14px; }
   .cards { display: grid; gap: 14px; }
   .block { margin-top: 32px; }
   .block h2 { font-size: 20px; margin: 0 0 12px; }
