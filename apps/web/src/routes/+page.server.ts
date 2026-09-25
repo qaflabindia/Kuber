@@ -33,12 +33,16 @@ export const actions: Actions = {
     const f = await request.formData();
     const id = String(f.get("planId") ?? ""), hash = String(f.get("hash") ?? "");
     const s = locals.session!;
+    let assertion: unknown;
+    try { assertion = f.get("assertion") ? JSON.parse(String(f.get("assertion"))) : undefined; }
+    catch { return fail(400, { planId: id, code: "bad_signature", message: "That passkey signature could not be read. Try again." }); }
     try {
-      // A recent passkey step-up, if any, travels with the commit; the core decides whether it is needed.
-      const r = await api({ ...s, stepUpAt: stepUpAt(cookies, s) }).commit(id, hash);
+      // The passkey signature over this plan, when it is a signed command (the core decides and verifies).
+      // A recent step-up also travels: the core accepts it only for development sign-in, labelled as such.
+      const r = await api({ ...s, stepUpAt: stepUpAt(cookies, s) }).commit(id, hash, assertion);
       return { planId: id, status: r.status === "committed" ? "committed" : "proposed", message: r.message ?? null };
     } catch (e) {
-      if (e instanceof ApiError && e.code === "step_up_required") return fail(403, { planId: id, ...problem(e, "Confirm with your passkey.") });
+      if (e instanceof ApiError && e.code === "step_up_required") return fail(403, { planId: id, ...problem(e, "Sign with your passkey.") });
       return fail(409, { planId: id, ...problem(e, "Could not post.") });
     }
   },

@@ -2,11 +2,12 @@
   import { enhance } from "$app/forms";
   import { invalidateAll } from "$app/navigation";
   import type { SubmitFunction } from "@sveltejs/kit";
-  import { confirmWithPasskey } from "$lib/stepup";
+  import { Signer } from "$lib/sign.svelte";
   import { date, inr } from "$lib/format";
   import type { Plan } from "$lib/server/api";
   import Icon from "./Icon.svelte";
   import DashboardView from "./DashboardView.svelte";
+  import SignPrompt from "./SignPrompt.svelte";
 
   let { plan, compact = false }: { plan: Plan; compact?: boolean } = $props();
 
@@ -16,8 +17,9 @@
   let message = $state<string | null>(null);
   let busy = $state(false);
   let commitForm = $state<HTMLFormElement>();
-  // A passkey confirmation lasts five minutes on the server; the card re-asks a little sooner.
-  let stepUpUntil = 0, retried = false;
+  // Signed commands: the passkey signature for the next submission, and whether this card already asked.
+  const signer = new Signer();
+  let assertion = "", proceed = false, retried = false;
   $effect.pre(() => { status = plan.status; });
   $effect.pre(() => { showDetail = !compact; });
 
@@ -52,25 +54,34 @@
   }; };
 
   /**
-   * Approving a period operation, or an amount above the approval limit, needs a fresh passkey
-   * confirmation. Period operations ask up front; for amounts the core says so, and the card asks
-   * once and posts again. Everything else posts exactly as before.
+   * Approving a period operation, or an amount above the approval limit, is a signed command
+   * (design 14.4/16.4): the card asks the core for the plan's signing options, shows what exactly
+   * will be signed (amount, payees, accounts, book: rendered by the core from the plan), and only
+   * then asks the passkey to sign. The signature is sent with the commit; the core verifies it and
+   * stores it with the approval. Period operations ask up front; for amounts the core says so, and
+   * the card asks once and posts again. Everything else posts exactly as before.
    */
-  const stepUp = async (): Promise<boolean> => {
-    busy = true; message = "Confirm with your passkey to approve this.";
-    const problem = await confirmWithPasskey();
-    busy = false; message = problem;
-    if (!problem) stepUpUntil = Date.now() + 4.5 * 60_000;
-    return !problem;
+  const sign = async (): Promise<boolean> => {
+    const r = await signer.sign({ action: "plan.commit", planId: plan.planId, hash: plan.hash });
+    message = signer.message;
+    if (r === null) return false;
+    assertion = r === "none" ? "" : r.assertion;
+    return true;
   };
-  const commitSubmit: SubmitFunction = async ({ cancel }) => {
-    if (plan.gate === "human" && Date.now() >= stepUpUntil && !(await stepUp())) { cancel(); return; }
+  const commitSubmit: SubmitFunction = async ({ cancel, formData }) => {
+    if (plan.gate === "human" && !assertion && !proceed) {
+      cancel();
+      if (await sign()) { proceed = true; commitForm?.requestSubmit(); }
+      return;
+    }
+    proceed = false;
+    if (assertion) { formData.set("assertion", assertion); assertion = ""; }
     const done = settle();
     return async (o) => {
       const d = (o.result.type === "failure" ? o.result.data : undefined) ?? {};
       if (d.code === "step_up_required" && !retried) {
         busy = false; retried = true;
-        if (await stepUp()) commitForm?.requestSubmit(); else retried = false;
+        if (await sign()) { proceed = true; commitForm?.requestSubmit(); } else retried = false;
         return;
       }
       retried = false;
@@ -163,13 +174,14 @@
         <form method="POST" action="/?/commit" use:enhance={commitSubmit} bind:this={commitForm}>
           <input type="hidden" name="planId" value={plan.planId} />
           <input type="hidden" name="hash" value={plan.hash} />
-          <button class="btn primary sm" disabled={busy || plan.blocked} title={plan.blocked ? "Resolve the blocking checks first" : plan.gate === "human" ? "Confirm with your passkey, then post exactly what is shown" : "Posts exactly what is shown"}>
+          <button class="btn primary sm" disabled={busy || signer.busy || !!signer.prompt || plan.blocked} title={plan.blocked ? "Resolve the blocking checks first" : plan.gate === "human" ? "Sign with your passkey, then post exactly what is shown" : "Posts exactly what is shown"}>
             <Icon name={plan.gate === "human" ? "shield" : "check"} size={14} /> {plan.op === "close" ? "Approve and close" : plan.op === "carry_forward" || (plan.op === "reconcile" && !plan.journals.length) ? "Sign off" : "Approve and post"}
           </button>
         </form>
       </div>
     {/if}
   </footer>
+  <SignPrompt {signer} />
   {#if plan.blocked && plan.kind === "write"}<p class="msg">Resolve the items marked above, then ask again. Nothing was saved.</p>{/if}
   {#if message}<p class="msg" role="status">{message}</p>{/if}
 </article>

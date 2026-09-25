@@ -3,6 +3,8 @@
   import { date, humanReason, inr, levelLabel, prettyNarration } from "$lib/format";
   import AccountSelect from "$lib/components/AccountSelect.svelte";
   import Icon from "$lib/components/Icon.svelte";
+  import SignPrompt from "$lib/components/SignPrompt.svelte";
+  import { Signer, signedSubmit } from "$lib/sign.svelte";
 
   let { data, form } = $props();
 
@@ -30,6 +32,10 @@
   }
   const pct = (c: number) => `${Math.round(c * 100)}% sure`;
   const act = (id: string) => () => { busy = id; return async ({ update }: { update: () => Promise<void> }) => { busy = null; rejecting = null; await update(); }; };
+  // Approving above the approval limit is signed with a passkey, after the summary of exactly what it posts is shown.
+  const signer = new Signer();
+  const approveSubmit = (id: string) => signedSubmit(signer, (f) => ({ action: "draft.approve", draftId: id, accountId: String(f.get("accountId") ?? "") || undefined }),
+    () => { busy = id; }, async ({ update }) => { busy = null; rejecting = null; await update(); });
 </script>
 
 <svelte:window onkeydown={onKey} />
@@ -92,7 +98,7 @@
       </div>
 
       <div class="controls">
-        <form method="POST" action="?/approve" class="approve" use:enhance={act(d.draft_id)}>
+        <form method="POST" action="?/approve" class="approve" use:enhance={approveSubmit(d.draft_id)}>
           <input type="hidden" name="id" value={d.draft_id} />
           <div class="field grow">
             <label for="acc-{d.draft_id}">Record as</label>
@@ -113,6 +119,8 @@
           <button class="btn quiet" onclick={() => (rejecting = d.draft_id)}>Not a transaction</button>
         {/if}
       </div>
+      {#if busy === d.draft_id}<SignPrompt {signer} />{/if}
+      {#if busy === d.draft_id && signer.message}<p class="error small" role="status">{signer.message}</p>{/if}
       {#if form?.id === d.draft_id && form?.message}<p class="error small" role="alert">{form.message}</p>{/if}
     </article>
   {/each}

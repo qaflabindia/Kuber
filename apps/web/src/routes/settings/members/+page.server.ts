@@ -17,7 +17,8 @@ export const load: PageServerLoad = async ({ locals }) => {
   if (!me.permissions.includes("members.read")) throw error(403, "Your role does not include seeing the workspace's members.");
   const [list, credentials, separation, books] = await Promise.all([m.list(), m.credentials(), m.separation(), api(s).books().catch(() => [])]);
   return {
-    me: { principal: me.principal, role: me.role },
+    // Design 16.4: an owner or controller with one passkey is told to register a second.
+    me: { principal: me.principal, role: me.role, passkeys: me.passkeys ?? 0, warnings: me.warnings ?? [] },
     canManage: me.permissions.includes("members.manage"),
     canSettings: me.permissions.includes("settings.manage"),
     roles: [...ROLES],
@@ -92,11 +93,11 @@ export const actions: Actions = {
 
   separation: async ({ request, locals }) => {
     const f = await request.formData();
-    const soloOwner = f.get("soloOwner") === "on";
+    const soloOwner = f.get("soloOwner") === "on", requireTwoAuthenticators = f.get("requireTwoAuthenticators") === "on";
     const sodLimitPaise = paiseOf(String(f.get("sodLimit") ?? ""));
     if (sodLimitPaise === undefined) return fail(400, { action: "separation", message: "Enter the limit in rupees, e.g. 50,000, or leave it empty." });
     try {
-      await members(locals.session!).setSeparation({ soloOwner, sodLimitPaise });
+      await members(locals.session!).setSeparation({ soloOwner, sodLimitPaise, requireTwoAuthenticators });
       return { ok: true, action: "separation", message: "Separation settings saved." };
     } catch (e) { return problem("separation", e); }
   },

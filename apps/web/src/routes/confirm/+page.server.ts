@@ -1,5 +1,5 @@
 import { fail } from "@sveltejs/kit";
-import { api } from "$lib/server/api";
+import { api, ApiError } from "$lib/server/api";
 import type { Actions, PageServerLoad } from "./$types";
 
 export const load: PageServerLoad = async ({ locals }) => {
@@ -22,9 +22,14 @@ export const load: PageServerLoad = async ({ locals }) => {
 
 export const actions: Actions = {
   ratify: async ({ request, locals }) => {
-    const id = String((await request.formData()).get("journalId") ?? "");
-    try { await api(locals.session!).ratify(id); return { id, done: "ratified" }; }
-    catch (e) { return fail(409, { id, message: e instanceof Error ? e.message : "Could not confirm." }); }
+    const f = await request.formData();
+    const id = String(f.get("journalId") ?? "");
+    // Above the approval limit, confirming is a signed command: the passkey signature travels with it.
+    let assertion: unknown;
+    try { assertion = f.get("assertion") ? JSON.parse(String(f.get("assertion"))) : undefined; }
+    catch { return fail(400, { id, code: "bad_signature", message: "That passkey signature could not be read. Try again." }); }
+    try { await api(locals.session!).ratify(id, assertion); return { id, done: "ratified" }; }
+    catch (e) { return fail(e instanceof ApiError && e.code === "step_up_required" ? 403 : 409, { id, code: e instanceof ApiError ? e.code : "error", message: e instanceof Error ? e.message : "Could not confirm." }); }
   },
   correct: async ({ request, locals }) => {
     const f = await request.formData();
