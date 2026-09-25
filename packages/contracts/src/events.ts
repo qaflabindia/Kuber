@@ -132,7 +132,9 @@ export function bookConfigOf(d: { entityId: string; entityType: string; basis: s
 // ------------------------------------------------------------------ GL events
 export const GL = {
   BookOpened: z.object({
-    bookId: Id, entityId: Id, entityType: z.string(), basis: z.enum(["statutory", "management", "tax", "budget", "scenario"]),
+    bookId: Id, entityId: Id, entityType: z.string(),
+    /** "consolidation": a group's consolidation book (FIN-GRP-03), holding only eliminations; never statutory. */
+    basis: z.enum(["statutory", "management", "tax", "budget", "scenario", "consolidation"]),
     currency: z.literal("INR"), accounts: z.array(Account),
     // FIN-MDM-01 book configuration. Optional: books opened before these existed replay with the
     // defaults in BOOK_DEFAULTS (legal entity = entityId, INR/2, April fiscal year, framework
@@ -316,6 +318,67 @@ export const OPS = {
     dueOn: IsoDate, reason: z.string() }),
 } as const;
 
+// ------------------------------------------------------------------ Consolidation events (FIN-GRP-01..04)
+/**
+ * Group of companies (design 6.4 group tenancy, 6.5 "Groups of companies"). Stream `<tenant>/group/<groupId>`
+ * holds the group register: structure, chart mapping, effective-dated ownership and intercompany party
+ * links. Every change except GroupDefined arrives through an approved ops plan on the group's
+ * consolidation book (`planId`). Amounts are paise; percentages are basis points (10000 = 100%).
+ */
+const Bp = z.number().int().min(0).max(10000);
+const PaiseStr = MinorString;
+export const GroupEntity = z.object({
+  entityId: Id, name: z.string().min(1).max(200),
+  /** The entity's book in this tenant, or null for a linked tenant or an entity kept outside Kuber. */
+  bookId: Id.nullable(),
+  /** Linked tenant publishing this entity's certified packs (design 6.4, structure 2), or null. */
+  linkedTenant: Id.nullable(),
+  /** Declared functional currency. A book's own configuration wins; non-INR entities are excluded, never translated. */
+  functionalCurrency: z.string().regex(/^[A-Z]{3}$/),
+});
+export const Acquisition = z.object({
+  date: IsoDate, costPaise: PaiseStr,
+  /** The investor's account holding the investment (its entity chart). */
+  investmentAccount: Id,
+  /** The investee's equity at acquisition, per account of the investee's chart (paise, credit positive). */
+  equity: z.array(z.object({ accountId: Id, amountPaise: PaiseStr })).min(1),
+});
+export const CONSOLIDATION = {
+  GroupDefined: z.object({ groupId: Id, name: z.string().min(1).max(200), bookId: Id, parentEntityId: Id }),
+  /** The group's entities (the whole list, replacing the previous one). */
+  GroupEntitiesSet: z.object({ groupId: Id, entities: z.array(GroupEntity), planId: Id }),
+  /** Group chart mapping: an entity account to a group account, overriding the default (the account's statement mapping). */
+  GroupMappingSet: z.object({ groupId: Id, entityId: Id, accountId: Id, groupAccount: Id, groupAccountName: z.string().min(1).max(200), planId: Id }),
+  /** Effective-dated ownership (FIN-GRP-03). A later record for the same parent and child from a later date supersedes it from then. */
+  OwnershipRecorded: z.object({ groupId: Id, recordId: Id, parentEntityId: Id, childEntityId: Id, effectiveFrom: IsoDate,
+    ownershipBp: Bp, votingBp: Bp, control: z.enum(["control", "joint_control", "significant_influence", "none"]),
+    method: z.enum(["full", "equity", "excluded"]), exclusionReason: z.string().min(3).max(500).optional(),
+    acquisition: Acquisition.optional(),
+    /** Unrealised-profit margin on this pair's intra-group sales, basis points of the transfer price. */
+    marginBp: Bp.optional(), planId: Id }),
+  /** A party of `entityId`'s party master IS entity `counterpartyEntityId` (FIN-GRP-01). */
+  IcPartyLinked: z.object({ groupId: Id, entityId: Id, partyId: Id, counterpartyEntityId: Id, planId: Id }),
+  /** An intercompany difference put in dispute; stream `<tenant>/ic-dispute/<disputeId>`. */
+  IcDisputeOpened: z.object({ disputeId: Id, groupId: Id, itemKey: z.string().min(1).max(500), senderEntityId: Id, receiverEntityId: Id,
+    sentPaise: PaiseStr, receivedPaise: PaiseStr, classification: z.string(), reason: z.string().min(3).max(2000) }),
+  /** One side's approver records its position; resolution needs both sides to agree (bilateral). */
+  IcDisputePositionRecorded: z.object({ disputeId: Id, entityId: Id, agreedPaise: PaiseStr, note: z.string().min(3).max(2000) }),
+  IcDisputeResolved: z.object({ disputeId: Id, agreedPaise: PaiseStr, positions: z.array(z.object({ entityId: Id, principal: Principal })) }),
+  /** A consolidation run was committed (its journals are in the consolidation book); `supersedes`: runs it reversed. */
+  ConsolidationRunRecorded: z.object({ groupId: Id, runId: Id, periodEnd: IsoDate, version: z.number().int().positive(), inputHash: z.string().length(64),
+    journals: z.array(z.object({ journalId: Id, key: z.string(), contentHash: z.string().length(64) })), supersedes: z.array(Id), planId: Id }),
+  /** A certified group close (FIN-GRP-04); a correction is a new version linked to the previous one. */
+  GroupCloseCertified: z.object({ groupId: Id, snapshotId: Id, periodEnd: IsoDate, version: z.number().int().positive(), contentHash: z.string().length(64),
+    previousSnapshotId: Id.nullable(), runId: Id, planId: Id }),
+  /** Linked tenants (design 6.4): consent recorded in both tenants, stream `<tenant>/group-link/<linkId>`. */
+  GroupLinkRequested: z.object({ linkId: Id, role: z.enum(["group", "subsidiary"]), groupTenant: Id, subsidiaryTenant: Id, groupId: Id, entityId: Id }),
+  GroupLinkAccepted: z.object({ linkId: Id, role: z.enum(["group", "subsidiary"]) }),
+  GroupLinkRevoked: z.object({ linkId: Id, role: z.enum(["group", "subsidiary"]), reason: z.string().min(3).max(500) }),
+  /** A certified pack published over a link: recorded in the subsidiary's stream and, as received, in the group's. */
+  LinkedPackPublished: z.object({ linkId: Id, packId: Id, entityId: Id, periodEnd: IsoDate, packHash: z.string().length(64),
+    prevPackHash: z.string().length(64), role: z.enum(["group", "subsidiary"]) }),
+} as const;
+
 // ------------------------------------------------------------------ Evidence events
 export const EVIDENCE = {
   /**
@@ -383,12 +446,12 @@ export const IDENTITY = {
   AutonomyResumed: z.object({ bookId: z.string().nullable(), reason: z.string() }),
 } as const;
 
-export const ALL_EVENTS = { ...GL, ...PARTY, ...CHANNELS, ...AGENT, ...OPS, ...EVIDENCE, ...IDENTITY } as const;
+export const ALL_EVENTS = { ...GL, ...PARTY, ...CHANNELS, ...AGENT, ...OPS, ...EVIDENCE, ...IDENTITY, ...CONSOLIDATION } as const;
 export type EventType = keyof typeof ALL_EVENTS;
 export type EventData<T extends EventType> = z.infer<(typeof ALL_EVENTS)[T]>;
 
 /** Which module owns (may append) each event type. Enforced by the event store. */
-export type Module = "gl" | "channels" | "agent" | "ops" | "evidence" | "identity";
+export type Module = "gl" | "channels" | "agent" | "ops" | "evidence" | "identity" | "consolidation";
 export const OWNER: Record<EventType, Module> = Object.fromEntries([
   ...Object.keys(GL).map((k) => [k, "gl"]),
   ...Object.keys(PARTY).map((k) => [k, "gl"]),                  // the GL owns master data (chart and parties)
@@ -397,6 +460,7 @@ export const OWNER: Record<EventType, Module> = Object.fromEntries([
   ...Object.keys(OPS).map((k) => [k, "ops"]),
   ...Object.keys(EVIDENCE).map((k) => [k, "evidence"]),
   ...Object.keys(IDENTITY).map((k) => [k, "identity"]),
+  ...Object.keys(CONSOLIDATION).map((k) => [k, "consolidation"]),
 ]) as Record<EventType, Module>;
 
 export const SCHEMA_VERSION = 1;

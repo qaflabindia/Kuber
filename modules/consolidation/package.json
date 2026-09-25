@@ -1,0 +1,19 @@
+{
+  "name": "@kuber/consolidation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@kuber/contracts": "workspace:*",
+    "@kuber/crypto": "workspace:*",
+    "@kuber/eventstore": "workspace:*",
+    "@kuber/gl": "workspace:*",
+    "@kuber/ops": "workspace:*",
+    "@kuber/reporting": "workspace:*",
+    "postgres": "^3.4.7",
+    "zod": "^4.1.0"
+  }
+}

@@ -38,6 +38,7 @@
     "@kuber/auth": "workspace:*",
     "@kuber/bus": "workspace:*",
     "@kuber/channels": "workspace:*",
+    "@kuber/consolidation": "workspace:*",
     "@kuber/contracts": "workspace:*",
     "@kuber/core": "workspace:*",
     "@kuber/eventstore": "workspace:*",

@@ -15,7 +15,10 @@ import type { Reporting } from "@kuber/reporting";
 
 export type OpName = "record" | "post" | "balance" | "reconcile" | "allocate" | "rebalance" | "report" | "close" | "carry_forward" | "simulate" | "dashboard"
   // finance requirements: recurring and recognition schedules (FIN-GL-02/03), suspense resolution (FIN-GL-05)
-  | "schedule_approve" | "schedule_cancel" | "schedules" | "resolve_suspense" | "suspense";
+  | "schedule_approve" | "schedule_cancel" | "schedules" | "resolve_suspense" | "suspense"
+  // group consolidation (FIN-GRP-01..04, modules/consolidation), registered by the cell with Operations.register
+  | "group_structure" | "group_ownership" | "group_ic_link" | "consolidate" | "certify_group" | "ic_adjust"
+  | "group_trial_balance" | "group_pnl" | "group_balance_sheet" | "ic_mismatches" | "nci" | "group_perimeter";
 
 export interface Services { gl: GeneralLedger; reporting: Reporting; agent: Agent; policies: PolicyEngine;
   /** Party master payment holds (FIN-MDM-03). Without it, no party is treated as held. */
@@ -30,6 +33,8 @@ export interface OpContext {
   svc: Services;
   /** Schedules of this workspace (set by the Operations service; schedule operations need it). */
   schedules?: import("./schedules.ts").Schedules;
+  /** When an agent (the copilot) prepares the plan for a person: that person (their scope decides what they may see). */
+  onBehalfOf?: string;
 }
 
 export type Action =
@@ -41,7 +46,17 @@ export type Action =
   | { type: "cancelSchedule"; scheduleId: string; effective: string; recognized: string; released: string; remaining: string }
   /** FIN-GL-05: record the item's resolution, linking original, reversal and replacement. */
   | { type: "resolveSuspenseItem"; itemId: string; bookId: string; reversalJournalId: string; replacementJournalId: string | null;
-      toAccount: string | null; resolvedOn: string; note?: string };
+      toAccount: string | null; resolvedOn: string; note?: string }
+  /**
+   * An action owned by another module (e.g. the consolidation register): run by the handler that
+   * module registered (Operations.registerExtension), in the commit's transaction, after the plan's
+   * approval is recorded. It must write only through `tx`, so it commits or rolls back with the plan.
+   */
+  | { type: "ext"; module: string; kind: string; payload: unknown };
+
+/** Runs one `ext` action inside a commit; returns the step description. */
+export type ExtensionHandler = (tx: import("postgres").TransactionSql, ctx: { tenant: string; book: string; principal: string; approvedBy: string | null; planId: string },
+  action: Extract<Action, { type: "ext" }>) => Promise<string>;
 
 export interface Check { label: string; ok: boolean; blocking: boolean; detail?: string }
 export interface PlanLine { accountId: string; name: string; amount: string; dimensions?: Record<string, string> }
