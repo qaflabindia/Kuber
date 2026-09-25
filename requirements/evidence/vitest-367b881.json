@@ -1,0 +1,3235 @@
+{
+ "commit": "367b8814ea3ff8e336806f22789567645cb33548",
+ "dirty": false,
+ "ranAt": "2026-09-25T00:57:56.363Z",
+ "command": "npx vitest run --config vitest.config.ts --no-file-parallelism --reporter=default --reporter=json --outputFile=/tmp/register-V4xHxh/vitest.json tests/authz-hardening.test.ts tests/bus-consumers.test.ts tests/encryption.test.ts tests/fin-gl.test.ts tests/fin-mdm.test.ts tests/fin-ops.test.ts tests/identity.test.ts tests/ingestion.test.ts tests/isolation.test.ts tests/ledger-correctness.test.ts tests/ops-lifecycle.test.ts tests/scale.test.ts tests/verify-checkpoints.test.ts",
+ "summary": {
+  "passed": 400,
+  "failed": 0,
+  "skipped": 2
+ },
+ "results": [
+  {
+   "file": "tests/authz-hardening.test.ts",
+   "ancestors": [
+    "authorization at module boundaries (in-process callers)"
+   ],
+   "title": "channels refuse submissions from non-members, read-only roles and out-of-scope members",
+   "status": "passed"
+  },
+  {
+   "file": "tests/authz-hardening.test.ts",
+   "ancestors": [
+    "authorization at module boundaries (in-process callers)"
+   ],
+   "title": "people with capture, agents in their book and system adapters may still submit",
+   "status": "passed"
+  },
+  {
+   "file": "tests/authz-hardening.test.ts",
+   "ancestors": [
+    "authorization at module boundaries (in-process callers)"
+   ],
+   "title": "agent decisions refuse principals without the role or book, whoever calls",
+   "status": "passed"
+  },
+  {
+   "file": "tests/authz-hardening.test.ts",
+   "ancestors": [
+    "authorization at module boundaries (in-process callers)"
+   ],
+   "title": "a committed ops plan authorizes its own draft approvals (the ops guard decided)",
+   "status": "passed"
+  },
+  {
+   "file": "tests/authz-hardening.test.ts",
+   "ancestors": [
+    "authorization at module boundaries (in-process callers)"
+   ],
+   "title": "ops plan and commit refuse non-members and system principals in-process",
+   "status": "passed"
+  },
+  {
+   "file": "tests/authz-hardening.test.ts",
+   "ancestors": [
+    "authorization at module boundaries (in-process callers)"
+   ],
+   "title": "modules built without a guard refuse everything",
+   "status": "passed"
+  },
+  {
+   "file": "tests/authz-hardening.test.ts",
+   "ancestors": [
+    "identity changes are sealed events in the tenant's identity stream"
+   ],
+   "title": "records members, scope changes, invitations, settings and removals with their actor",
+   "status": "passed"
+  },
+  {
+   "file": "tests/authz-hardening.test.ts",
+   "ancestors": [
+    "identity changes are sealed events in the tenant's identity stream"
+   ],
+   "title": "a refused change leaves no event (same transaction)",
+   "status": "passed"
+  },
+  {
+   "file": "tests/authz-hardening.test.ts",
+   "ancestors": [
+    "identity changes are sealed events in the tenant's identity stream"
+   ],
+   "title": "agent grants and identity events alone do not make a workspace unclaimable",
+   "status": "passed"
+  },
+  {
+   "file": "tests/authz-hardening.test.ts",
+   "ancestors": [
+    "display names are sealed at rest"
+   ],
+   "title": "members and invitations store ciphertext; the API returns the name",
+   "status": "passed"
+  },
+  {
+   "file": "tests/authz-hardening.test.ts",
+   "ancestors": [
+    "display names are sealed at rest"
+   ],
+   "title": "the data migration seals plaintext names written before encryption, once",
+   "status": "passed"
+  },
+  {
+   "file": "tests/authz-hardening.test.ts",
+   "ancestors": [
+    "shared replay store (Valkey)"
+   ],
+   "title": "claims each nonce once across instances, with a TTL until the assertion expires",
+   "status": "passed"
+  },
+  {
+   "file": "tests/authz-hardening.test.ts",
+   "ancestors": [
+    "shared replay store (Valkey)"
+   ],
+   "title": "fails closed (503) when the store cannot answer",
+   "status": "passed"
+  },
+  {
+   "file": "tests/authz-hardening.test.ts",
+   "ancestors": [
+    "shared replay store (Valkey)"
+   ],
+   "title": "two core instances sharing the store refuse a request replayed to the other",
+   "status": "passed"
+  },
+  {
+   "file": "tests/authz-hardening.test.ts",
+   "ancestors": [
+    "shared replay store (Valkey)"
+   ],
+   "title": "selects Valkey from VALKEY_URL / REDIS_URL, else the in-process cache",
+   "status": "passed"
+  },
+  {
+   "file": "tests/authz-hardening.test.ts",
+   "ancestors": [
+    "shared replay store (Valkey)"
+   ],
+   "title": "the RESP codec round-trips commands and replies, including split packets",
+   "status": "passed"
+  },
+  {
+   "file": "tests/authz-hardening.test.ts",
+   "ancestors": [
+    "shared replay store (Valkey)"
+   ],
+   "title": "the client speaks RESP to a server: AUTH, pipelined SET NX PX, errors, reconnect",
+   "status": "passed"
+  },
+  {
+   "file": "tests/authz-hardening.test.ts",
+   "ancestors": [
+    "shared replay store (Valkey)"
+   ],
+   "title": "against a real Valkey/Redis server when one is installed",
+   "status": "passed"
+  },
+  {
+   "file": "tests/bus-consumers.test.ts",
+   "ancestors": [
+    "consumer selection (no NATS)"
+   ],
+   "title": "names the expected durables for the partition count",
+   "status": "passed"
+  },
+  {
+   "file": "tests/bus-consumers.test.ts",
+   "ancestors": [
+    "consumer selection (no NATS)"
+   ],
+   "title": "classifies expected, legacy, retired-lane and foreign consumers",
+   "status": "passed"
+  },
+  {
+   "file": "tests/bus-consumers.test.ts",
+   "ancestors": [
+    "consumer selection (no NATS)"
+   ],
+   "title": "prunes a stale consumer only when nothing it holds is unprocessed, or with force",
+   "status": "passed"
+  },
+  {
+   "file": "tests/bus-consumers.test.ts",
+   "ancestors": [
+    "OpsAdmin.busConsumers against es.inbox (fake broker)"
+   ],
+   "title": "checks pending event ids against the module's inbox and dead letters, and deletes only what the plan allows",
+   "status": "passed"
+  },
+  {
+   "file": "tests/bus-consumers.test.ts",
+   "ancestors": [
+    "ops bus-consumers over NATS JetStream"
+   ],
+   "title": "lists stale consumers with their backlog and prunes them once their messages are processed",
+   "status": "passed"
+  },
+  {
+   "file": "tests/encryption.test.ts",
+   "ancestors": [
+    "field encryption"
+   ],
+   "title": "round-trips any text and binds it to its context",
+   "status": "passed"
+  },
+  {
+   "file": "tests/encryption.test.ts",
+   "ancestors": [
+    "field encryption"
+   ],
+   "title": "detects any single-byte tamper and a wrong key",
+   "status": "passed"
+  },
+  {
+   "file": "tests/encryption.test.ts",
+   "ancestors": [
+    "field encryption"
+   ],
+   "title": "never produces the same ciphertext twice (fresh nonces)",
+   "status": "passed"
+  },
+  {
+   "file": "tests/encryption.test.ts",
+   "ancestors": [
+    "backup stream encryption"
+   ],
+   "title": "round-trips empty, small and multi-chunk files",
+   "status": "passed"
+  },
+  {
+   "file": "tests/encryption.test.ts",
+   "ancestors": [
+    "backup stream encryption"
+   ],
+   "title": "detects truncation, appended data and tampering",
+   "status": "passed"
+  },
+  {
+   "file": "tests/encryption.test.ts",
+   "ancestors": [
+    "master key file"
+   ],
+   "title": "is created 0600, refuses to be overwritten, and is refused when readable by others",
+   "status": "passed"
+  },
+  {
+   "file": "tests/encryption.test.ts",
+   "ancestors": [
+    "master key file"
+   ],
+   "title": "rotates: new wraps use the new key, old wraps still open until retired",
+   "status": "passed"
+  },
+  {
+   "file": "tests/encryption.test.ts",
+   "ancestors": [
+    "at rest"
+   ],
+   "title": "no merchant name, narration or rule appears anywhere in the database",
+   "status": "passed"
+  },
+  {
+   "file": "tests/encryption.test.ts",
+   "ancestors": [
+    "at rest"
+   ],
+   "title": "the application still reads everything back",
+   "status": "passed"
+  },
+  {
+   "file": "tests/encryption.test.ts",
+   "ancestors": [
+    "at rest"
+   ],
+   "title": "every event is sealed and the outbox carries only ciphertext",
+   "status": "passed"
+  },
+  {
+   "file": "tests/encryption.test.ts",
+   "ancestors": [
+    "at rest"
+   ],
+   "title": "parties are keyed pseudonyms, not guessable hashes of the name",
+   "status": "passed"
+  },
+  {
+   "file": "tests/encryption.test.ts",
+   "ancestors": [
+    "at rest"
+   ],
+   "title": "a ciphertext moved to another row does not open",
+   "status": "passed"
+  },
+  {
+   "file": "tests/encryption.test.ts",
+   "ancestors": [
+    "at rest"
+   ],
+   "title": "deleting or reordering stored events breaks the link chain, detectably without keys",
+   "status": "passed"
+  },
+  {
+   "file": "tests/encryption.test.ts",
+   "ancestors": [
+    "at rest"
+   ],
+   "title": "the application role cannot rewrite events, re-wrap keys or shred",
+   "status": "passed"
+  },
+  {
+   "file": "tests/encryption.test.ts",
+   "ancestors": [
+    "rotation"
+   ],
+   "title": "tenant key rotation re-encrypts everything and drops the old key",
+   "status": "passed"
+  },
+  {
+   "file": "tests/encryption.test.ts",
+   "ancestors": [
+    "rotation"
+   ],
+   "title": "master key rotation re-wraps tenant keys without touching data",
+   "status": "passed"
+  },
+  {
+   "file": "tests/encryption.test.ts",
+   "ancestors": [
+    "legacy plaintext and shredding"
+   ],
+   "title": "plaintext written before encryption is refused, then sealed by the migration",
+   "status": "passed"
+  },
+  {
+   "file": "tests/encryption.test.ts",
+   "ancestors": [
+    "legacy plaintext and shredding"
+   ],
+   "title": "crypto-shredding makes a tenant unreadable for good and purges its projections",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-01: journal lifecycle and posting controls"
+   ],
+   "title": "FIN-GL-01 maps agent draft and ops plan states onto draft/submitted/approved/posting/posted/failed",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-01: journal lifecycle and posting controls"
+   ],
+   "title": "FIN-GL-01 unbalanced, invalid-date, locked-period and incomplete-dimension journals have no effect and leave a visible failed state",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-01: journal lifecycle and posting controls"
+   ],
+   "title": "FIN-GL-01 a manual journal to a control account is refused unless it is a controlled adjustment by an owner or controller with the party",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-01: journal lifecycle and posting controls"
+   ],
+   "title": "FIN-GL-01 ops record to a control account is refused unless flagged as a controlled adjustment by an owner or controller",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-01: journal lifecycle and posting controls"
+   ],
+   "title": "FIN-GL-01 ops post refuses drafts to a control account unless flagged by an owner or controller, and drafts show lifecycle states",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-01: journal lifecycle and posting controls"
+   ],
+   "title": "FIN-GL-01 a plan whose commit is refused stays visible as failed with its reason",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-04: single currency (foreign currency deferred)"
+   ],
+   "title": "FIN-GL-04 the currency exponent and the INR-only assertion are explicit; a non-INR journal is refused with a clear error",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-02: recurring journals"
+   ],
+   "title": "FIN-GL-02 a schedule is approved once through an ops plan by someone other than its preparer",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-02: recurring journals"
+   ],
+   "title": "FIN-GL-02 a ₹12,000 monthly accrual posts once and reverses once, even when rerun or run concurrently",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-02: recurring journals"
+   ],
+   "title": "FIN-GL-02 an auto-reversal whose date falls in a locked period becomes an exception case; the date is not moved",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-02: recurring journals"
+   ],
+   "title": "FIN-GL-02 the approver's authority is re-checked on every run; revoking it stops execution",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-02: recurring journals"
+   ],
+   "title": "FIN-GL-02 schedules are created and listed through the core API and run by the ops runner (ops run-schedules)",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-03: prepaid and accrual recognition schedules"
+   ],
+   "title": "FIN-GL-03 straight-line monthly recognition splits exactly to the paisa",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-03: prepaid and accrual recognition schedules"
+   ],
+   "title": "FIN-GL-03 ₹120,000 over 12 months recognizes ₹10,000 per month and reconciles to the GL by period",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-03: prepaid and accrual recognition schedules"
+   ],
+   "title": "FIN-GL-03 a missed recognition shows as a reconciliation difference for its period",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-03: prepaid and accrual recognition schedules"
+   ],
+   "title": "FIN-GL-03 cancellation with approval recalculates the remaining balance",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-03: prepaid and accrual recognition schedules"
+   ],
+   "title": "FIN-GL-03 an accrual schedule builds up its liability straight-line",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-05: suspense"
+   ],
+   "title": "FIN-GL-05 suspense items are item-level cases with source, owner, age and resolution",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-05: suspense"
+   ],
+   "title": "FIN-GL-05 a balancing journal that clears suspense without resolving items is refused",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-05: suspense"
+   ],
+   "title": "FIN-GL-05 a correction links the original, reversal and replacement",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-05: suspense"
+   ],
+   "title": "FIN-GL-05 roll-forward: opening + additions − resolved = closing, and historic reports keep the original position",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-01/02 with the party master"
+   ],
+   "title": "FIN-GL-01 a control-account line naming a registered master party is a subledger posting; an unregistered party still needs a controlled adjustment",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-01/02 with the party master"
+   ],
+   "title": "FIN-GL-02 a scheduled payment to a party on hold waits, unclaimed, until the bank change is released",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-gl.test.ts",
+   "ancestors": [
+    "FIN-GL-01/02 with the party master"
+   ],
+   "title": "FIN-GL-05 the suspense roll-forward defaults to the book's fiscal year",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-mdm.test.ts",
+   "ancestors": [
+    "FIN-MDM-01 book and entity configuration"
+   ],
+   "title": "FIN-MDM-01 OpenBook records legal entity, framework, basis, functional currency, fiscal year start and purpose",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-mdm.test.ts",
+   "ancestors": [
+    "FIN-MDM-01 book and entity configuration"
+   ],
+   "title": "FIN-MDM-01 BookOpened events from before the configuration replay with defaults (individual → personal, April, unspecified)",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-mdm.test.ts",
+   "ancestors": [
+    "FIN-MDM-01 book and entity configuration"
+   ],
+   "title": "FIN-MDM-01 two entities cannot share a posting: a journal naming another entity's party is refused",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-mdm.test.ts",
+   "ancestors": [
+    "FIN-MDM-01 book and entity configuration"
+   ],
+   "title": "FIN-MDM-01 statutory actuals exclude simulation: simulate never posts and cannot be committed",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-mdm.test.ts",
+   "ancestors": [
+    "FIN-MDM-01 book and entity configuration"
+   ],
+   "title": "FIN-MDM-01 a budget book is a separate basis: its entries never reach the statutory book",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-mdm.test.ts",
+   "ancestors": [
+    "FIN-MDM-01 book and entity configuration"
+   ],
+   "title": "FIN-MDM-01 periods and locks respect the fiscal year: a January-start book closes and carries forward on 31 December",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-mdm.test.ts",
+   "ancestors": [
+    "FIN-MDM-02 chart of accounts controls"
+   ],
+   "title": "FIN-MDM-02 every account maps to a statement line; unmapped accounts are exceptions in the books-in-order check",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-mdm.test.ts",
+   "ancestors": [
+    "FIN-MDM-02 chart of accounts controls"
+   ],
+   "title": "FIN-MDM-02 mandatory dimensions per account: a line missing one (or with it blank) is refused",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-mdm.test.ts",
+   "ancestors": [
+    "FIN-MDM-02 chart of accounts controls"
+   ],
+   "title": "FIN-MDM-02 CloseAccount stops ordinary entries but still allows reversals and corrections of historical journals",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-mdm.test.ts",
+   "ancestors": [
+    "FIN-MDM-02 chart of accounts controls"
+   ],
+   "title": "FIN-MDM-02 reclassification preserves history: the original journal stays, reversed and reposted, and the chain verifies",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-mdm.test.ts",
+   "ancestors": [
+    "FIN-MDM-03 party master"
+   ],
+   "title": "FIN-MDM-03 identity, terms and tax status are effective-dated",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-mdm.test.ts",
+   "ancestors": [
+    "FIN-MDM-03 party master"
+   ],
+   "title": "FIN-MDM-03 creating, verifying and releasing a bank change are separate rights, and never the same person as the maker",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-mdm.test.ts",
+   "ancestors": [
+    "FIN-MDM-03 party master"
+   ],
+   "title": "FIN-MDM-03 an unverified bank change holds new and previously proposed payments; verification plus fresh approval releases them",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-mdm.test.ts",
+   "ancestors": [
+    "FIN-MDM-03 party master"
+   ],
+   "title": "FIN-MDM-03 drafts paying a party on hold cannot be approved, directly or through a post plan",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-mdm.test.ts",
+   "ancestors": [
+    "FIN-MDM-03 party master"
+   ],
+   "title": "FIN-MDM-03 a shared bank account on two parties raises a review item, not a merge",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-mdm.test.ts",
+   "ancestors": [
+    "FIN-MDM-03 party master"
+   ],
+   "title": "FIN-MDM-03 bank details are sealed at rest and the change is governed by POL-501",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-MDM-04 authority matrix"
+   ],
+   "title": "FIN-MDM-04: a maker cannot approve their own controlled action",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-MDM-04 authority matrix"
+   ],
+   "title": "FIN-MDM-04: an auditor cannot post",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-MDM-04 authority matrix"
+   ],
+   "title": "FIN-MDM-04: amount bands from POL-002 apply per action, book and role once the matrix is on",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-MDM-04 authority matrix"
+   ],
+   "title": "FIN-MDM-04: a delegation grants authority for its period, amount and books, never beyond the grantor's own",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-MDM-04 authority matrix"
+   ],
+   "title": "FIN-MDM-04: an expired delegate fails",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-MDM-04 authority matrix"
+   ],
+   "title": "FIN-MDM-04: wrong-book access fails",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-MDM-04 authority matrix"
+   ],
+   "title": "FIN-MDM-04: authority is checked again at execution, not only at approval",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-MDM-04 authority matrix"
+   ],
+   "title": "FIN-MDM-04: authority or delegation changes invalidate approved-but-uncommitted plans; they need re-approval",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-MDM-04 authority matrix"
+   ],
+   "title": "FIN-MDM-04: a related-party flag blocks that member from approving plans that pay that party",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-MDM-04 authority matrix"
+   ],
+   "title": "FIN-MDM-04: the explicit single-owner exception still applies",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-MDM-04 and FIN-OPS-03 with scheduled occurrences"
+   ],
+   "title": "FIN-MDM-04: a schedule approval follows approve-then-execute, and every occurrence re-checks the approver's authority",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-MDM-04 and FIN-OPS-03 with scheduled occurrences"
+   ],
+   "title": "FIN-OPS-03: the kill switch holds scheduled occurrences until a person resumes it",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-MDM-05 access and master change review"
+   ],
+   "title": "FIN-MDM-05: the review lists removed, dormant and role-changed members and unreviewed identity changes",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-MDM-05 access and master change review"
+   ],
+   "title": "FIN-MDM-05: each item gets a disposition, recorded as an event with reviewer, decision and note",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-MDM-05 access and master change review"
+   ],
+   "title": "FIN-MDM-05: a revoked user cannot execute a saved plan",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-OPS-03 autonomy kill switch"
+   ],
+   "title": "FIN-OPS-03: the kill switch immediately sends all autonomous posting to human review, recorded with actor and reason",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-OPS-03 autonomy kill switch"
+   ],
+   "title": "FIN-OPS-03: queued autonomous actions that have not executed are blocked and routed to review",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-OPS-03 autonomy kill switch"
+   ],
+   "title": "FIN-OPS-03: an agent cannot commit a plan while autonomy is halted; it waits for a person",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-OPS-03 autonomy kill switch"
+   ],
+   "title": "FIN-OPS-03: reversals and corrections of agent-posted journals are counted per period in ops status",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-OPS-02 financial incident register"
+   ],
+   "title": "FIN-OPS-02: an incident records tenant, books, periods, possible loss or duplication, owner, containment and corrections",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-OPS-02 financial incident register"
+   ],
+   "title": "FIN-OPS-02: closure requires a reconciliation reference and approval by someone other than the owner",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-OPS-01 restore drill"
+   ],
+   "title": "restore-drill.sh is valid shell and never publishes (memory bus, no relay)",
+   "status": "passed"
+  },
+  {
+   "file": "tests/fin-ops.test.ts",
+   "ancestors": [
+    "FIN-OPS-01 restore drill"
+   ],
+   "title": "FIN-OPS-01: compareCells finds a pg_dump restored into another database identical, then reports differences",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "service assertions (BFF → core)"
+   ],
+   "title": "accepts an intact assertion once, and binds method, path and exact body bytes",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "service assertions (BFF → core)"
+   ],
+   "title": "refuses unsigned, malformed, wrong-key, expired and future-dated assertions",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "service assertions (BFF → core)"
+   ],
+   "title": "checks issuer and audience inside the MAC",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "service assertions (BFF → core)"
+   ],
+   "title": "carries an optional step-up time inside the MAC, for a signed-in principal only",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may read: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may book.open: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may account.add: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may journal.post: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may period.lock: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may rules.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may capture: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may draft.decide: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may journal.ratify: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may plan.prepare: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may plan.approve: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may plan.approve.period: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may plan.discard: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may copilot: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may members.read: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may members.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may settings.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may access.review: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may conflicts.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may autonomy.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may incident.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may account.close: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may party.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may party.bank.verify: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "owner may party.bank.release: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may read: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may book.open: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may account.add: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may journal.post: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may period.lock: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may rules.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may capture: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may draft.decide: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may journal.ratify: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may plan.prepare: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may plan.approve: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may plan.approve.period: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may plan.discard: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may copilot: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may members.read: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may members.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may settings.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may access.review: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may conflicts.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may autonomy.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may incident.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may account.close: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may party.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may party.bank.verify: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "controller may party.bank.release: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may read: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may book.open: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may account.add: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may journal.post: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may period.lock: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may rules.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may capture: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may draft.decide: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may journal.ratify: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may plan.prepare: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may plan.approve: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may plan.approve.period: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may plan.discard: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may copilot: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may members.read: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may members.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may settings.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may access.review: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may conflicts.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may autonomy.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may incident.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may account.close: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may party.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may party.bank.verify: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "preparer may party.bank.release: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may read: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may book.open: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may account.add: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may journal.post: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may period.lock: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may rules.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may capture: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may draft.decide: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may journal.ratify: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may plan.prepare: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may plan.approve: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may plan.approve.period: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may plan.discard: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may copilot: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may members.read: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may members.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may settings.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may access.review: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may conflicts.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may autonomy.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may incident.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may account.close: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may party.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may party.bank.verify: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "approver may party.bank.release: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may read: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may book.open: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may account.add: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may journal.post: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may period.lock: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may rules.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may capture: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may draft.decide: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may journal.ratify: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may plan.prepare: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may plan.approve: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may plan.approve.period: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may plan.discard: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may copilot: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may members.read: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may members.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may settings.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may access.review: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may conflicts.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may autonomy.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may incident.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may account.close: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may party.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may party.bank.verify: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "auditor may party.bank.release: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may read: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may book.open: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may account.add: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may journal.post: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may period.lock: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may rules.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may capture: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may draft.decide: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may journal.ratify: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may plan.prepare: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may plan.approve: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may plan.approve.period: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may plan.discard: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may copilot: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may members.read: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may members.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may settings.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may access.review: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may conflicts.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may autonomy.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may incident.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may account.close: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may party.manage: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may party.bank.verify: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "member may party.bank.release: as specified",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "role permissions"
+   ],
+   "title": "denies unknown roles and agents everything",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F01: the core authenticates every request"
+   ],
+   "title": "A01 fixed: an unsigned caller claiming a principal cannot post",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F01: the core authenticates every request"
+   ],
+   "title": "refuses wrong secret, replay, altered body and cross-tenant assertions without side effects",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F01: the core authenticates every request"
+   ],
+   "title": "a server without the shared secret refuses everything but health",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F01: the core authenticates every request"
+   ],
+   "title": "a signed request for a non-member or a revoked member is refused",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F01: the core authenticates every request"
+   ],
+   "title": "a principal must match its membership role: the prefix is not a claim",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker"
+   ],
+   "title": "direct journal as owner → 201",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker"
+   ],
+   "title": "direct journal as controller → 201",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker"
+   ],
+   "title": "direct journal as preparer → 403",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker"
+   ],
+   "title": "direct journal as approver → 403",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker"
+   ],
+   "title": "direct journal as auditor → 403",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker"
+   ],
+   "title": "direct journal as member → 403",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker"
+   ],
+   "title": "owner can read reports",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker"
+   ],
+   "title": "controller can read reports",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker"
+   ],
+   "title": "preparer can read reports",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker"
+   ],
+   "title": "approver can read reports",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker"
+   ],
+   "title": "auditor can read reports",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker"
+   ],
+   "title": "member can read reports",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker"
+   ],
+   "title": "auditors are read-only: no plan, capture, lock, rule or member changes",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker"
+   ],
+   "title": "A10 fixed: an auditor member can neither prepare nor approve a write plan",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker"
+   ],
+   "title": "maker-checker: a period operation needs someone other than its preparer",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker"
+   ],
+   "title": "maker-checker: above the policy's amount limit the preparer cannot approve; below it they can",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker"
+   ],
+   "title": "the copilot prepares for the person who asked, so they cannot approve it themselves where separation applies",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker"
+   ],
+   "title": "the single-owner exception is explicit and lapses when a second person joins",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker"
+   ],
+   "title": "book scope: a member limited to one book cannot read, plan or commit in another",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker"
+   ],
+   "title": "A12 fixed: a book-scoped MCP agent cannot commit another book's plan, even with its id and hash",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker",
+    "passkey step-up for sensitive approvals"
+   ],
+   "title": "a period operation is refused without a step-up claim, and with a stale one; a fresh one commits",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker",
+    "passkey step-up for sensitive approvals"
+   ],
+   "title": "an amount above the approval limit needs a step-up; below it the path is unchanged",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker",
+    "passkey step-up for sensitive approvals"
+   ],
+   "title": "someone who may not approve is refused as such, not asked for a passkey",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker",
+    "member management"
+   ],
+   "title": "changes book scope in place, and a role by re-keying the principal",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker",
+    "member management"
+   ],
+   "title": "maker-checker follows a person through a role change",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker",
+    "member management"
+   ],
+   "title": "only owners change members; the last owner stays an owner; auditors may list passkeys",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "F02: roles, book scope and maker-checker"
+   ],
+   "title": "only owners manage members and separation settings",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "passkeys"
+   ],
+   "title": "registers the first owner of a new workspace, and only once",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "passkeys"
+   ],
+   "title": "an existing workspace with data but no members cannot be claimed by registering",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "passkeys"
+   ],
+   "title": "signs in with the passkey; refuses a replayed assertion, another origin and an unknown credential",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "passkeys"
+   ],
+   "title": "the owner invites an auditor limited to one book; the code works once",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "passkeys"
+   ],
+   "title": "step-up: re-confirms the signed-in person with their own passkey only",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "passkeys"
+   ],
+   "title": "a role change keeps the person's passkey; a revoked passkey no longer signs in",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "passkeys"
+   ],
+   "title": "development sign-in is off unless explicitly enabled, and never takes over a workspace with people",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "passkeys"
+   ],
+   "title": "a signed-in request must carry a session id; sign-out revokes that session only",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "passkeys"
+   ],
+   "title": "a session is bound to the passkey it signed in with; revoking the passkey ends it and blocks sign-in",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "passkeys"
+   ],
+   "title": "a member may revoke only their own passkeys unless they manage members",
+   "status": "passed"
+  },
+  {
+   "file": "tests/identity.test.ts",
+   "ancestors": [
+    "passkeys"
+   ],
+   "title": "crypto-shredding a workspace removes its members, passkeys, invitations and settings",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ingestion.test.ts",
+   "ancestors": [
+    "F05: overlapping imports"
+   ],
+   "title": "concurrent overlapping imports store every distinct line and report each row's disposition",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ingestion.test.ts",
+   "ancestors": [
+    "F05: overlapping imports"
+   ],
+   "title": "concurrent uploads of the same file ingest it once",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ingestion.test.ts",
+   "ancestors": [
+    "F05: overlapping imports"
+   ],
+   "title": "a repeated identical payment in a later file is told apart by the running balance",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ingestion.test.ts",
+   "ancestors": [
+    "F05: overlapping imports"
+   ],
+   "title": "lines imported before the v2 identity (existing databases) are recognised as duplicates",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ingestion.test.ts",
+   "ancestors": [
+    "F05: overlapping imports"
+   ],
+   "title": "identical lines within one file are separate transactions",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ingestion.test.ts",
+   "ancestors": [
+    "F05: overlapping imports"
+   ],
+   "title": "rows that are not transactions are skipped with a reason, never guessed",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ingestion.test.ts",
+   "ancestors": [
+    "F18: source originals and control totals"
+   ],
+   "title": "retains the original sealed, with hash, row count and control totals, retrievable by signal id",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ingestion.test.ts",
+   "ancestors": [
+    "F18: source originals and control totals"
+   ],
+   "title": "refuses a statement whose running balance does not follow its movements, and stores nothing",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ingestion.test.ts",
+   "ancestors": [
+    "F18: source originals and control totals"
+   ],
+   "title": "checks declared totals, in either row order, with or without a balance column",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ingestion.test.ts",
+   "ancestors": [
+    "F18: source originals and control totals"
+   ],
+   "title": "keeps the original of a chat entry too",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ingestion.test.ts",
+   "ancestors": [
+    "F06: provisional confirmation"
+   ],
+   "title": "a different payee with the same amount and date does not confirm; it is processed as its own transaction",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ingestion.test.ts",
+   "ancestors": [
+    "F06: provisional confirmation"
+   ],
+   "title": "a matching line confirms, and the confirmation reaches the GL, reporting and reconciliation",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ingestion.test.ts",
+   "ancestors": [
+    "F06: provisional confirmation"
+   ],
+   "title": "a shared reference confirms even when the names differ",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ingestion.test.ts",
+   "ancestors": [
+    "F06: provisional confirmation"
+   ],
+   "title": "several matching entries become a review item; a person links one and the GL records it",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ingestion.test.ts",
+   "ancestors": [
+    "F06: provisional confirmation"
+   ],
+   "title": "an entry with no counterparty to compare goes to review; 'not a match' processes the line as new",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ingestion.test.ts",
+   "ancestors": [
+    "F06: provisional confirmation"
+   ],
+   "title": "amount outside the date window or in the other direction never matches",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ingestion.test.ts",
+   "ancestors": [
+    "F06: provisional confirmation"
+   ],
+   "title": "confirmations recorded only by the agent before propagation are backfilled into the GL",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ingestion.test.ts",
+   "ancestors": [
+    "F06: provisional confirmation"
+   ],
+   "title": "ops backfill-confirmations runs the backfill for every tenant or one",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ingestion.test.ts",
+   "ancestors": [
+    "F06: provisional confirmation"
+   ],
+   "title": "a confirmation cannot apply to a reversed journal, and repeating it is harmless",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ingestion.test.ts",
+   "ancestors": [
+    "HTTP"
+   ],
+   "title": "match reviews are keyset pages with x-next-cursor, narrowed to the member's books",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ingestion.test.ts",
+   "ancestors": [
+    "HTTP"
+   ],
+   "title": "refuses an unreconciled statement with 422, serves originals and resolves match reviews",
+   "status": "passed"
+  },
+  {
+   "file": "tests/isolation.test.ts",
+   "ancestors": [
+    "database-role separation"
+   ],
+   "title": "no policy grants system scope by session setting any more",
+   "status": "passed"
+  },
+  {
+   "file": "tests/isolation.test.ts",
+   "ancestors": [
+    "database-role separation"
+   ],
+   "title": "only the system role is a member of system scope",
+   "status": "passed"
+  },
+  {
+   "file": "tests/isolation.test.ts",
+   "ancestors": [
+    "database-role separation"
+   ],
+   "title": "the tenant role sees one tenant, and setting kuber.role = 'system' changes nothing",
+   "status": "passed"
+  },
+  {
+   "file": "tests/isolation.test.ts",
+   "ancestors": [
+    "database-role separation"
+   ],
+   "title": "the system role sees every tenant but still cannot rewrite events or keys",
+   "status": "passed"
+  },
+  {
+   "file": "tests/isolation.test.ts",
+   "ancestors": [
+    "database-role separation"
+   ],
+   "title": "denies and logs a write into another tenant's rows",
+   "status": "passed"
+  },
+  {
+   "file": "tests/isolation.test.ts",
+   "ancestors": [
+    "database-role separation"
+   ],
+   "title": "event handlers run in the event's tenant scope, not system scope",
+   "status": "passed"
+  },
+  {
+   "file": "tests/isolation.test.ts",
+   "ancestors": [
+    "database-role separation"
+   ],
+   "title": "converts policies written before es-003 (an existing database)",
+   "status": "passed"
+  },
+  {
+   "file": "tests/isolation.test.ts",
+   "ancestors": [
+    "database-role separation"
+   ],
+   "title": "refuses to start with a tenant role that is a member of system scope",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ledger-correctness.test.ts",
+   "ancestors": [
+    "F04: retried commands have exactly one effect"
+   ],
+   "title": "a repeated HTTP journal with the same Idempotency-Key posts once and returns the original result",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ledger-correctness.test.ts",
+   "ancestors": [
+    "F04: retried commands have exactly one effect"
+   ],
+   "title": "concurrent submissions with one key post once; a different key posts again",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ledger-correctness.test.ts",
+   "ancestors": [
+    "F04: retried commands have exactly one effect"
+   ],
+   "title": "commandId in the body works like the header; reusing a key for a different request is a 409",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ledger-correctness.test.ts",
+   "ancestors": [
+    "F04: retried commands have exactly one effect"
+   ],
+   "title": "opening balances are idempotent under a key",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ledger-correctness.test.ts",
+   "ancestors": [
+    "F04: retried commands have exactly one effect"
+   ],
+   "title": "a plan commit whose response was lost can be retried and returns the original outcome",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ledger-correctness.test.ts",
+   "ancestors": [
+    "F04: retried commands have exactly one effect"
+   ],
+   "title": "two concurrent commits of one plan post once and both report committed",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ledger-correctness.test.ts",
+   "ancestors": [
+    "F03: plan validation and execution share one consistency boundary"
+   ],
+   "title": "a posting that lands between simulation and execution makes the commit stale",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ledger-correctness.test.ts",
+   "ancestors": [
+    "F03: plan validation and execution share one consistency boundary"
+   ],
+   "title": "a writer racing the commit waits for it: the plan's journal lands exactly on its basis",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ledger-correctness.test.ts",
+   "ancestors": [
+    "F03: plan validation and execution share one consistency boundary"
+   ],
+   "title": "a change that is not a journal (a new account) also invalidates the plan",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ledger-correctness.test.ts",
+   "ancestors": [
+    "F03: plan validation and execution share one consistency boundary"
+   ],
+   "title": "a failure part-way through a two-journal plan applies nothing, and the retry commits both",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ledger-correctness.test.ts",
+   "ancestors": [
+    "F03: plan validation and execution share one consistency boundary"
+   ],
+   "title": "concurrent commit and discard: exactly one wins",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ledger-correctness.test.ts",
+   "ancestors": [
+    "F07: a draft is posted only when the GL accepts its journal"
+   ],
+   "title": "approval requests a posting; the draft is 'approved' until JournalPosted, then 'posted'",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ledger-correctness.test.ts",
+   "ancestors": [
+    "F07: a draft is posted only when the GL accepts its journal"
+   ],
+   "title": "a GL rejection returns the draft to review with the reason; nothing is posted or learned",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ledger-correctness.test.ts",
+   "ancestors": [
+    "F07: a draft is posted only when the GL accepts its journal"
+   ],
+   "title": "a rejected posting can be fixed and approved again, and then posts once",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ledger-correctness.test.ts",
+   "ancestors": [
+    "F07: a draft is posted only when the GL accepts its journal"
+   ],
+   "title": "a period close waits while approved drafts are still in flight",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ledger-correctness.test.ts",
+   "ancestors": [
+    "F08: impossible calendar dates are refused wherever a date enters"
+   ],
+   "title": "the IsoDate contract accepts real dates only",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ledger-correctness.test.ts",
+   "ancestors": [
+    "F08: impossible calendar dates are refused wherever a date enters"
+   ],
+   "title": "the ledger refuses the date, so no event (and no report row) ever carries it",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ledger-correctness.test.ts",
+   "ancestors": [
+    "F08: impossible calendar dates are refused wherever a date enters"
+   ],
+   "title": "HTTP, operations and statement imports refuse it",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F13: key lifecycle covers every retained copy"
+   ],
+   "title": "keeps a retired key while an envelope sealed with it may still be delivered by the broker (A13)",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F13: key lifecycle covers every retained copy"
+   ],
+   "title": "drops the key once the broker can no longer hold such envelopes (retention passed or bus purged)",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F13: key lifecycle covers every retained copy"
+   ],
+   "title": "re-seals unpublished outbox rows so the relay publishes under the new key",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F13: key lifecycle covers every retained copy"
+   ],
+   "title": "re-seals certified report snapshots and drops cached aggregate snapshots under a retired key",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F13: crypto-shred leaves nothing readable"
+   ],
+   "title": "the retention inventory classifies every tenant table",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F13: crypto-shred leaves nothing readable"
+   ],
+   "title": "purges evidence balances and every other readable projection (A14), verify reports no residue",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F13: crypto-shred leaves nothing readable"
+   ],
+   "title": "fences new writes for the shredded tenant even from a process that still caches its keys",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F13: crypto-shred leaves nothing readable"
+   ],
+   "title": "verify reports anything that reappears; purge-shredded removes it",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F13: crypto-shred leaves nothing readable"
+   ],
+   "title": "a restore from before the shred is erased again from the shred ledger",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F12: dead letters"
+   ],
+   "title": "records an exhausted delivery durably with the event reference and error",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F12: dead letters"
+   ],
+   "title": "retry re-reads the event from the store and runs the handler; failure keeps it open",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F12: dead letters"
+   ],
+   "title": "discard needs a reason and closes the dead letter",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F12: dead letters"
+   ],
+   "title": "status summarises outbox, dead letters, gaps and report lag",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F12: dead letters over NATS JetStream (max_deliver)"
+   ],
+   "title": "terminates the message after the last delivery and records it; retry repairs the projection",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F12: projection rebuild from the event store"
+   ],
+   "title": "live projections are consistent with the event store",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F12: projection rebuild from the event store"
+   ],
+   "title": "reporting: rebuild reproduces the live projection exactly, and is idempotent",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F12: projection rebuild from the event store"
+   ],
+   "title": "agent: rebuild reproduces the live projection exactly, and is idempotent",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F12: projection rebuild from the event store"
+   ],
+   "title": "evidence: rebuild reproduces the live projection exactly, and is idempotent",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F12: projection rebuild from the event store"
+   ],
+   "title": "a damaged projection is detected by check and repaired by rebuild",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F12: projection rebuild from the event store"
+   ],
+   "title": "the live consumers stay exactly-once after a rebuild (inbox rewritten)",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F15: report freshness and certified snapshots"
+   ],
+   "title": "a statement discloses the projection position against the ledger",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F15: report freshness and certified snapshots"
+   ],
+   "title": "freshness 'require' refuses a stale projection; 'wait' waits for it to catch up",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F15: report freshness and certified snapshots"
+   ],
+   "title": "a gap below the checkpoint is not reported as fresh",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F15: report freshness and certified snapshots"
+   ],
+   "title": "the HTTP API reports the basis and refuses stale reports with 409 when asked",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F15: report freshness and certified snapshots"
+   ],
+   "title": "a certified snapshot is sealed, verifiable and reproducible after later postings",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F15: report freshness and certified snapshots"
+   ],
+   "title": "certify refuses a stale projection instead of certifying a partial report",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F15: report freshness and certified snapshots"
+   ],
+   "title": "a tampered snapshot does not verify",
+   "status": "passed"
+  },
+  {
+   "file": "tests/ops-lifecycle.test.ts",
+   "ancestors": [
+    "F12: rebuild covers provisional journals confirmed by the GL"
+   ],
+   "title": "replays JournalConfirmed so the rebuilt projection is not provisional",
+   "status": "passed"
+  },
+  {
+   "file": "tests/scale.test.ts",
+   "ancestors": [
+    "persistent book state (F10)"
+   ],
+   "title": "PMap behaves like Map",
+   "status": "passed"
+  },
+  {
+   "file": "tests/scale.test.ts",
+   "ancestors": [
+    "persistent book state (F10)"
+   ],
+   "title": "date-range aggregates equal a scan",
+   "status": "passed"
+  },
+  {
+   "file": "tests/scale.test.ts",
+   "ancestors": [
+    "persistent book state (F10)"
+   ],
+   "title": "indexed balances, provisional set and latest date equal the journal scan on random books (order included)",
+   "status": "passed"
+  },
+  {
+   "file": "tests/scale.test.ts",
+   "ancestors": [
+    "persistent book state (F10)"
+   ],
+   "title": "evolve is pure: earlier states and branches are unaffected by later events",
+   "status": "passed"
+  },
+  {
+   "file": "tests/scale.test.ts",
+   "ancestors": [
+    "persistent book state (F10)"
+   ],
+   "title": "a snapshot round trip reproduces the state and its indexes",
+   "status": "passed"
+  },
+  {
+   "file": "tests/scale.test.ts",
+   "ancestors": [
+    "persistent book state (F10)"
+   ],
+   "title": "the snapshot schema fingerprints the whole fold, including confirmations and the event version",
+   "status": "passed"
+  },
+  {
+   "file": "tests/scale.test.ts",
+   "ancestors": [
+    "persistent book state (F10)"
+   ],
+   "title": "folding is no longer quadratic in the number of journals",
+   "status": "passed"
+  },
+  {
+   "file": "tests/scale.test.ts",
+   "ancestors": [
+    "tenant-partitioned delivery (F09)"
+   ],
+   "title": "a slow tenant does not hold up a tenant in another lane (memory bus)",
+   "status": "passed"
+  },
+  {
+   "file": "tests/scale.test.ts",
+   "ancestors": [
+    "tenant-partitioned delivery (F09)"
+   ],
+   "title": "with one partition the same slow tenant blocks everyone (the old behaviour)",
+   "status": "passed"
+  },
+  {
+   "file": "tests/scale.test.ts",
+   "ancestors": [
+    "tenant-partitioned delivery (F09)"
+   ],
+   "title": "keeps every tenant's events in publish order under random handler delays",
+   "status": "passed"
+  },
+  {
+   "file": "tests/scale.test.ts",
+   "ancestors": [
+    "tenant-partitioned delivery (F09)"
+   ],
+   "title": "partitions are stable and spread tenants",
+   "status": "passed"
+  },
+  {
+   "file": "tests/scale.test.ts",
+   "ancestors": [
+    "tenant-partitioned delivery over NATS JetStream (F09)"
+   ],
+   "title": "a slow tenant does not hold up a tenant in another lane",
+   "status": "skipped"
+  },
+  {
+   "file": "tests/scale.test.ts",
+   "ancestors": [
+    "tenant-partitioned delivery over NATS JetStream (F09)"
+   ],
+   "title": "migrates an unpartitioned durable in order, and refuses to re-route lanes with work in flight",
+   "status": "skipped"
+  },
+  {
+   "file": "tests/scale.test.ts",
+   "ancestors": [
+    "snapshots, cache and indexed queries on PostgreSQL (F10, F11)"
+   ],
+   "title": "loads from a sealed snapshot plus the tail and gets the same state; the chain still verifies",
+   "status": "passed"
+  },
+  {
+   "file": "tests/scale.test.ts",
+   "ancestors": [
+    "snapshots, cache and indexed queries on PostgreSQL (F10, F11)"
+   ],
+   "title": "ignores snapshots of another schema, or whose anchor no longer matches the stream",
+   "status": "passed"
+  },
+  {
+   "file": "tests/scale.test.ts",
+   "ancestors": [
+    "snapshots, cache and indexed queries on PostgreSQL (F10, F11)"
+   ],
+   "title": "keeps snapshots tenant-private",
+   "status": "passed"
+  },
+  {
+   "file": "tests/scale.test.ts",
+   "ancestors": [
+    "snapshots, cache and indexed queries on PostgreSQL (F10, F11)"
+   ],
+   "title": "bounds the book cache by bytes",
+   "status": "passed"
+  },
+  {
+   "file": "tests/scale.test.ts",
+   "ancestors": [
+    "snapshots, cache and indexed queries on PostgreSQL (F10, F11)"
+   ],
+   "title": "every operation plans byte-identically from the indexed state and from a journal scan",
+   "status": "passed"
+  },
+  {
+   "file": "tests/scale.test.ts",
+   "ancestors": [
+    "snapshots, cache and indexed queries on PostgreSQL (F10, F11)"
+   ],
+   "title": "pages the draft queue, ratifications and open plans without changing their content or order",
+   "status": "passed"
+  },
+  {
+   "file": "tests/scale.test.ts",
+   "ancestors": [
+    "snapshots, cache and indexed queries on PostgreSQL (F10, F11)"
+   ],
+   "title": "recent journals and drill-through match the whole-history queries they replace",
+   "status": "passed"
+  },
+  {
+   "file": "tests/verify-checkpoints.test.ts",
+   "ancestors": [
+    "verification checkpoints"
+   ],
+   "title": "a balance check verifies everything once, records a checkpoint, then verifies only what follows",
+   "status": "passed"
+  },
+  {
+   "file": "tests/verify-checkpoints.test.ts",
+   "ancestors": [
+    "verification checkpoints"
+   ],
+   "title": "tampering after the checkpoint is detected by the incremental check and the checkpoint does not move",
+   "status": "passed"
+  },
+  {
+   "file": "tests/verify-checkpoints.test.ts",
+   "ancestors": [
+    "verification checkpoints"
+   ],
+   "title": "tampering before the checkpoint is not re-read by the incremental check; a full verification finds it",
+   "status": "passed"
+  },
+  {
+   "file": "tests/verify-checkpoints.test.ts",
+   "ancestors": [
+    "verification checkpoints"
+   ],
+   "title": "a changed link at the checkpoint itself, or a missing checkpointed event, is detected incrementally",
+   "status": "passed"
+  },
+  {
+   "file": "tests/verify-checkpoints.test.ts",
+   "ancestors": [
+    "verification checkpoints"
+   ],
+   "title": "the application role can read checkpoints but not write them; the system role and the owner can",
+   "status": "passed"
+  }
+ ]
+}
