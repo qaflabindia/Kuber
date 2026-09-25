@@ -279,6 +279,32 @@ export const AGENT = {
   /** Resolution links the original, its reversal and the replacement (null when the item was only reversed). */
   SuspenseItemResolved: z.object({ itemId: Id, bookId: Id, journalId: Id, reversalJournalId: Id, replacementJournalId: Id.nullable(),
     toAccount: Id.nullable(), resolvedOn: IsoDate, note: z.string().optional() }),
+  /**
+   * TAGOF TOL-05, AGT-07, Domain 14: one copilot turn, appended to `<tenant>/agent-turns/<book>`.
+   * Inputs and outputs are recorded as SHA-256 hashes, never as text, so personal data in a question
+   * or a tool result is not duplicated here; the event is sealed and chained like every other.
+   */
+  AgentTurnRecorded: z.object({
+    turnId: Id, bookId: Id, sessionHash: Hex64.nullable(), principal: Principal, onBehalfOf: Principal,
+    engine: z.string().max(200),
+    prompt: z.object({ id: z.string(), version: z.string(), hash: Hex64 }),
+    /** Compiled DSPy programs and routing policies the turn ran with (id, version, hash). */
+    artifacts: z.array(z.object({ id: z.string(), version: z.string(), hash: Hex64 })).default([]),
+    input: z.object({ ok: z.boolean(), category: z.enum(["in_scope", "out_of_scope", "injection", "empty", "too_long"]).optional(), reason: z.string().max(500).optional() }),
+    inputHash: Hex64,
+    tools: z.array(z.object({ tool: z.string().max(100), inputHash: Hex64, outputHash: Hex64, ok: z.boolean(),
+      reversibility: z.enum(["none", "simulation", "reversible", "irreversible"]), flags: z.array(z.string().max(200)), ms: z.number().nonnegative(),
+      planId: Id.optional() })),
+    planIds: z.array(Id),
+    /** GEN-01: ungrounded figures as hashes (the figures are output fragments). */
+    grounding: z.object({ ok: z.boolean(), ungrounded: z.number().int().nonnegative(), ungroundedHashes: z.array(Hex64) }),
+    outcome: z.enum(["answered", "refused", "error", "halted"]),
+    steps: z.number().int().nonnegative(), tokensIn: z.number().int().nonnegative().optional(), tokensOut: z.number().int().nonnegative().optional(),
+    ms: z.number().nonnegative(),
+    /** Derived at record time: tool denials, injection flags, TOL-07 anomalies, HITL bypass (must be false). */
+    toolDenials: z.number().int().nonnegative(), injectionFlags: z.number().int().nonnegative(),
+    anomalies: z.array(z.string().max(200)), hitlBypass: z.boolean(),
+  }),
 } as const;
 
 // ------------------------------------------------------------------ Ops events
@@ -379,8 +405,9 @@ export const IDENTITY = {
   AccessReviewDisposed: z.object({ itemId: z.string(), kind: z.string(), subject: Principal.nullable(),
     decision: z.enum(["appropriate", "revoke", "investigate", "accepted"]), note: z.string() }),
   /** FIN-OPS-03 kill switch: autonomous posting for the tenant (bookId null) or one book goes to human review. */
-  AutonomyHalted: z.object({ bookId: z.string().nullable(), reason: z.string() }),
-  AutonomyResumed: z.object({ bookId: z.string().nullable(), reason: z.string() }),
+  /** AGT-09: `scope` "copilot" halts only the model-driven copilot; absent means "autonomy" (FIN-OPS-03). */
+  AutonomyHalted: z.object({ bookId: z.string().nullable(), reason: z.string(), scope: z.enum(["autonomy", "copilot"]).optional() }),
+  AutonomyResumed: z.object({ bookId: z.string().nullable(), reason: z.string(), scope: z.enum(["autonomy", "copilot"]).optional() }),
 } as const;
 
 export const ALL_EVENTS = { ...GL, ...PARTY, ...CHANNELS, ...AGENT, ...OPS, ...EVIDENCE, ...IDENTITY } as const;

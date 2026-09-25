@@ -1,0 +1,70 @@
+{
+  "version": "1.0.0",
+  "updated": "2026-09-25",
+  "owner": "Security + System Owner",
+  "approvedBy": "Pending — Security",
+  "approvedAt": "pending",
+  "changeNote": "Initial library (PRM-07). Add a pattern with a test case in tests/agent-governance.test.ts; bump the version.",
+  "patterns": [
+    {
+      "id": "ignore-previous",
+      "category": "override",
+      "pattern": "\\b(ignore|disregard|forget|override|bypass)\\b[^.\\n]{0,40}\\b(previous|prior|above|earlier|all|your|the|system|these)\\b[^.\\n]{0,30}\\b(instructions?|rules?|prompts?|guidelines|directives|constraints|policies)\\b"
+    },
+    {
+      "id": "new-instructions",
+      "category": "override",
+      "pattern": "\\b(new|updated|real|actual|revised)\\s+(system\\s+)?instructions?\\s*[:\\-]"
+    },
+    {
+      "id": "system-prompt-exfiltration",
+      "category": "exfiltration",
+      "pattern": "\\b(reveal|show|print|repeat|output|display|tell me|give me|what (is|are)|leak|dump|copy)\\b[^.\\n]{0,40}\\b(system|initial|hidden|original|developer)\\s+(prompt|instructions?|message|rules)\\b"
+    },
+    {
+      "id": "verbatim-above",
+      "category": "exfiltration",
+      "pattern": "\\b(repeat|print|output)\\b[^.\\n]{0,30}\\b(everything|all text|the text|words)\\b[^.\\n]{0,20}\\b(above|before|so far)\\b"
+    },
+    {
+      "id": "you-are-now",
+      "category": "role",
+      "pattern": "\\byou\\s+are\\s+(now|no longer)\\b|\\bfrom now on,?\\s+you\\b|\\bact as (an? )?(unrestricted|unfiltered|jailbroken|different)\\b"
+    },
+    {
+      "id": "dan-mode",
+      "category": "role",
+      "pattern": "\\b(DAN|do anything now|developer mode|jailbreak|god mode)\\b"
+    },
+    {
+      "id": "role-marker",
+      "category": "role",
+      "pattern": "(^|\\n)\\s*(system|assistant|developer)\\s*:\\s|<\\|?(im_start|im_end|system|endoftext)\\|?>|\\[/?(INST|SYS)\\]"
+    },
+    {
+      "id": "credential-request",
+      "category": "credentials",
+      "pattern": "\\b(api[\\s_-]?keys?|secret(s| key)?|passwords?|passkeys?|private keys?|master key|tokens?|credentials?|otp|one[- ]time (code|password)|environment variables?|env vars?|CORE_AUTH_SECRET|ANTHROPIC_API_KEY)\\b[^.\\n]{0,40}\\b(show|give|reveal|send|print|tell|share|what|list|dump|leak)\\b|\\b(show|give|reveal|send|print|tell|share|list|dump|leak)\\b[^.\\n]{0,40}\\b(api[\\s_-]?keys?|secrets?|passwords?|private keys?|master key|tokens?|credentials|env(ironment)? var(iable)?s?|CORE_AUTH_SECRET|ANTHROPIC_API_KEY)\\b"
+    },
+    {
+      "id": "force-commit",
+      "category": "hitl_bypass",
+      "pattern": "\\b(commit|execute|finali[sz]e|push through|force)\\b[^.\\n]{0,40}\\b(plans?|it|this|them|entries|journals?)\\b[^.\\n]{0,40}\\b(without|skip(ping)?|no need for|bypass(ing)?)\\b[^.\\n]{0,20}\\b(approval|review|confirmation|me|a person|the person|human)\\b|\\bkuber_commit\\b"
+    },
+    {
+      "id": "self-approve",
+      "category": "hitl_bypass",
+      "pattern": "\\b(approve|authori[sz]e|sign off|ratify)\\b[^.\\n]{0,30}\\b(it|this|them|the plan|plans|yourself|on my behalf|for me|automatically|all of them)\\b[^.\\n]{0,30}\\b(yourself|on my behalf|for me|automatically|without (me|asking|review))\\b|\\byou (are|have been) (authori[sz]ed|allowed|permitted) to (commit|approve|post|execute)\\b"
+    },
+    {
+      "id": "tool-instruction",
+      "category": "override",
+      "pattern": "\\b(call|invoke|run|use)\\s+(the\\s+)?(tool|function)\\s+[a-z_]+\\s+(with|now)\\b|\\bthe (assistant|ai|model|agent|copilot) (must|should|will) (now )?(call|run|commit|approve|transfer|send|ignore)\\b"
+    },
+    {
+      "id": "transfer-funds",
+      "category": "hitl_bypass",
+      "pattern": "\\b(transfer|wire|pay|send)\\b[^.\\n]{0,40}\\b(immediately|urgently|right now|now)\\b[^.\\n]{0,40}\\b(to account|to beneficiary|ifsc|upi|account (number|no))\\b"
+    }
+  ]
+}

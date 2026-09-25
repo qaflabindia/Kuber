@@ -48,7 +48,8 @@ import { STEP_UP_MAX_AGE_MS, stepUpFresh } from "@kuber/auth";
 
 export * from "./roles.ts";
 export { Authority, DELEGABLE, DOA_DEFAULTS, DOA_SOURCE, type AuthorityBasis, type AuthorityChange, type AuthorityChangeHook, type Delegation } from "./authority.ts";
-export { AutonomySwitch, type AutonomySwitchState } from "./autonomy.ts";
+export { AutonomySwitch, SWITCH_SCOPES, type AutonomySwitchState, type SwitchScope } from "./autonomy.ts";
+export { AGENT_ACTION_FALLBACKS, AGENT_GOVERNANCE_ACTIONS, actionsFor, authorizeNamed, type AgentGovernanceAction } from "./agent-actions.ts";
 export { AccessReview, REVIEW_DECISIONS, type AccessReviewReport, type ReviewDecision, type ReviewItem } from "./access-review.ts";
 export { IDENTITY_FIN_MIGRATIONS, accessReviewNoteCtx, autonomyReasonCtx, relatedPartyNoteCtx, rlsForTables } from "./fin-migrations.ts";
 export { DEV_STEP_UP_NOTE, SIGNED_EVENT_TYPES, SIGNING_TTL_MS, SigningError, TWO_AUTHENTICATOR_ROLES, commandDigest, expectedBinding, lockSubjectHash,
@@ -226,6 +227,8 @@ export class Identity implements OpsGuard, ModuleGuard {
 
   /** FIN-OPS-03: is autonomous action halted (kill switch) for this book? (OpsGuard, ModuleGuard and the GL's gate.) */
   autonomyHalted(tenant: string, book: string, tx?: TransactionSql): Promise<boolean> { return this.autonomy.halted(tenant, book, tx); }
+  /** AGT-09: is the model-driven copilot halted for this book (scope 'copilot', independent of autonomy)? */
+  copilotHalted(tenant: string, book: string, tx?: TransactionSql): Promise<boolean> { return this.autonomy.halted(tenant, book, tx, "copilot"); }
 
   get devSignInEnabled() { return !!this.o.devSignIn; }
 

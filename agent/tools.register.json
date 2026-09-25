@@ -1,0 +1,456 @@
+{
+  "version": "1.0.0",
+  "owner": "System Owner (Unassigned)",
+  "approvedBy": "Pending — System Owner",
+  "approvedAt": "pending",
+  "changeNote": "Initial register: every ops operation, kuber_commit (disabled for the copilot) and the read tools. External ext_* tools are denied until listed here by exact name (F17).",
+  "policy": "Default deny: a tool not listed here, or listed with enabled false, is refused. The copilot may run only tools whose reversibility is none or simulation.",
+  "tools": [
+    {
+      "name": "kuber_record",
+      "owner": "Financial Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial",
+        "counterparty"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "op": "record",
+      "onCommit": "reversible",
+      "note": "Plan one transaction; commit posts a journal, undone by a reversing entry."
+    },
+    {
+      "name": "kuber_post",
+      "owner": "Financial Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial",
+        "counterparty"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "op": "post",
+      "onCommit": "reversible",
+      "note": "Plan posting of drafts; narrations come from bank statements (third party)."
+    },
+    {
+      "name": "kuber_balance",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "balance",
+      "note": "Books-in-order checks."
+    },
+    {
+      "name": "kuber_reconcile",
+      "owner": "Financial Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial",
+        "counterparty"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "op": "reconcile",
+      "onCommit": "reversible",
+      "note": "Plan a reconciliation; lists statement lines (third-party text)."
+    },
+    {
+      "name": "kuber_allocate",
+      "owner": "Financial Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "op": "allocate",
+      "onCommit": "reversible",
+      "note": "Period operation: always needs a person (gate human)."
+    },
+    {
+      "name": "kuber_rebalance",
+      "owner": "Financial Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "op": "rebalance",
+      "onCommit": "reversible",
+      "note": "Period operation: always needs a person (gate human)."
+    },
+    {
+      "name": "kuber_close",
+      "owner": "Financial Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "op": "close",
+      "onCommit": "irreversible",
+      "note": "Locks a period; a lock is not undone by a compensating entry. Gate human, signed approval."
+    },
+    {
+      "name": "kuber_carry_forward",
+      "owner": "Financial Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "op": "carry_forward",
+      "onCommit": "irreversible",
+      "note": "Opens the next year from a closed one. Gate human."
+    },
+    {
+      "name": "kuber_report",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "report",
+      "note": "Statements for a period (paise)."
+    },
+    {
+      "name": "kuber_dashboard",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial",
+        "counterparty"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "op": "dashboard",
+      "note": "Live position; its attention list can quote narrations."
+    },
+    {
+      "name": "kuber_simulate",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "simulate",
+      "note": "What-if without touching the books (a read operation: nothing is stored)."
+    },
+    {
+      "name": "kuber_schedule_approve",
+      "owner": "Financial Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "op": "schedule_approve",
+      "onCommit": "reversible",
+      "note": "Approve a schedule once; later occurrences post under it until cancelled. Gate human."
+    },
+    {
+      "name": "kuber_schedule_cancel",
+      "owner": "Financial Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "op": "schedule_cancel",
+      "onCommit": "irreversible",
+      "note": "Cancel a schedule from a date; a cancellation is final. Gate human."
+    },
+    {
+      "name": "kuber_schedules",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "op": "schedules",
+      "note": "Schedules and their reconciliation; schedule narrations are free text."
+    },
+    {
+      "name": "kuber_resolve_suspense",
+      "owner": "Financial Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial",
+        "counterparty"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "op": "resolve_suspense",
+      "onCommit": "reversible",
+      "note": "Reverse and repost a suspense item."
+    },
+    {
+      "name": "kuber_suspense",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial",
+        "counterparty"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "op": "suspense",
+      "note": "Suspense items quote their source narrations."
+    },
+    {
+      "name": "kuber_commit",
+      "owner": "Financial Controller",
+      "reversibility": "reversible",
+      "permission": "plan.approve",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": false,
+      "note": "Registered so it is refused explicitly: the copilot proposes, a person commits (AGT-03, TOL-04). Never enable for the copilot."
+    },
+    {
+      "name": "kuber_accounts",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "note": "Chart of accounts with balances."
+    },
+    {
+      "name": "kuber_chart_of_accounts",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "note": "Account structure, natures, mappings."
+    },
+    {
+      "name": "kuber_trial_balance",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "note": ""
+    },
+    {
+      "name": "kuber_profit_and_loss",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "note": ""
+    },
+    {
+      "name": "kuber_balance_sheet",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "note": ""
+    },
+    {
+      "name": "kuber_ledger",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial",
+        "counterparty"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "note": "Account ledger lines with narrations (third-party text)."
+    },
+    {
+      "name": "kuber_search_journals",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial",
+        "counterparty"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "note": "Journal search; narrations are third-party text."
+    },
+    {
+      "name": "kuber_review_queue",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial",
+        "counterparty"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "note": "Drafts awaiting a person; statement narrations."
+    },
+    {
+      "name": "kuber_match_reviews",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial",
+        "counterparty"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "note": "Provisional match reviews; statement text."
+    },
+    {
+      "name": "kuber_income_breakdown",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "note": ""
+    },
+    {
+      "name": "kuber_expense_breakdown",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "note": ""
+    },
+    {
+      "name": "kuber_cash_position",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "note": ""
+    },
+    {
+      "name": "kuber_parties",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "counterparty",
+        "personal"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "note": "Party master: names and terms of vendors and customers (personal data for individuals). Bank details are never returned."
+    },
+    {
+      "name": "kuber_policies",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "policy"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "note": "Active policies and autonomy levels."
+    },
+    {
+      "name": "kuber_lifecycle",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "note": "Journal and draft lifecycle states."
+    },
+    {
+      "name": "kuber_attention",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial",
+        "counterparty"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "note": "What needs attention; can quote narrations."
+    },
+    {
+      "name": "kuber_plans",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "note": "Open plans; titles and journals can quote narrations."
+    }
+  ]
+}

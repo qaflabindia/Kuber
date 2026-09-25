@@ -59,7 +59,7 @@ export const SEALED_COLUMNS: SealedColumn[] = [
   // Finance controls (FIN-MDM-04/05, FIN-OPS-02/03): free-text notes and reasons, incident details.
   { table: "identity.related_parties", column: "note", kind: "text", keyCols: ["principal", "party_id"], ctx: (r) => relatedPartyNoteCtx(r.principal!, r.party_id!) },
   { table: "identity.access_reviews", column: "note", kind: "text", keyCols: ["item_id"], ctx: (r) => accessReviewNoteCtx(r.item_id!) },
-  { table: "identity.autonomy_switches", column: "reason", kind: "text", keyCols: ["book_id"], ctx: (r) => autonomyReasonCtx(r.book_id!) },
+  { table: "identity.autonomy_switches", column: "reason", kind: "text", keyCols: ["book_id", "scope"], ctx: (r) => autonomyReasonCtx(r.book_id!, r.scope ?? "autonomy") },
   { table: "ops.incidents", column: "detail", kind: "text", keyCols: ["incident_id"], ctx: (r) => incidentDetailCtx(r.incident_id!) },
   // Party master (FIN-MDM-03): names, terms and tax status history; beneficiary bank details.
   { table: "mdm.parties", column: "detail", kind: "text", keyCols: ["party_id"], ctx: (r) => partyDetailCtx(r.party_id!) },
