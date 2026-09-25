@@ -103,7 +103,13 @@ CREATE POLICY system_scope ON identity.sessions TO kuber_system_scope USING (tru
   // successor, so maker-checker still recognizes the person. (Passkey revocation columns: identity-002.)
   id: "identity-004-member-succession",
   sql: `ALTER TABLE identity.members ADD COLUMN succeeded_by TEXT;`,
-}, ...IDENTITY_FIN_MIGRATIONS, ...SIGNING_MIGRATIONS];
+}, ...IDENTITY_FIN_MIGRATIONS, ...SIGNING_MIGRATIONS, {
+  // Design 7.3 data use: the owner's opt-in to offline policy optimisation (Dream-RSI) of this
+  // tenant's history. Off by default; extraction of a replay pool refuses without it.
+  id: "identity-dream-001-optimisation-opt-in",
+  sql: `ALTER TABLE identity.settings ADD COLUMN optimisation_opt_in BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN optimisation_opt_in_by TEXT, ADD COLUMN optimisation_opt_in_at TIMESTAMPTZ;`,
+}];
 
 /**
  * Data migration (run once by the cell after the SQL migrations, recorded in schema_migrations):
@@ -405,6 +411,29 @@ export class Identity implements OpsGuard, ModuleGuard {
       SELECT solo_owner, sod_limit_paise::text, require_two_authenticators FROM identity.settings WHERE tenant_id = ${tenant}`;
     const [r] = tx ? await q(tx) : await this.store.tenantTx(tenant, q);
     return { soloOwner: r?.solo_owner ?? false, sodLimitPaise: r?.sod_limit_paise ?? null, requireTwoAuthenticators: r?.require_two_authenticators ?? false };
+  }
+
+  /** Design 7.3: has the owner allowed this tenant's history to be used for offline policy optimisation? */
+  async optimisationOptIn(tenant: string, tx?: TransactionSql): Promise<boolean> {
+    const q = (t: TransactionSql) => t<{ optimisation_opt_in: boolean }[]>`
+      SELECT optimisation_opt_in FROM identity.settings WHERE tenant_id = ${tenant}`;
+    const [r] = tx ? await q(tx) : await this.store.tenantTx(tenant, q);
+    return r?.optimisation_opt_in ?? false;
+  }
+
+  /** Opt the tenant in to (or out of) offline policy optimisation. Owners only (settings.manage); recorded in the identity stream. */
+  async setOptimisationOptIn(tenant: string, by: string, optIn: boolean): Promise<boolean> {
+    await this.store.tenantTx(tenant, async (tx) => {
+      await this.authorize(tenant, by, "settings.manage", { allBooks: true }, tx);
+      await this.lockTenant(tx, tenant);
+      const [prev] = await tx<{ optimisation_opt_in: boolean }[]>`SELECT optimisation_opt_in FROM identity.settings WHERE tenant_id = ${tenant}`;
+      await tx`INSERT INTO identity.settings (tenant_id, updated_by, optimisation_opt_in, optimisation_opt_in_by, optimisation_opt_in_at)
+        VALUES (${tenant}, ${by}, ${optIn}, ${by}, now())
+        ON CONFLICT (tenant_id) DO UPDATE SET optimisation_opt_in = EXCLUDED.optimisation_opt_in, optimisation_opt_in_by = EXCLUDED.optimisation_opt_in_by,
+          optimisation_opt_in_at = now(), updated_by = EXCLUDED.updated_by, updated_at = now()`;
+      await this.audit(tx, tenant, by, [{ type: "OptimisationOptInChanged", data: { optIn, previous: prev ? prev.optimisation_opt_in : null } }]);
+    });
+    return this.optimisationOptIn(tenant);
   }
 
   /** `requireTwoAuthenticators` left out keeps its current value. */

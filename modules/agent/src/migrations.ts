@@ -109,4 +109,30 @@ CREATE INDEX IF NOT EXISTS match_reviews_open_book_page ON agent.match_reviews (
   sql: `
 ALTER TABLE agent.ratifications DROP CONSTRAINT ratifications_status_check;
 ALTER TABLE agent.ratifications ADD CONSTRAINT ratifications_status_check CHECK (status IN ('open','ratified','corrected','withdrawn'));`,
-}, ...SUSPENSE_MIGRATIONS];
+}, ...SUSPENSE_MIGRATIONS, {
+  id: "agent-dream-001-autonomy-tuning",
+  // Dream-RSI (design 7.2): owner-approved autonomy tuning per book and action type, read by every
+  // autonomy decision (written only by an approval, with AutonomyTuningApplied), and the outcomes
+  // of the agent's classifications (accepted or not by a person) that the relax counters count.
+  // Thresholds and booleans only: nothing personal, nothing sealed.
+  sql: `
+CREATE TABLE agent.autonomy_tuning (
+  tenant_id TEXT NOT NULL, book_id TEXT NOT NULL, action_type TEXT NOT NULL CHECK (action_type IN ('receipt','payment')),
+  tuning JSONB NOT NULL, proposal_id TEXT NOT NULL, approved_by TEXT NOT NULL, approved_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, book_id, action_type));
+CREATE TABLE agent.autonomy_outcomes (
+  seq BIGSERIAL PRIMARY KEY, tenant_id TEXT NOT NULL, book_id TEXT NOT NULL,
+  action_type TEXT NOT NULL CHECK (action_type IN ('receipt','payment')), accepted BOOLEAN NOT NULL,
+  source TEXT NOT NULL CHECK (source IN ('approved','edited','rejected','ratified','corrected')), at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE INDEX autonomy_outcomes_recent ON agent.autonomy_outcomes (tenant_id, book_id, action_type, seq DESC);
+DO $$
+DECLARE t text;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['autonomy_tuning', 'autonomy_outcomes'] LOOP
+    EXECUTE format('ALTER TABLE agent.%I ENABLE ROW LEVEL SECURITY', t);
+    EXECUTE format('ALTER TABLE agent.%I FORCE ROW LEVEL SECURITY', t);
+    EXECUTE format($p$CREATE POLICY tenant_isolation ON agent.%I USING (tenant_id = current_setting('kuber.tenant', true)) WITH CHECK (tenant_id = current_setting('kuber.tenant', true))$p$, t);
+    EXECUTE format($p$CREATE POLICY system_scope ON agent.%I TO kuber_system_scope USING (true) WITH CHECK (true)$p$, t);
+  END LOOP;
+END $$;`,
+}];

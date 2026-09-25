@@ -5,7 +5,7 @@
  *             JournalReversed / PostingRejected (gl)
  * Emits:      PartyResolved, ProvisionalConfirmed, MatchReviewQueued, MatchReviewResolved, TransactionClassified, PolicyDecisionMade,
  *             PostingRequested, DraftQueued, DraftApproved, DraftRejected, RatificationRequested,
- *             Ratified, CorrectionRequested, RuleLearned, AutonomyLimited
+ *             Ratified, CorrectionRequested, RuleLearned, AutonomyLimited, AutonomyTuningApplied
  *
  * The agent never writes journals. It requests postings; the GL decides. A draft's lifecycle
  * follows the GL's answer: queued|awaiting_approval -> approved (posting requested) -> posted on
@@ -25,7 +25,7 @@ import {
 } from "@kuber/contracts";
 import { DENY_ALL_GUARD, once, type EventStore, type MetaInput, type ModuleGuard, type NewEvent, type Projection } from "@kuber/eventstore";
 import { isToken, type TenantKeys } from "@kuber/crypto";
-import type { Level, PolicyEngine } from "@kuber/policy";
+import { RELAX_LOOKBACK, amountZScore, relaxStatsFrom, type AutonomyTuning, type Level, type PolicyEngine } from "@kuber/policy";
 import { SUSPENSE, accountNameCtx, classify, type LlmClassifier } from "./classify.ts";
 import { AgentError } from "./errors.ts";
 import { SuspenseCases } from "./suspense.ts";
@@ -44,6 +44,9 @@ const CORRECTION_LIMIT_DAYS = 30;
 const KNOWN_AFTER = 3;
 /** Draft states a person can act on: new, or returned by the GL with a reason. */
 const REVIEWABLE = ["queued", "awaiting_approval", "rejected_by_gl"];
+/** Dream-RSI: the action types an autonomy tuning is kept for (the voucher type of an ingested transaction). */
+export type ActionType = "receipt" | "payment";
+export const actionTypeOf = (direction: "in" | "out"): ActionType => (direction === "in" ? "receipt" : "payment");
 /** FIN-OPS-03: the reason recorded on decisions capped by the kill switch. */
 const HALTED_REASON = "autonomy halted (kill switch): a person reviews this entry";
 
@@ -161,6 +164,11 @@ export class Agent {
     if (!r) return;
     const keys = await this.store.keys(t);
     const p = openProposal(keys, r.draft_id, r.proposal);
+    const [b] = await tx<{ book_id: string }[]>`SELECT book_id FROM agent.drafts WHERE tenant_id = ${t} AND draft_id = ${r.draft_id}`;
+    if (b && p.direction) {
+      const accepted = r.approved_account === p.accountId;
+      await this.recordOutcome(tx, t, b.book_id, actionTypeOf(p.direction), accepted, accepted ? "approved" : "edited");
+    }
     if (r.approved_account === SUSPENSE || !p.partyName) return;
     const events = await this.learn(tx, t, p.partyName, r.approved_account, r.resolved_by, keys);
     if (p.partyId) await tx`UPDATE agent.parties SET confirmed = true WHERE tenant_id = ${t} AND party_id = ${p.partyId}`;
@@ -288,10 +296,17 @@ export class Agent {
       return;
     }
 
-    // 5. policy decides what the agent may do
+    // 5. policy decides what the agent may do, under the owner-approved tuning of this book and
+    //    action type when there is one (Dream-RSI; the same decide() the replay simulator uses)
+    const actionType = actionTypeOf(txn.direction);
+    const tuning = await this.tuningFor(tx, t, d.bookId, actionType);
     let decision = this.policies.decide({
       eventCode: INGEST_EVENT, on: this.clock(), amountPaise: BigInt(txn.amount), confidence: c.confidence,
-      counterpartyKnown: await this.partyKnown(tx, t, partyId), overrideMax: await this.override(tx, t, c.accountId, partyId),
+      counterpartyKnown: await this.partyKnown(tx, t, partyId, tuning?.newCounterpartyKnownAfter),
+      overrideMax: await this.override(tx, t, c.accountId, partyId),
+      tuning,
+      relax: tuning?.l4MinConfidence != null ? await this.relaxStats(tx, t, d.bookId, actionType) : undefined,
+      amountZ: tuning?.amountZLimit != null ? await this.amountZ(tx, t, d.bookId, partyId, Number(txn.amount)) : null,
     });
     // FIN-OPS-03: with the kill switch on, nothing posts autonomously; a person reviews the draft.
     if ((decision.action === "post" || decision.action === "post_then_ratify") && (await this.guard.autonomyHalted?.(t, d.bookId, tx))) {
@@ -386,10 +401,12 @@ export class Agent {
       const [b] = await tx<{ book_id: string }[]>`SELECT book_id FROM agent.drafts WHERE tenant_id = ${tenantId} AND draft_id = ${draftId}`;
       if (!b) throw new AgentError("not_open", `draft ${draftId} is not open`);
       await this.mayDecide(tx, tenantId, principal, b.book_id);
-      const [d] = await tx<{ txn_id: string }[]>`
+      const [d] = await tx<{ txn_id: string; proposal: unknown }[]>`
         UPDATE agent.drafts SET status = 'rejected', resolved_by = ${principal}, resolved_at = now()
-        WHERE tenant_id = ${tenantId} AND draft_id = ${draftId} AND status IN ${tx(REVIEWABLE)} RETURNING txn_id`;
+        WHERE tenant_id = ${tenantId} AND draft_id = ${draftId} AND status IN ${tx(REVIEWABLE)} RETURNING txn_id, proposal`;
       if (!d) throw new AgentError("not_open", `draft ${draftId} is not open`);
+      const direction = openProposal(await this.store.keys(tenantId), draftId, d.proposal).direction;
+      if (direction) await this.recordOutcome(tx, tenantId, b.book_id, actionTypeOf(direction), false, "rejected");
       await this.store.append("agent", tenantId, { streamId: `${tenantId}/txn/${d.txn_id}`, expected: "any",
         events: [{ type: "DraftRejected", data: { draftId, reason } }] }, { principal }, tx);
     });
@@ -499,6 +516,7 @@ export class Agent {
         UPDATE agent.ratifications SET status = 'ratified', resolved_by = ${principal}, resolved_at = now()
         WHERE tenant_id = ${tenantId} AND journal_id = ${journalId} AND status = 'open' RETURNING txn_id`;
       if (!r) throw new AgentError("not_open", `no open ratification for ${journalId}`);
+      await this.journalOutcome(tx, tenantId, journalId, true, "ratified");
       const signature = opts.attest ? await opts.attest(tx) : undefined;
       await this.store.append("agent", tenantId, { streamId: `${tenantId}/txn/${r.txn_id}`, expected: "any",
         events: [{ type: "Ratified", data: { journalId, ...(signature ? { signature } : {}) } }] }, { principal }, tx);
@@ -519,6 +537,7 @@ export class Agent {
       if (j.reversed) throw new AgentError("already_reversed", `${journalId} is already reversed`);
       if (!j.counter_account) throw new AgentError("no_counter", `${journalId} has no classifiable line`);
       if (j.counter_account === SUSPENSE) throw new AgentError("suspense_item", `${journalId} holds a suspense item: resolve the item (resolve_suspense) instead of correcting the journal`);
+      await this.journalOutcome(tx, tenantId, journalId, false, "corrected");
       const requestId = `corr-${uuid()}`;
       const events: NewEvent[] = [{ type: "CorrectionRequested", data: { requestId, bookId: j.book_id, journalId, fromAccount: j.counter_account, toAccount } }];
       if (j.party_id && opts.learn) {
@@ -731,12 +750,78 @@ export class Agent {
     return { partyId, partyName: alias, isNew: ins.length > 0 };
   }
 
-  private async partyKnown(tx: TransactionSql, tenantId: string, partyId: string | null) {
+  private async partyKnown(tx: TransactionSql, tenantId: string, partyId: string | null, knownAfter = KNOWN_AFTER) {
     if (!partyId) return false;
     const [p] = await tx<{ confirmed: boolean }[]>`SELECT confirmed FROM agent.parties WHERE tenant_id = ${tenantId} AND party_id = ${partyId}`;
     if (p?.confirmed) return true;
     const [c] = await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM agent.journal_index WHERE tenant_id = ${tenantId} AND party_id = ${partyId} AND NOT reversed`;
-    return (c?.n ?? 0) >= KNOWN_AFTER;
+    return (c?.n ?? 0) >= Math.max(KNOWN_AFTER, knownAfter);
+  }
+
+  // ------------------------------------------------------------------ autonomy tuning (Dream-RSI, design 7.2)
+  /** The approved tuning of a book and action type, or null (the policy file alone decides). */
+  private async tuningFor(tx: TransactionSql, tenantId: string, bookId: string, actionType: ActionType): Promise<AutonomyTuning | null> {
+    const [r] = await tx<{ tuning: AutonomyTuning }[]>`
+      SELECT tuning FROM agent.autonomy_tuning WHERE tenant_id = ${tenantId} AND book_id = ${bookId} AND action_type = ${actionType}`;
+    return r?.tuning ?? null;
+  }
+
+  /** Approved tunings of a book (the incumbent of a Dream-RSI run), by action type. */
+  async autonomyTuning(tenantId: string, bookId: string, tx?: TransactionSql): Promise<Partial<Record<ActionType, { tuning: AutonomyTuning; proposalId: string; approvedBy: string }>>> {
+    const q = (t: TransactionSql) => t<{ action_type: ActionType; tuning: AutonomyTuning; proposal_id: string; approved_by: string }[]>`
+      SELECT action_type, tuning, proposal_id, approved_by FROM agent.autonomy_tuning WHERE tenant_id = ${tenantId} AND book_id = ${bookId}`;
+    const rows = tx ? await q(tx) : await this.store.tenantTx(tenantId, q);
+    return Object.fromEntries(rows.map((r) => [r.action_type, { tuning: r.tuning, proposalId: r.proposal_id, approvedBy: r.approved_by }]));
+  }
+
+  /**
+   * Apply an approved Dream-RSI proposal: from now on, decisions for this book and action type read
+   * `tuning`. Called by the proposal approval, in its transaction and after its approval event.
+   * The approver needs autonomy.manage for the book (checked again here, in depth).
+   */
+  async applyAutonomyTuning(tx: TransactionSql, tenantId: string, a: { bookId: string; actionType: ActionType; tuning: AutonomyTuning; proposalId: string; principal: string }) {
+    await this.guard.permit(tenantId, a.principal, "autonomy.manage", { book: a.bookId }, tx);
+    const [prev] = await tx<{ tuning: AutonomyTuning }[]>`
+      SELECT tuning FROM agent.autonomy_tuning WHERE tenant_id = ${tenantId} AND book_id = ${a.bookId} AND action_type = ${a.actionType} FOR UPDATE`;
+    await tx`INSERT INTO agent.autonomy_tuning (tenant_id, book_id, action_type, tuning, proposal_id, approved_by)
+             VALUES (${tenantId}, ${a.bookId}, ${a.actionType}, ${tx.json(a.tuning as never)}, ${a.proposalId}, ${a.principal})
+             ON CONFLICT (tenant_id, book_id, action_type) DO UPDATE SET tuning = EXCLUDED.tuning, proposal_id = EXCLUDED.proposal_id,
+               approved_by = EXCLUDED.approved_by, approved_at = now()`;
+    await this.store.append("agent", tenantId, { streamId: `${tenantId}/autonomy-tuning/${a.bookId}`, expected: "any", events: [{ type: "AutonomyTuningApplied",
+      data: { bookId: a.bookId, actionType: a.actionType, proposalId: a.proposalId, tuning: a.tuning, previous: (prev?.tuning as unknown as Record<string, unknown>) ?? null } }] },
+      { principal: a.principal }, tx);
+  }
+
+  /** Relax counters of a book and action type, from its recorded outcomes (newest first). */
+  private async relaxStats(tx: TransactionSql, tenantId: string, bookId: string, actionType: ActionType) {
+    const rows = await tx<{ accepted: boolean }[]>`
+      SELECT accepted FROM agent.autonomy_outcomes WHERE tenant_id = ${tenantId} AND book_id = ${bookId} AND action_type = ${actionType}
+      ORDER BY seq DESC LIMIT ${RELAX_LOOKBACK}`;
+    return relaxStatsFrom(rows.map((r) => r.accepted));
+  }
+
+  /** z-score of an amount against the counterparty's journals in this book that stand (not reversed). */
+  private async amountZ(tx: TransactionSql, tenantId: string, bookId: string, partyId: string | null, amount: number) {
+    if (!partyId) return null;
+    const rows = await tx<{ amount: string }[]>`
+      SELECT amount FROM agent.journal_index WHERE tenant_id = ${tenantId} AND book_id = ${bookId} AND party_id = ${partyId}
+        AND NOT reversed AND amount IS NOT NULL`;
+    return amountZScore(amount, rows.map((r) => Math.abs(Number(r.amount))));
+  }
+
+  /** A person accepted (or not) the agent's classification: one outcome for the relax counters. */
+  private async recordOutcome(tx: TransactionSql, tenantId: string, bookId: string, actionType: ActionType, accepted: boolean, source: string) {
+    await tx`INSERT INTO agent.autonomy_outcomes (tenant_id, book_id, action_type, accepted, source)
+             VALUES (${tenantId}, ${bookId}, ${actionType}, ${accepted}, ${source})`;
+  }
+
+  /** Outcome of a journal the agent classified (auto-posted, or posted from an approved draft); manual journals are not counted. */
+  private async journalOutcome(tx: TransactionSql, tenantId: string, journalId: string, accepted: boolean, source: string) {
+    const [j] = await tx<{ book_id: string; principal: string; amount: string | null; drafted: boolean }[]>`
+      SELECT book_id, principal, amount, EXISTS (SELECT 1 FROM agent.drafts d WHERE d.tenant_id = j.tenant_id AND d.journal_id = j.journal_id) AS drafted
+      FROM agent.journal_index j WHERE tenant_id = ${tenantId} AND journal_id = ${journalId}`;
+    if (!j || j.amount === null || (j.principal !== AGENT_PRINCIPAL && !j.drafted)) return;
+    await this.recordOutcome(tx, tenantId, j.book_id, BigInt(j.amount) >= 0n ? "receipt" : "payment", accepted, source);
   }
 
   private async override(tx: TransactionSql, tenantId: string, accountId: string, partyId: string | null): Promise<Level | null> {
