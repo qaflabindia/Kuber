@@ -4,6 +4,12 @@ import { COOKIE, decode } from "$lib/server/session";
 const PUBLIC = ["/signin"];
 
 export const handle: Handle = async ({ event, resolve }) => {
+  // Passkeys (WebAuthn) refuse IP-address origins; the relying party is "localhost".
+  // With ORIGIN set, event.url always reports localhost, so read the Host header the browser sent.
+  const host = (event.request.headers.get("host") ?? "").replace(/:\d+$/, "");
+  if (host === "127.0.0.1" || host === "[::1]") {
+    throw redirect(308, `${event.url.origin}${event.url.pathname}${event.url.search}`);
+  }
   event.locals.session = decode(event.cookies.get(COOKIE));
   const path = event.url.pathname;
   if (!event.locals.session && !PUBLIC.some((p) => path.startsWith(p))) {
