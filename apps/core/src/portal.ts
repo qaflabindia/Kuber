@@ -34,7 +34,8 @@ export class Portal {
     const out: (PortalLine & { cash: boolean })[] = [];
     for (const bookId of await this.cell.reporting.bookIds(tenant)) {
       const s = await this.cell.gl.state(tenant, bookId);
-      if (!s.exists || (party && party.entityId !== s.entityId)) continue;
+      // A party belongs to one legal entity (FIN-MDM-01): only that entity's books can carry it.
+      if (!s.exists || (party && party.entityId !== (s.config?.legalEntityId ?? s.entityId))) continue;
       for (const [journalId, j] of s.journals) {
         const own = j.lines.filter((l) => l.partyId === partyId && s.accounts.get(l.accountId)?.isControl);
         if (!own.length) continue;
