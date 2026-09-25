@@ -18,7 +18,8 @@
     "keys": "tsx apps/core/src/keys-cli.ts",
     "identity": "tsx apps/core/src/identity-cli.ts",
     "ops": "tsx apps/core/src/ops-cli.ts",
-    "test:llm": "bash scripts/test-llm.sh"
+    "test:llm": "bash scripts/test-llm.sh",
+    "register": "tsx scripts/check-register.ts"
   },
   "devDependencies": {
     "@kuber/crypto": "workspace:*",

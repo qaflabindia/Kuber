@@ -245,9 +245,13 @@ pnpm test:docker                                                                
 pnpm test:llm                                                                             # live Anthropic classifier; needs ANTHROPIC_API_KEY and KUBER_LLM_CLASSIFY_MODEL
 KUBER_INTEGRATION=1 NATS_URL=nats://localhost:4222 pnpm test:integration                 # real JetStream
 pnpm typecheck
+pnpm register                                                                             # requirements register: static checks (also in the suite, tests/register.test.ts)
+pnpm register --run                                                                       # ...and run every test file it references (needs PostgreSQL)
 ```
 
 Each test file creates and drops its own database.
+
+`requirements/register.md` is the requirements traceability register: one row per G0 finance requirement (FIN-MDM, FIN-GL, FIN-OPS, UAT-COM) and architecture finding (F01–F18), with owner, gate, status, code, test ID, evidence and sign-off. `pnpm register` fails if a row claims `verified` without a test that exists (`tests/<file>.test.ts::<it or describe title>`) and passed in the committed evidence, if a row is finance-approved, operationally proven or signed off while its business owner is unassigned, or on a duplicate ID or unknown status. Engineering moves rows only up to `verified`; the rest is for named people in Finance.
 
 ## API (phase 0)
 
