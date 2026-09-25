@@ -47,6 +47,9 @@ class Settings:
     price_in_per_m: float = 3.0
     price_out_per_m: float = 15.0
     issuers: list[str] = field(default_factory=lambda: ["kuber-core"])
+    # agent/dependencies.md (ws5/agent-gov) row 4: "without an approved artifact the middleware must refuse
+    # to run that program". Off by default (zero-shot, logged) until approved artifacts exist; set true to refuse.
+    require_artifacts: bool = False
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -70,4 +73,5 @@ class Settings:
             tokens_per_day=_int(e, "AGENT_MW_TOKENS_PER_DAY", 2_000_000, 1_000, 1_000_000_000),
             price_in_per_m=pin,
             price_out_per_m=pout,
+            require_artifacts=e.get("AGENT_MW_REQUIRE_ARTIFACTS", "").lower() == "true",
         )

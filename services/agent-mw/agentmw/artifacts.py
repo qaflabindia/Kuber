@@ -2,22 +2,26 @@
 
 A compiled DSPy program is stored as `agent/artifacts/<id>.json`:
 
-    {"id", "version", "program", "sha256", "content": <DSPy module state>, "optimizer", "seed",
-     "datasetHash", "metric", "scores": {...}, "approvedBy": null, ...}
+    {"kind": "dspy_artifact", "id", "version", "program", "sha256", "content": <DSPy module state>,
+     "optimizer", "seed", "datasetHash", "metric", "scores": {...}, "owner", "approvedBy": null, ...}
 
 `sha256` is the SHA-256 of the canonical JSON of `content` (sorted keys, no whitespace, UTF-8), so the
 metadata may be annotated without changing what was approved, while any change to the instructions
 or demonstrations changes the hash.
 
-The middleware loads an artifact only when `agent/prompts.lock.json` lists its id with the same
-sha256 and a named approver. Two lock shapes are read:
+The middleware loads an artifact only when `agent/prompts.lock.json` lists its id, with a named
+approver, and a sha256 equal to EITHER the canonical content hash OR the SHA-256 of the artifact
+file's exact bytes (the form ws5/agent-gov's `prompts.ts --write-lock` records). Lock shapes read:
 
-    {"artifacts": {"<id>": {"version", "sha256", "approvedBy"}}}                   (this service's shape)
+    {"artifacts": {"<id>": {"version", "sha256", "approvedBy" | "approver", "approvedAt"?}}}
+    {"artifacts": [{"id", "version", "sha256", "approvedBy" | "approver", "approvedAt"?}]}
     {"version": 1, "entries": [{"kind": "dspy_artifact", "id", "version", "sha256",
-                                "approver", "approvedAt", "file"}]}                    (ws5/agent-gov's lock)
+                                "approver", "approvedAt", "file"}]}             (ws5/agent-gov's registry)
 
-An artifact that is unlisted, unapproved, mismatching, malformed, for another program, or that
-carries its own LM configuration is ignored: the zero-shot program is used and the reason is logged.
+An approver that is empty or starts with "Pending"/"TBD", or an approvedAt of "pending", is not an
+approval. An artifact that is unlisted, unapproved, mismatching, malformed, for another program, or
+that carries its own LM configuration is ignored: the zero-shot program is used and the reason is
+logged (or, with AGENT_MW_REQUIRE_ARTIFACTS=true, the program refuses to run: 503).
 The optimiser never writes the lock; approval is a separate human step (README, "Approving an artifact").
 """
 from __future__ import annotations
@@ -40,18 +44,32 @@ def content_hash(content: Any) -> str:
     return hashlib.sha256(canonical(content)).hexdigest()
 
 
+_NOT_APPROVED = ("pending", "tbd", "none", "null")
+
+
 @dataclass(frozen=True)
 class LockEntry:
     id: str
     version: str
     sha256: str
     approved_by: str | None
+    approved_at: str | None = None
     file: str | None = None
 
     @property
     def approved(self) -> bool:
-        a = (self.approved_by or "").strip()
-        return bool(a) and not a.lower().startswith(("pending", "tbd", "none", "null"))
+        a = (self.approved_by or "").strip().lower()
+        at = (self.approved_at or "").strip().lower()
+        return bool(a) and not a.startswith(_NOT_APPROVED) and at != "pending"
+
+
+def _entry(aid: str, e: dict[str, Any]) -> LockEntry | None:
+    if not isinstance(e.get("sha256"), str):
+        return None
+    approver = e.get("approvedBy", e.get("approver"))
+    s = lambda k: e.get(k) if isinstance(e.get(k), str) else None  # noqa: E731
+    return LockEntry(aid, str(e.get("version", "")), e["sha256"].lower(),
+                     approver if isinstance(approver, str) else None, s("approvedAt"), s("file"))
 
 
 def read_lock(path: Path) -> dict[str, LockEntry]:
@@ -63,27 +81,23 @@ def read_lock(path: Path) -> dict[str, LockEntry]:
     except (OSError, ValueError) as e:
         log.warning("prompts lock %s is unreadable (%s); no compiled artifact will load", path, e)
         return {}
+    if not isinstance(raw, dict):
+        return {}
     out: dict[str, LockEntry] = {}
-    arts = raw.get("artifacts") if isinstance(raw, dict) else None
-    if isinstance(arts, dict):
-        for aid, e in arts.items():
-            if isinstance(e, dict) and isinstance(e.get("sha256"), str):
-                out[aid] = LockEntry(aid, str(e.get("version", "")), e["sha256"].lower(),
-                                     e.get("approvedBy") if isinstance(e.get("approvedBy"), str) else None,
-                                     e.get("file") if isinstance(e.get("file"), str) else None)
-    entries = raw.get("entries") if isinstance(raw, dict) else None
-    if isinstance(entries, list):
-        for e in entries:
-            if not isinstance(e, dict) or e.get("kind") != "dspy_artifact" or not isinstance(e.get("id"), str):
-                continue
-            if not isinstance(e.get("sha256"), str):
-                continue
-            approver = e.get("approvedBy", e.get("approver"))
-            if e.get("approvedAt") in (None, "", "pending"):
-                approver = None
-            out[e["id"]] = LockEntry(e["id"], str(e.get("version", "")), e["sha256"].lower(),
-                                     approver if isinstance(approver, str) else None,
-                                     e.get("file") if isinstance(e.get("file"), str) else None)
+    arts = raw.get("artifacts")
+    items = arts.items() if isinstance(arts, dict) else \
+        ((e.get("id"), e) for e in arts if isinstance(e, dict)) if isinstance(arts, list) else []
+    for aid, e in items:
+        if isinstance(aid, str) and isinstance(e, dict) and e.get("kind", "dspy_artifact") == "dspy_artifact":
+            le = _entry(aid, e)
+            if le:
+                out[aid] = le
+    entries = raw.get("entries")
+    for e in entries if isinstance(entries, list) else []:
+        if isinstance(e, dict) and e.get("kind") == "dspy_artifact" and isinstance(e.get("id"), str):
+            le = _entry(e["id"], e)
+            if le:
+                out[e["id"]] = le
     return out
 
 
@@ -115,8 +129,9 @@ def resolve(program: str, artifacts_dir: Path, lock_path: Path) -> Loaded:
     files = sorted(artifacts_dir.glob("*.json")) if artifacts_dir.is_dir() else []
     for f in files:
         try:
-            art = json.loads(f.read_text("utf-8"))
-        except (OSError, ValueError) as e:
+            raw_bytes = f.read_bytes()
+            art = json.loads(raw_bytes.decode("utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError) as e:
             reasons.append(f"{f.name}: unreadable ({e})")
             continue
         if not isinstance(art, dict) or art.get("program") != program:
@@ -126,12 +141,13 @@ def resolve(program: str, artifacts_dir: Path, lock_path: Path) -> Loaded:
             reasons.append(f"{f.name}: missing id or content")
             continue
         actual = content_hash(content)
+        file_hash = hashlib.sha256(raw_bytes).hexdigest()
         entry = lock.get(aid)
         if entry is None:
             reasons.append(f"{aid}: not listed in the prompts lock")
         elif not entry.approved:
             reasons.append(f"{aid}: listed but not approved")
-        elif entry.sha256 != actual:
+        elif entry.sha256 not in (actual, file_hash):
             reasons.append(f"{aid}: sha256 {actual[:12]} does not match the lock ({entry.sha256[:12]})")
         elif str(art.get("sha256", "")).lower() != actual:
             reasons.append(f"{aid}: declared sha256 does not match its content")

@@ -62,6 +62,8 @@ def load_programs(settings: Settings) -> dict[str, tuple[dspy.Module, Loaded]]:
 
 def create_app(settings: Settings | None = None, lm: Any = None, today: str | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
+    # Prompts carry tenant data: no DSPy response cache, on disk or in memory (and the root fs is read-only).
+    dspy.configure_cache(enable_disk_cache=False, enable_memory_cache=False)
     app = FastAPI(title="Kuber agent middleware", docs_url=None, redoc_url=None, openapi_url=None)
     key = auth_key(settings.secret) if settings.secret and len(settings.secret) >= 32 else None
     replay = ReplayCache()
@@ -104,6 +106,8 @@ def create_app(settings: Settings | None = None, lm: Any = None, today: str | No
         except (ValueError, ValidationError) as e:
             detail = e.errors(include_url=False, include_input=False, include_context=False) if isinstance(e, ValidationError) else str(e)
             return _err(422, "invalid_request", None, errors=detail if isinstance(detail, list) else [str(detail)])
+        if settings.require_artifacts and programs[name][1].id is None:
+            return _err(503, "artifact_not_approved", f"no approved compiled artifact for {name}")
         denied = limiter.admit(claims.tenant)
         if denied:
             return _err(429, denied)
@@ -158,6 +162,7 @@ def create_app(settings: Settings | None = None, lm: Any = None, today: str | No
             "status": "ok", "service": "agent-mw",
             "gate": gate().public(),
             "auth": {"configured": key is not None},
+            "requireArtifacts": settings.require_artifacts,
             "model": {"configured": bool(settings.model or state["lm"]), "provider": (model_name().split("/")[0] if settings.model else None)},
             "programs": {n: {"mode": "compiled" if l.id else "zero-shot", "artifactId": l.id, "artifactHash": l.sha256}
                          for n, (_, l) in programs.items()},

@@ -113,6 +113,11 @@ services:
       KUBER_LLM_MODEL: ${KUBER_LLM_MODEL:-}
       KUBER_LLM_CLASSIFY: ${KUBER_LLM_CLASSIFY:-off}
       KUBER_LLM_CLASSIFY_MODEL: ${KUBER_LLM_CLASSIFY_MODEL:-}
+      # Agent middleware (services/agent-mw): the copilot's model steps go here, signed with AGENT_MW_SECRET
+      # over TLS verified against the local CA. The core holds no model key on this path (agent design 7.1).
+      AGENT_MW_URL: https://agent-mw:8443
+      AGENT_MW_SECRET: ${AGENT_MW_SECRET:?run ./scripts/secure-setup.sh to add it}
+      AGENT_MW_CA_FILE: /certs/ca.crt
       # MCP server for external agents (optional): {"<token>": {"tenant": "...", "book": "main", "principal": "agent:<name>"}}
       KUBER_MCP_TOKENS: ${KUBER_MCP_TOKENS:-}
       # External MCP servers the copilot may read from (optional): [{"name": "...", "url": "...", "allow": [...]}]
@@ -135,6 +140,40 @@ services:
       migrate: { condition: service_completed_successfully }
       nats: { condition: service_started }
       valkey: { condition: service_started }
+    networks: [default, agent]
+    restart: unless-stopped
+
+  # Agent middleware: DSPy reasoning programs and the only holder of model keys (agent design 7.1).
+  # Reasoning only: no database, broker, cache or tool credentials are given to it. Reachable only from
+  # the core on the internal `agent` network; no published port. Outbound only to the model provider
+  # (llm-egress). Every call must carry a KH1 assertion signed with AGENT_MW_SECRET, and no model is
+  # called until KUBER_LLM_PROCESSING_APPROVED records a processing decision (TAGOF Domain 12).
+  agent-mw:
+    build: { context: ., dockerfile: services/agent-mw/Dockerfile }
+    environment:
+      <<: *need
+      AGENT_MW_SECRET: ${AGENT_MW_SECRET:?run ./scripts/secure-setup.sh to add it}
+      AGENT_MW_TLS_CERT: /certs/agent-mw.crt
+      AGENT_MW_TLS_KEY: /run/agent-mw/tls.key       # copied in by deploy/agent-mw-entrypoint.sh
+      # Provider-agnostic DSPy model string (anthropic/..., openai/..., ollama_chat/...). Unset = 503 model_not_configured.
+      AGENT_MW_MODEL: ${AGENT_MW_MODEL:-}
+      KUBER_LLM_PROCESSING_APPROVED: ${KUBER_LLM_PROCESSING_APPROVED:-}
+      AGENT_MW_REQUIRE_ARTIFACTS: ${AGENT_MW_REQUIRE_ARTIFACTS:-false}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AGENT_MW_TIMEOUT_S: "20"
+      AGENT_MW_MAX_TOKENS: "1024"
+      AGENT_MW_RATE_PER_MINUTE: "60"
+    volumes:
+      - ${KUBER_HOME:?missing}/certs/ca.crt:/certs/ca.crt:ro
+      - ${KUBER_HOME:?missing}/certs/agent-mw.crt:/certs/agent-mw.crt:ro
+      - ${KUBER_HOME:?missing}/certs/agent-mw.key:/certs/agent-mw.key:ro
+    read_only: true
+    tmpfs: ["/run/agent-mw:size=1m,mode=0700", "/tmp:size=64m,mode=1777"]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE]   # entrypoint only: copy the key, then setpriv drops all
+    security_opt: ["no-new-privileges:true"]
+    networks: [agent, llm-egress]
     restart: unless-stopped
 
   web:
@@ -169,6 +208,13 @@ services:
       - ${KUBER_HOME:?missing}/certs:/certs:ro
     depends_on:
       postgres: { condition: service_healthy }
+
+networks:
+  default: {}
+  # core <-> agent-mw only; internal: no route out of it.
+  agent: { internal: true }
+  # agent-mw's outbound path to the model provider; nothing else joins it.
+  llm-egress: {}
 
 volumes:
   pgdata: {}

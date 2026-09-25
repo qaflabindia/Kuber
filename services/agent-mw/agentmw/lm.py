@@ -19,6 +19,12 @@ from .config import Settings
 def build_lm(settings: Settings) -> dspy.LM | None:
     if not settings.model:
         return None
+    if settings.model == "fake":
+        # Offline deterministic stand-in for local end-to-end runs; never in production.
+        if os.environ.get("AGENT_MW_ENV", "production") == "production":
+            raise RuntimeError("AGENT_MW_MODEL=fake is refused when AGENT_MW_ENV=production")
+        from .fake_lm import FakeLM, heuristic_responder
+        return FakeLM(heuristic_responder)
     kwargs: dict = {}
     base = os.environ.get("AGENT_MW_API_BASE")
     if base:

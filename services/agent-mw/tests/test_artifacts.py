@@ -148,3 +148,38 @@ def test_repository_lock_has_no_unapproved_artifact():
     s = Settings.from_env({})
     for e in read_lock(s.lock_path).values():
         assert len(e.sha256) == 64
+
+
+def test_lock_may_hold_the_file_bytes_hash(tmp_path):
+    """ws5/agent-gov's registry locks sha256(file bytes); either hash form is accepted."""
+    import hashlib
+    s = make_settings(tmp_path)
+    aid, _ = write_artifact(s)
+    file_hash = hashlib.sha256((s.artifacts_dir / f"{aid}.json").read_bytes()).hexdigest()
+    s.lock_path.write_text(json.dumps({"version": 1, "entries": [
+        {"kind": "dspy_artifact", "id": aid, "version": "1.0.0", "sha256": file_hash, "approver": "asha",
+         "approvedAt": "2026-09-25", "file": f"artifacts/{aid}.json"}]}))
+    loaded = resolve("next_step", s.artifacts_dir, s.lock_path)
+    assert loaded.id == aid and loaded.sha256 == file_hash
+
+
+@pytest.mark.parametrize("approver_key", ["approvedBy", "approver"])
+def test_artifacts_section_as_list_with_either_approver_key(tmp_path, approver_key):
+    s = make_settings(tmp_path)
+    aid, sha = write_artifact(s)
+    s.lock_path.write_text(json.dumps({"version": 1, "entries": [], "artifacts": [
+        {"id": aid, "version": "1.0.0", "sha256": sha, approver_key: "system_owner:asha"}]}))
+    assert resolve("next_step", s.artifacts_dir, s.lock_path).id == aid
+    s.lock_path.write_text(json.dumps({"artifacts": {aid: {"version": "1.0.0", "sha256": sha, approver_key: "asha", "approvedAt": "pending"}}}))
+    assert resolve("next_step", s.artifacts_dir, s.lock_path).id is None
+
+
+def test_require_artifacts_refuses_zero_shot(tmp_path, fake_lm):
+    s = make_settings(tmp_path, require_artifacts=True)
+    m = Mw(create_app(s, lm=fake_lm, today=TODAY))
+    r = m.post("/v1/next-step", next_step_body())
+    assert r.status_code == 503 and r.json()["error"] == "artifact_not_approved" and fake_lm.calls == 0
+    aid, sha = write_artifact(s)
+    write_lock(s, {aid: {"version": "1.0.0", "sha256": sha, "approvedBy": "asha"}})
+    m = Mw(create_app(s, lm=fake_lm, today=TODAY))
+    assert m.post("/v1/next-step", next_step_body()).status_code == 200

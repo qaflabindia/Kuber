@@ -2,8 +2,10 @@
 # Creates what Kuber needs to run encrypted and over TLS, OUTSIDE the repository:
 #   ~/.kuber/master.keys    master key (AES-256), mode 0600: unlocks every tenant's data keys
 #   ~/.kuber/secrets.env    database (owner, app, system), broker and cache passwords, session secret,
-#                           CORE_AUTH_SECRET (web signs every request to the core with it), mode 0600
-#   ~/.kuber/certs/         local CA and one service certificate (postgres, nats, core, valkey, web)
+#                           CORE_AUTH_SECRET (web signs every request to the core with it),
+#                           AGENT_MW_SECRET (core signs every request to the agent middleware with it), mode 0600
+#   ~/.kuber/certs/         local CA, one service certificate (postgres, nats, core, valkey, web) and the
+#                           agent middleware's own certificate (agent-mw.crt / agent-mw.key)
 # Idempotent: existing files are kept. `--rotate-certs` issues new certificates.
 # Back up master.keys separately from database backups: one without the other is useless.
 set -euo pipefail
@@ -32,7 +34,7 @@ if [ ! -f "$DIR/secrets.env" ]; then
   echo "created secrets.env"
 fi
 # Secrets added in later versions: appended to an existing secrets.env, never overwritten.
-for k in SYSTEM_DB_PASSWORD CORE_AUTH_SECRET; do
+for k in SYSTEM_DB_PASSWORD CORE_AUTH_SECRET AGENT_MW_SECRET; do
   grep -q "^$k=" "$DIR/secrets.env" || { echo "$k=$(openssl rand -hex 24)" >> "$DIR/secrets.env"; echo "added $k to secrets.env"; }
 done
 
@@ -67,5 +69,27 @@ CNF
   rm -f "$C/server.csr" "$C/ca.srl"
   chmod 600 "$C/ca.key" "$C/server.key"; chmod 644 "$C/ca.crt" "$C/server.crt"
   openssl verify -CAfile "$C/ca.crt" "$C/server.crt"
+fi
+
+# Agent middleware: its own key and certificate from the same CA (made the way the core's is), so its
+# key is not shared with the services that hold data. Issued when missing, re-issued with --rotate-certs
+# or after the CA changed.
+if [ ! -f "$C/agent-mw.crt" ] || [ "${1:-}" = "--rotate-certs" ] || ! openssl verify -CAfile "$C/ca.crt" "$C/agent-mw.crt" >/dev/null 2>&1; then
+  cat > "$C/agent-mw.cnf" <<'CNF'
+[v3_agentmw]
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = DNS:agent-mw, DNS:localhost, IP:127.0.0.1
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid
+CNF
+  openssl ecparam -name prime256v1 -genkey -noout -out "$C/agent-mw.key"
+  openssl req -new -key "$C/agent-mw.key" -subj "/CN=kuber-agent-mw" -out "$C/agent-mw.csr"
+  openssl x509 -req -in "$C/agent-mw.csr" -CA "$C/ca.crt" -CAkey "$C/ca.key" -CAcreateserial -days 825 -sha256 \
+    -extfile "$C/agent-mw.cnf" -extensions v3_agentmw -out "$C/agent-mw.crt" 2>/dev/null
+  rm -f "$C/agent-mw.csr" "$C/ca.srl"
+  chmod 600 "$C/agent-mw.key"; chmod 644 "$C/agent-mw.crt"
+  openssl verify -CAfile "$C/ca.crt" "$C/agent-mw.crt"
 fi
 echo "Kuber secrets are in $DIR. Start the stack with ./kuber up -d --build"

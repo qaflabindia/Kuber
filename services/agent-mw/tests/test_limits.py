@@ -77,3 +77,13 @@ def test_lm_is_configured_bounded(tmp_path):
 def test_body_size_limit(mw):
     r = mw.post("/v1/next-step", b"x" * (600 * 1024))
     assert r.status_code == 413
+
+
+def test_fake_model_refused_in_production(tmp_path, monkeypatch):
+    import pytest
+    from agentmw.lm import build_lm
+    monkeypatch.setenv("AGENT_MW_ENV", "production")
+    with pytest.raises(RuntimeError):
+        build_lm(make_settings(tmp_path, model="fake"))
+    monkeypatch.setenv("AGENT_MW_ENV", "development")
+    assert build_lm(make_settings(tmp_path, model="fake")).model == "fake/deterministic"

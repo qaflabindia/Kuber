@@ -37,7 +37,7 @@ def test_same_seed_and_dataset_give_the_same_artifact(tmp_path, program, optimiz
     assert art["approvedBy"] is None and art["program"] == program and art["seed"] == 7
     assert art["metric"].startswith(program + ".")
     assert set(art["scores"]) == {"before", "after"} and art["split"]["holdout"] >= 1
-    assert (tmp_path / "a" / f"{a['id']}.report.md").read_text().count("not approved") == 1
+    assert (tmp_path / "a" / f"{a['id']}.report.md").read_text().startswith("# Compiled artifact")
 
 
 def test_optimiser_never_writes_the_lock(tmp_path):

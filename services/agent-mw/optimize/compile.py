@@ -19,6 +19,7 @@ the programs get no tools; the only network is the model provider.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import os
@@ -127,12 +128,12 @@ def compile_program(program: str, dataset: Path, optimizer: str, seed: int, out:
     sha = content_hash(content)
     aid = f"{program}-{sha[:12]}"
     artifact = {
-        "id": aid, "version": version, "program": program, "sha256": sha,
+        "kind": "dspy_artifact", "id": aid, "version": version, "program": program, "sha256": sha,
         "optimizer": optimizer, "seed": seed, "datasetHash": dataset_hash(dataset), "dataset": dataset.name,
         "metric": metric_name, "model": model, "reflectionModel": reflection_model or model,
         "split": {"train": len(train), "holdout": len(hold), "holdoutIds": [e.get("id") for e in hold]},
         "scores": {"before": before, "after": after},
-        "dspyVersion": dspy.__version__, "owner": owner, "approvedBy": None,
+        "dspyVersion": dspy.__version__, "owner": owner, "approvedBy": None, "approvedAt": "pending",
         "report": f"{aid}.report.md", "content": content,
     }
     out.mkdir(parents=True, exist_ok=True)
@@ -192,8 +193,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--owner", default="System Owner")
     a = p.parse_args(argv)
     logging.basicConfig(level=logging.WARNING)
-    art = compile_program(a.program, a.dataset, a.optimizer, a.seed, a.out, a.model, a.reflection_model,
-                          a.budget, a.holdout, a.version, a.owner)
+    # DSPy's progress bars write to stdout; keep stdout for the one JSON result.
+    with contextlib.redirect_stdout(sys.stderr):
+        art = compile_program(a.program, a.dataset, a.optimizer, a.seed, a.out, a.model, a.reflection_model,
+                              a.budget, a.holdout, a.version, a.owner)
     print(json.dumps({"id": art["id"], "sha256": art["sha256"], "scores": art["scores"],
                       "artifact": str(a.out / f"{art['id']}.json"), "approvedBy": None}, indent=2))
     return 0
