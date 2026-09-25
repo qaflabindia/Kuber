@@ -20,11 +20,11 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import { AUTH_HEADER, AuthError, ReplayCache, ReplayStoreUnavailable, STEP_UP_MAX_AGE_MS, authKey, stepUpFresh, verifyRequestAsync, type Claims, type ReplayStore } from "@kuber/auth";
 import { ACTIONS, AccessDenied, IdentityError, ROLES, can, inScope, type Action, type Member } from "@kuber/identity";
 import { z, ZodError } from "zod";
-import { Account, BankDetails, BookPurpose, IsoDate, PartyKind, PartyTerms, Principal, TaxStatus, parseAmount, uuid, type Line } from "@kuber/contracts";
+import { Account, BankDetails, BookPurpose, Id, IsoDate, JOURNAL_STATES, PartyKind, PartyTerms, Principal, TaxStatus, parseAmount, uuid, type Line } from "@kuber/contracts";
 import { CommandConflict, ConcurrencyError, GuardDenied } from "@kuber/eventstore";
 import { DomainError, type BookCommand } from "@kuber/gl";
 import { AgentError } from "@kuber/agent";
-import { OpsError } from "@kuber/ops";
+import { OpsError, ScheduleError, financialYear, fiscalStart } from "@kuber/ops";
 import { StaleReportError, type ReportBasis, type ReportOptions } from "@kuber/reporting";
 import { IngestionError } from "@kuber/channels";
 import type { Cell } from "./cell.ts";
@@ -122,6 +122,7 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     if (err instanceof AgentError) return reply.code(err.code === "not_found" ? 404 : 409).send({ error: err.code, message: err.message });
     if (err instanceof IngestionError) return reply.code(422).send({ error: err.code, message: err.message, detail: err.detail });
     if (err instanceof OpsError) return reply.code(err.status).send({ error: err.code, message: err.message });
+    if (err instanceof ScheduleError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof ConcurrencyError) return reply.code(409).send({ error: "conflict", message: err.message });
     if (err instanceof StaleReportError) return reply.code(409).send({ error: err.code, message: err.message, basis: err.basis });
     if (err instanceof CommandConflict) return reply.code(409).send({ error: "idempotency_conflict", message: err.message });
@@ -233,12 +234,32 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     return reply.code(201).header("idempotent-replayed", String(r.replayed)).send(r.result);
   };
 
+  // A manual journal (FIN-GL-01). Control accounts only as a controlled adjustment (owner or controller,
+  // party on every control line); INR only (FIN-GL-04). A refused attempt changes nothing in the book
+  // and is recorded as a failed posting (PostingRejected) with its reason, listed in journal-lifecycle.
   app.post<P>("/v1/tenants/:tenant/books/:book/journals", async (req, reply) => {
-    const { principal } = await who(req, "journal.post");
-    const b = z.object({ txnDate: IsoDate, narration: z.string().min(1), voucherType: z.string().default("journal"), lines: z.array(ApiLine).min(2),
-      commandId: CommandKey.optional() }).parse(req.body);
-    return postOnce(req, reply, "journals", principal, b, { kind: "PostJournal", journalId: uuid(), txnDate: b.txnDate, narration: b.narration,
-      voucherType: b.voucherType, lines: b.lines.map(toLine), autonomy: "human" });
+    const { tenant, principal } = await who(req, "journal.post");
+    const raw = (req.body ?? {}) as { commandId?: unknown };
+    try {
+      const b = z.object({ txnDate: IsoDate, narration: z.string().min(1), voucherType: z.string().default("journal"), lines: z.array(ApiLine).min(2),
+        commandId: CommandKey.optional(), currency: z.string().optional(), controlledAdjustment: z.object({ reason: z.string().min(3) }).optional() }).parse(req.body);
+      return await postOnce(req, reply, "journals", principal, b, { kind: "PostJournal", journalId: uuid(), txnDate: b.txnDate, narration: b.narration,
+        voucherType: b.voucherType, lines: b.lines.map(toLine), autonomy: "human", entry: "manual",
+        ...(b.currency ? { currency: b.currency } : {}), ...(b.controlledAdjustment ? { controlledAdjustment: b.controlledAdjustment } : {}) });
+    } catch (e) {
+      if (e instanceof DomainError || e instanceof ZodError) {
+        const header = req.headers["idempotency-key"];
+        const key = typeof header === "string" ? header : typeof raw.commandId === "string" ? raw.commandId : undefined;
+        const reason = e instanceof DomainError ? `${e.code}: ${e.message}` : `invalid_request: ${e.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`).join("; ")}`;
+        const requestId = key && Id.safeParse(key).success ? key : `manual-${uuid()}`;
+        if (Id.safeParse(req.params.book).success) {
+          await cell.gl.recordRejection(tenant, req.params.book, { requestId, reason, source: "api:journals" }, { principal })
+            .catch((x) => console.error("could not record a rejected posting", x));
+          reply.header("x-kuber-rejection", requestId);
+        }
+      }
+      throw e;
+    }
   });
 
   app.post<P>("/v1/tenants/:tenant/books/:book/opening-balances", async (req, reply) => {
@@ -249,7 +270,7 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     if (!acc) throw new DomainError("no_account", `unknown account ${b.accountId}`);
     const p = parseAmount(b.amount), signed = acc.nature === "asset" ? p : -p;
     return postOnce(req, reply, "opening-balances", principal, b, { kind: "PostJournal", journalId: uuid(), txnDate: b.asOf,
-      narration: `Opening balance declared: ${b.accountId}`, voucherType: "opening", autonomy: "human",
+      narration: `Opening balance declared: ${b.accountId}`, voucherType: "opening", autonomy: "human", entry: "manual",
       lines: [{ accountId: b.accountId, amount: signed.toString(), dimensions: {} }, { accountId: "OPENING", amount: (-signed).toString(), dimensions: {} }] });
   });
 
@@ -555,6 +576,79 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     return reply.code(r.status === "committed" ? 200 : 202).send(r);
   });
   app.post<T>("/v1/tenants/:tenant/plans/:id/discard", async (req) => { const { tenant, principal } = await who(req, "read"); return cell.ops.discard(tenant, req.params.id, principal); });
+
+  // ------------------------------------------------------------ journal lifecycle (FIN-GL-01)
+  // One vocabulary over every path an entry takes: draft, submitted, approved, posting, posted, failed.
+  app.get<P>("/v1/tenants/:tenant/books/:book/journal-lifecycle", async (req) => {
+    const { tenant } = await who(req, "read");
+    const book = req.params.book;
+    const [drafts, plans, rejections, exceptions] = await Promise.all([cell.agent.lifecycle(tenant, book), cell.ops.lifecycle(tenant, book),
+      cell.gl.rejections(tenant, book), cell.ops.schedules.exceptions(tenant, book)]);
+    const items = [
+      ...drafts, ...plans,
+      ...rejections.map((r) => ({ id: r.requestId, source: "ledger" as const, state: "failed" as const, reason: r.reason, origin: r.source, at: r.at, by: r.principal })),
+      ...exceptions.map((x) => ({ id: x.occurrence_id, source: "schedule" as const, state: "failed" as const, reason: x.reason, scheduleId: x.schedule_id,
+        period: x.period, dueOn: x.due_on })),
+    ];
+    const counts = Object.fromEntries(JOURNAL_STATES.map((st) => [st, items.filter((i) => i.state === st).length]));
+    return { states: JOURNAL_STATES, counts, items };
+  });
+
+  // ------------------------------------------------------------ schedules (FIN-GL-02/03)
+  // Defined here, approved once through the schedule_approve operation (plan + commit), run by `ops run-schedules`.
+  // Lines take debit/credit in rupees like /journals; a recognition total is in rupees; responses are in paise.
+  const ScheduleApi = z.object({
+    lines: z.array(ApiLine).min(2).optional(),
+    recognition: z.object({ total: z.string() }).passthrough().optional(),
+  }).passthrough();
+  app.post<P>("/v1/tenants/:tenant/books/:book/schedules", async (req, reply) => {
+    const { tenant, principal } = await who(req, "read");                      // plan.prepare: ops guard, in create
+    const b = ScheduleApi.parse(req.body ?? {});
+    const input = { ...b, ...(b.lines ? { lines: b.lines.map(toLine) } : {}),
+      ...(b.recognition ? { recognition: { ...b.recognition, total: parseAmount(b.recognition.total).toString() } } : {}) };
+    return reply.code(201).send(await cell.ops.schedules.create(tenant, req.params.book, principal, input));
+  });
+  app.get<P>("/v1/tenants/:tenant/books/:book/schedules", async (req) => cell.ops.schedules.list((await who(req, "read")).tenant, req.params.book));
+  app.get<R>("/v1/tenants/:tenant/books/:book/schedules/reconciliation", async (req) =>
+    cell.ops.schedules.reconciliation((await who(req, "read")).tenant, req.params.book, { to: dates(req.query).to }));
+  app.get<P>("/v1/tenants/:tenant/books/:book/schedules/exceptions", async (req) => cell.ops.schedules.exceptions((await who(req, "read")).tenant, req.params.book));
+  app.get<T>("/v1/tenants/:tenant/schedules/:id", async (req) => {
+    const { tenant, member } = await who(req, "read");
+    const v = await cell.ops.schedules.get(tenant, req.params.id);
+    if (!inScope(member, v.bookId)) throw new AccessDenied(`schedule ${req.params.id} is outside your books`);
+    return v;
+  });
+  app.post<T>("/v1/tenants/:tenant/schedules/exceptions/:id/dismiss", async (req) => {
+    const { tenant, principal } = await who(req, "read");                      // plan.prepare in the book: ops guard
+    const b = z.object({ note: z.string().min(3).max(500) }).parse(req.body);
+    return cell.ops.schedules.dismissException(tenant, req.params.id, principal, b.note);
+  });
+  // Run due occurrences now (the same runner as `ops run-schedules`); postings are made as system:scheduler under each approval.
+  app.post<P>("/v1/tenants/:tenant/books/:book/schedules/run", async (req) => {
+    const { tenant } = await who(req, "plan.approve.period");
+    const b = z.object({ asOf: IsoDate.optional() }).parse(req.body ?? {});
+    return cell.ops.runSchedules(tenant, b.asOf);
+  });
+
+  // ------------------------------------------------------------ suspense (FIN-GL-05)
+  app.get<R>("/v1/tenants/:tenant/books/:book/suspense/items", async (req) => {
+    const t = await reader(req);
+    const q = z.object({ status: z.enum(["open", "resolved"]).optional(), asOf: IsoDate.optional() }).passthrough().parse(req.query);
+    return cell.agent.suspense.list(t, req.params.book, { status: q.status, asOf: q.asOf });
+  });
+  app.get<R>("/v1/tenants/:tenant/books/:book/suspense/roll-forward", async (req) => {
+    const t = await reader(req);
+    // default: the book's fiscal year to date (FIN-MDM-01 fiscal year start)
+    const q = z.object({ from: IsoDate.optional(), to: IsoDate.optional() }).parse(req.query);
+    const to = q.to ?? clock();
+    const from = q.from ?? financialYear(to, fiscalStart(await cell.gl.state(t, req.params.book))).from;
+    return cell.agent.suspense.rollForward(t, req.params.book, from, to);
+  });
+  app.post<T>("/v1/tenants/:tenant/suspense/items/:id/assign", async (req) => {
+    const { tenant, principal } = await who(req, "draft.decide");
+    const b = z.object({ owner: z.string().min(1).max(200) }).parse(req.body);
+    return cell.agent.suspense.assign(tenant, req.params.id, b.owner, principal);          // book scope: module guard
+  });
 
   app.get<P>("/v1/tenants/:tenant/books/:book/verify", async (req) => {
     const broken = await cell.gl.verify((await who(req, "read")).tenant, req.params.book);

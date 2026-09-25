@@ -274,6 +274,9 @@ active member). Identity: `POST /v1/tenants/:t/identity/{registration,authentica
 | `GET  …/books/:b/accounts/:a/lines` | Drill-through to journal lines |
 | `GET  …/books/:b/verify` | Recompute the hash chain |
 | `GET  …/books/:b/attention` | Counts for badges: open drafts, drafts awaiting approval, ratifications, open plans |
+| `GET  …/books/:b/journal-lifecycle` | Every entry (drafts, plans, refused postings, schedule exceptions) as `draft`, `submitted`, `approved`, `posting`, `posted` or `failed` |
+| `POST …/books/:b/schedules` · `GET …/books/:b/schedules[/reconciliation,/exceptions]` · `GET /v1/tenants/:t/schedules/:id` · `POST …/books/:b/schedules/run` | Recurring and recognition schedules; approve with the `schedule_approve` operation |
+| `GET  …/books/:b/suspense/items` · `GET …/books/:b/suspense/roll-forward?from=&to=` · `POST /v1/tenants/:t/suspense/items/:id/assign` | Suspense cases; resolve with the `resolve_suspense` operation |
 
 Lists of open work and drill-through are keyset pages: `?limit=` (drafts and ratifications at most
 500, plans 200, drill-through 1,000) and `?after=` (plans: `?before=`) with the cursor returned in
@@ -321,6 +324,16 @@ handler is blocked does not delay a tenant in another lane (memory bus and JetSt
 it does. Projection of one tenant's 5k journals took 54 s before and ~20 s after on the in-memory
 bus; one tenant always stays in one lane, so a single hot tenant is still bounded by one consumer.
 
+## Finance requirements (G0 pilot)
+
+Tests are in `tests/fin-gl.test.ts`, named by requirement.
+
+- **FIN-GL-01 journal lifecycle.** One vocabulary for every path an entry takes: `draft`, `submitted`, `approved`, `posting`, `posted`, `failed` (`@kuber/contracts` `draftLifecycle` / `planLifecycle`; stored draft and plan states are unchanged). A manual journal (API, any ops operation) to a control account is refused unless it is a controlled adjustment flagged and committed by an owner or controller, with the party on every control line. A refused manual journal changes nothing and is recorded as `PostingRejected` on `<tenant>/gl-rejections/<book>`, shown as `failed` with its reason.
+- **FIN-GL-02 recurring journals.** Template lines, monthly, start and end, policy version, optional auto-reversal on the first day of the next month. Approved once by a `schedule_approve` plan (period-approval authority, maker-checker); `ops run-schedules [--as-of d] [--tenant t]` then posts each occurrence as `system:scheduler` under that approval (its plan id is the journal's command id), within the approved amount, re-checking the approver's authority on every run. The occurrence id (schedule, period, kind) is claimed under the book lock with its journal, so reruns and concurrent runs post once. A locked posting or reversal date becomes an exception case; the date is never moved.
+- **FIN-GL-03 prepaid and accrual schedules.** Straight-line monthly over the coverage dates (remainder paise in the last month), remaining balance, cancellation through a `schedule_cancel` plan that recalculates the remaining balance and can release it; the `schedules` operation and `…/schedules/reconciliation` reconcile schedule balances to the GL by period.
+- **FIN-GL-05 suspense.** Each journal to `SUSPENSE` opens an item (source, owner, age, resolution). `resolve_suspense` reverses the original on the resolution date and posts the replacement (`replaces`), linking all three; a plain reversal resolves the item as reversed. The ledger refuses a manual journal that pairs suspense with non-money accounts, any journal that moves the suspense balance towards zero against non-money accounts, and a back-dated correction of a suspense entry. The roll-forward (opening + additions − resolved = closing) is by item dates, so a past period keeps its position.
+- **FIN-GL-04 foreign currency: deferred.** G0 books are INR only. The book currency and its minor-unit exponent are explicit (`BOOK_CURRENCY = "INR"`, `CURRENCY_EXPONENT.INR = 2`: amounts are integer paise), and a journal, `record` or schedule naming another currency is refused with `currency_not_supported`. Rates, transaction vs functional currency, revaluation and realised/unrealised gains are not built.
+
 ## Known limits and next steps
 
 - Evidence covers committed journals and period locks. Not yet: a plan that fails part-way (its `PlanApproved` is recorded, the failure only in `ops.plans`), later ratification of an auto-posted journal (its own event, not appended to the record), MCP tool-call traces, and control tests over `control_refs`.
@@ -337,3 +350,5 @@ bus; one tenant always stays in one lane, so a single hot tenant is still bounde
 - `carry_forward` verifies and signs off; the ledger is continuous, so balances are not re-posted and pending drafts dated in a closed year must be decided before the close.
 - The rules router covers common phrasings only; open-ended requests need the model.
 - Passkeys, command signing, Temporal timers, ClickHouse cube and Centrifugo live updates arrive in phase 1.
+- Foreign currency (FIN-GL-04) is deferred: books are INR only and other currencies are refused.
+- Schedules are monthly only; `ops run-schedules` must be run by an external timer (cron) until Temporal timers arrive. A schedule exception can be dismissed but not retried; a cancelled schedule's unreleased balance stays on its account.

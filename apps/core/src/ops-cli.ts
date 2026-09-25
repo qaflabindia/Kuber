@@ -20,6 +20,9 @@
  *                                                 (databases from before propagation); idempotent
  *   ops verify [--full] [--tenant t]              link chains and digests from each stream's verified checkpoint
  *                                                 (--full: from the first event); moves checkpoints of clean streams
+ *   ops run-schedules [--as-of d] [--tenant t]    post approved recurring / recognition schedule occurrences due on or
+ *                                                 before d (default today) once each, as system:scheduler; locked periods
+ *                                                 become exception cases (FIN-GL-02/03); idempotent and safe to run concurrently
  *
  * It starts a cell with the in-memory bus and no relay: handlers run here, events they append are
  * published by the running core's relay. Environment as for the core: DATABASE_URL, MIGRATION_URL
@@ -122,13 +125,22 @@ try {
       } finally { await nats.close(); }
       break;
     }
+    case "run-schedules": {
+      const asOf = flag("--as-of");
+      if (asOf !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) throw new Error("usage: ops run-schedules [--as-of YYYY-MM-DD] [--tenant t]");
+      const r = await ops.runSchedules(asOf, flag("--tenant"));
+      print(r);
+      console.log(`posted ${r.reduce((n, x) => n + x.posted.length, 0)}, reversed ${r.reduce((n, x) => n + x.reversed.length, 0)}, exceptions ${r.reduce((n, x) => n + x.exceptions.length, 0)}`);
+      process.exitCode = r.some((x) => x.exceptions.length || x.skipped.length) ? 1 : 0;
+      break;
+    }
     case "verify": {
       const v = await ops.verify({ full: args.includes("--full"), tenantId: flag("--tenant") });
       print(v); process.exitCode = v.problems.length ? 1 : 0;
       break;
     }
     default:
-      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify, bus-consumers, backfill-confirmations");
+      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify, bus-consumers, backfill-confirmations, run-schedules");
       process.exitCode = 2;
   }
 } finally {

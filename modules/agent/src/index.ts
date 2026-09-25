@@ -20,17 +20,21 @@
  */
 import type { Sql, TransactionSql } from "postgres";
 import {
-  addDays, journalIdForRequest, stableId, uuid,
+  addDays, draftLifecycle, journalIdForRequest, stableId, uuid,
   type Decision, type Envelope, type EventData, type Line, type RawTxn,
 } from "@kuber/contracts";
 import { DENY_ALL_GUARD, once, type EventStore, type MetaInput, type ModuleGuard, type NewEvent, type Projection } from "@kuber/eventstore";
 import { isToken, type TenantKeys } from "@kuber/crypto";
 import type { Level, PolicyEngine } from "@kuber/policy";
 import { SUSPENSE, accountNameCtx, classify, type LlmClassifier } from "./classify.ts";
+import { AgentError } from "./errors.ts";
+import { SuspenseCases } from "./suspense.ts";
 
 export { AGENT_MIGRATIONS } from "./migrations.ts";
 export { LLM_MAX_CONFIDENCE, MERCHANTS, SUSPENSE, accountNameCtx } from "./classify.ts";
 export type { ClassifierAccount, ClassifierInput, LlmClassifier, LlmSuggestion } from "./classify.ts";
+export { AgentError } from "./errors.ts";
+export { SuspenseCases, suspenseItemId, type RollForward, type SuspenseItem } from "./suspense.ts";
 
 export const AGENT_PRINCIPAL = "agent:kuber";
 const INGEST_EVENT = "EVT-TXN-INGESTED";
@@ -41,9 +45,9 @@ const KNOWN_AFTER = 3;
 /** Draft states a person can act on: new, or returned by the GL with a reason. */
 const REVIEWABLE = ["queued", "awaiting_approval", "rejected_by_gl"];
 
-export class AgentError extends Error { constructor(public code: string, msg: string) { super(msg); } }
-
 export class Agent {
+  /** FIN-GL-05: suspense items as cases (source, owner, age, resolution). */
+  readonly suspense: SuspenseCases;
   /**
    * Payment holds from the party master (FIN-MDM-03, POL-501): parties among `partyIds` with an
    * unreleased bank-detail change. A draft paying such a party cannot be approved. Set by the cell.
@@ -52,7 +56,9 @@ export class Agent {
 
   constructor(private sql: Sql, private store: EventStore, private policies: PolicyEngine,
               private clock: () => string = () => new Date().toISOString().slice(0, 10),
-              private llm?: LlmClassifier, private guard: ModuleGuard = DENY_ALL_GUARD) {}
+              private llm?: LlmClassifier, private guard: ModuleGuard = DENY_ALL_GUARD) {
+    this.suspense = new SuspenseCases(store, guard, () => this.clock(), (tx, t, p, b, planId) => this.mayDecide(tx, t, p, b, planId));
+  }
 
   /**
    * May `principal` decide a draft or match review of `book`? A person needs draft.decide in that
@@ -139,6 +145,7 @@ export class Agent {
                ON CONFLICT (tenant_id, book_id, party_id, account_id) DO UPDATE SET n = agent.party_accounts.n + 1`;
     }
     await this.draftPosted(tx, t, d.journalId);
+    await this.suspense.openFromJournal(tx, env, AGENT_PRINCIPAL);
   }
 
   /**
@@ -444,6 +451,7 @@ export class Agent {
       if (!j) throw new AgentError("not_found", `no journal ${journalId} (it may not be projected yet)`);
       if (j.reversed) throw new AgentError("already_reversed", `${journalId} is already reversed`);
       if (!j.counter_account) throw new AgentError("no_counter", `${journalId} has no classifiable line`);
+      if (j.counter_account === SUSPENSE) throw new AgentError("suspense_item", `${journalId} holds a suspense item: resolve the item (resolve_suspense) instead of correcting the journal`);
       const requestId = `corr-${uuid()}`;
       const events: NewEvent[] = [{ type: "CorrectionRequested", data: { requestId, bookId: j.book_id, journalId, fromAccount: j.counter_account, toAccount } }];
       if (j.party_id && opts.learn) {
@@ -491,6 +499,24 @@ export class Agent {
       if (!p.next) return out;
       after = p.next;
     }
+  }
+
+  /**
+   * Every draft of a book with its journal lifecycle state (FIN-GL-01): queued = draft,
+   * awaiting_approval = submitted, approved = posting, posted, rejected_by_gl / rejected = failed.
+   */
+  async lifecycle(tenantId: string, bookId: string) {
+    const keys = await this.store.keys(tenantId);
+    const rows = await this.store.tenantTx(tenantId, (tx) => tx<{ draft_id: string; status: string; proposal: unknown; journal_id: string | null;
+      gl_rejection: string | null; created_at: Date; resolved_by: string | null }[]>`
+      SELECT draft_id, status, proposal, journal_id, gl_rejection, created_at, resolved_by FROM agent.drafts
+      WHERE tenant_id = ${tenantId} AND book_id = ${bookId} ORDER BY created_at, draft_id`);
+    return rows.map((r) => {
+      const p = openProposal(keys, r.draft_id, r.proposal);
+      return { id: r.draft_id, source: "draft" as const, storedStatus: r.status, state: draftLifecycle(r.status), txnDate: p.txnDate, narration: p.narration,
+        journalId: r.journal_id, reason: r.gl_rejection ? openText(keys, r.gl_rejection, `agent.drafts.gl_rejection|${r.draft_id}`) : r.status === "rejected" ? "rejected by a reviewer" : null,
+        at: r.created_at, by: r.resolved_by };
+    });
   }
 
   /** Approved drafts whose posting the GL has not answered yet (period close must wait for them). */

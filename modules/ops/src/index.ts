@@ -19,17 +19,22 @@
  * module): membership, role, book scope and separation of duties. Without a guard, nothing passes.
  */
 import type { Sql } from "postgres";
-import { canonical, sha256, uuid, type EventData, type Line } from "@kuber/contracts";
+import { canonical, planLifecycle, sha256, uuid, type EventData, type Line } from "@kuber/contracts";
 import { tenantRlsFor, type EventStore, type Migration } from "@kuber/eventstore";
 import { DomainError, type BookState } from "@kuber/gl";
 import { AgentError } from "@kuber/agent";
 import { isToken, type TenantKeys } from "@kuber/crypto";
 import { balancesFromState, paidParties } from "./math.ts";
+import { ScheduleError } from "./schedules.ts";
 import { OPERATIONS } from "./operations.ts";
+import { FIN_OPERATIONS } from "./fin-operations.ts";
+import { SCHEDULE_MIGRATIONS, Schedules } from "./schedules.ts";
 import type { Action, Effect, OpContext, OpDef, OpName, OpsGuard, Plan, PlanJournal, Services } from "./types.ts";
 
 export * from "./types.ts";
 export { OPERATIONS } from "./operations.ts";
+export { FIN_OPERATIONS } from "./fin-operations.ts";
+export { SCHEDULER, ScheduleError, ScheduleInput, Schedules, occurrencesOf, type RunResult, type ScheduleDef, type ScheduleView } from "./schedules.ts";
 export { balancesFromState, splitByWeights, rebalanceTransfers, financialYear, fiscalStart, paidParties, pctToBp } from "./math.ts";
 
 export const OPS_MIGRATIONS: Migration[] = [{
@@ -54,7 +59,7 @@ CREATE INDEX plans_open ON ops.plans (tenant_id, book_id, created_at DESC) WHERE
   id: "ops-scale-001-plan-pages",
   // Keyset pages of open plans (F11): newest first, plan id breaks ties.
   sql: `CREATE INDEX IF NOT EXISTS plans_open_page ON ops.plans (tenant_id, book_id, created_at DESC, plan_id DESC) WHERE status = 'proposed';`,
-}];
+}, ...SCHEDULE_MIGRATIONS];
 
 export class OpsError extends Error {
   constructor(public code: string, message: string, public status = 409) { super(message); }
@@ -66,9 +71,37 @@ export const isAgent = (principal: string) => /^(agent|system):/.test(principal)
 export const DENY_ALL: OpsGuard = { check: async () => { throw new OpsError("forbidden", "no authorization service configured", 403); } };
 
 export class Operations {
-  readonly defs = new Map<OpName, OpDef<any>>(OPERATIONS.map((d) => [d.name, d]));
+  readonly defs = new Map<OpName, OpDef<any>>([...OPERATIONS, ...FIN_OPERATIONS].map((d) => [d.name, d]));
+  /** Recurring and recognition schedules (FIN-GL-02/03): approved through a plan, run by `runSchedules`. */
+  readonly schedules: Schedules;
   constructor(private sql: Sql, private store: EventStore, private svc: Services, private clock: () => string = () => new Date().toISOString().slice(0, 10),
-    private guard: OpsGuard = DENY_ALL) {}
+    private guard: OpsGuard = DENY_ALL) {
+    this.schedules = new Schedules(store, svc.gl, svc.policies, guard, () => this.clock(), (t, id) => this.get(t, id),
+      svc.parties ? (t, ids, tx) => svc.parties!.holds(t, ids, tx) : undefined);
+  }
+
+  /** Post every approved schedule occurrence due on or before `asOf` (default today), once (`ops run-schedules`). */
+  runSchedules(tenant: string, asOf?: string) { return this.schedules.run(tenant, asOf ?? this.clock()); }
+
+  /**
+   * Plans of a book in the journal lifecycle vocabulary (FIN-GL-01): proposed = submitted,
+   * committed = posted (posting, for draft approvals that post through the agent), discarded or
+   * stale = failed, and a proposed plan whose commit failed = failed, with the reason.
+   */
+  async lifecycle(tenant: string, book: string) {
+    const keys = await this.store.keys(tenant);
+    const rows = await this.store.tenantTx(tenant, (tx) => tx<{ plan_id: string; op: string; status: string; plan: unknown; result: { error?: string } | null;
+      created_at: Date; created_by: string; resolved_by: string | null }[]>`
+      SELECT plan_id, op, status, plan, result, created_at, created_by, resolved_by FROM ops.plans WHERE tenant_id = ${tenant} AND book_id = ${book}
+      ORDER BY created_at, plan_id`);
+    return rows.map((r) => {
+      const p = open<Plan>(keys, r.plan_id, "plan", r.plan);
+      const error = r.status === "proposed" ? r.result?.error ?? null : null;
+      return { id: r.plan_id, source: "plan" as const, op: r.op, storedStatus: r.status, state: planLifecycle(r.status, { error, viaDrafts: r.op === "post", approvalOnly: r.op === "schedule_approve" }),
+        title: p.title, journals: p.journals.map((j) => j.journalId), reason: error ?? (r.status === "stale" ? "the books changed after simulation" : r.status === "discarded" ? "discarded" : null),
+        at: r.created_at, by: r.resolved_by ?? r.created_by };
+    });
+  }
 
   list() {
     return [...this.defs.values()].map(({ name, title, description, kind, gate, event }) => ({ name, title, description, kind, gate, event: event ?? null }));
@@ -82,7 +115,7 @@ export class Operations {
     if (!parsed.success) throw new OpsError("bad_input", parsed.error.issues.map((i) => `${i.path.join(".") || "input"}: ${i.message}`).join("; "), 400);
     const state = await this.svc.gl.state(tenant, book);
     if (!state.exists) throw new OpsError("no_book", `book ${book} does not exist`, 404);
-    const ctx: OpContext = { tenant, book, principal, today: this.clock(), state, svc: this.svc };
+    const ctx: OpContext = { tenant, book, principal, today: this.clock(), state, svc: this.svc, schedules: this.schedules };
     const d = await def.plan(ctx, parsed.data);
 
     const journals = journalsOf(state, d.actions, d.data);
@@ -189,6 +222,10 @@ export class Operations {
       return { planId, status: "awaiting_person" as const, message: `A person must approve this ${row.plan.gate === "human" ? "period operation" : "plan"} in Kuber.` };
     }
     const p = row.plan;
+    // FIN-GL-01: a controlled adjustment to a control account is committed only by an owner or controller.
+    if ((p.data as { controlledAdjustment?: unknown } | undefined)?.controlledAdjustment && !/^(owner|controller):/.test(principal)) {
+      throw new OpsError("forbidden", "a controlled adjustment to a control account needs an owner or controller to commit it", 403);
+    }
     let out: { steps: string[]; replayed?: true };
     try {
       out = await this.svc.gl.transact(tenant, row.book_id, async (b) => {
@@ -219,7 +256,18 @@ export class Operations {
         for (const a of row.actions) {
           if (a.type === "gl") {
             await b.execute(a.command, { principal, commandId: planId });
-            steps.push(a.command.kind === "PostJournal" ? `posted ${a.command.journalId}` : a.command.kind === "LockPeriod" ? `locked ${a.command.level} to ${a.command.periodEnd}` : `added ${a.command.account.accountId}`);
+            const c = a.command;
+            steps.push(c.kind === "PostJournal" ? `posted ${c.journalId}` : c.kind === "LockPeriod" ? `locked ${c.level} to ${c.periodEnd}`
+              : c.kind === "ResolveSuspense" ? `reversed ${c.journalId} as ${c.reversalJournalId}${c.newJournalId ? `, reposted as ${c.newJournalId}` : ""}` : `added ${c.account.accountId}`);
+          } else if (a.type === "approveSchedule") {
+            await this.schedules.approve(b.tx, tenant, a, principal, planId);
+            steps.push(`approved schedule ${a.scheduleId}`);
+          } else if (a.type === "cancelSchedule") {
+            await this.schedules.cancel(b.tx, tenant, a, planId);
+            steps.push(`cancelled schedule ${a.scheduleId} from ${a.effective}`);
+          } else if (a.type === "resolveSuspenseItem") {
+            await this.svc.agent.suspense.markResolved(b.tx, tenant, a.itemId, principal, planId, a);
+            steps.push(`resolved suspense item ${a.itemId}`);
           } else {
             // Draft approvals are atomic with the plan; the posting itself is the GL's decision and
             // shows on the draft (approved -> posted, or back to review with the GL's reason).
@@ -236,6 +284,7 @@ export class Operations {
         throw e;
       }
       if (e instanceof OpsError) throw e;
+      if (e instanceof ScheduleError) throw new OpsError(e.code, e.message, e.status);
       // Nothing was applied: the plan is still proposed, and committing it again is safe.
       const msg = e instanceof Error ? e.message : String(e);
       await this.store.tenantTx(tenant, (tx) => tx`UPDATE ops.plans SET result = ${tx.json({ error: msg } as never)}
@@ -259,7 +308,19 @@ function journalsOf(s: BookState, actions: Action[], data: unknown): PlanJournal
   const view = (journalId: string, txnDate: string, narration: string, voucherType: string, lines: Line[]): PlanJournal =>
     ({ journalId, txnDate, narration, voucherType, lines: lines.map((l) => ({ accountId: l.accountId, name: nm(l.accountId), amount: l.amount, ...(Object.keys(l.dimensions ?? {}).length ? { dimensions: l.dimensions } : {}) })) });
   const out: PlanJournal[] = [];
-  for (const a of actions) if (a.type === "gl" && a.command.kind === "PostJournal") out.push(view(a.command.journalId, a.command.txnDate, a.command.narration, a.command.voucherType ?? "journal", a.command.lines));
+  for (const a of actions) {
+    if (a.type !== "gl") continue;
+    const c = a.command;
+    if (c.kind === "PostJournal") out.push(view(c.journalId, c.txnDate, c.narration, c.voucherType ?? "journal", c.lines));
+    if (c.kind === "ResolveSuspense") {
+      // what the ledger will do: the reversal on the resolution date, and the replacement with suspense moved to the target
+      const j = s.journals.get(c.journalId);
+      if (!j) continue;
+      out.push(view(c.reversalJournalId, c.onDate, `Reversal of ${c.journalId}: suspense item resolved`, j.voucherType, j.lines.map((l) => ({ ...l, amount: (-BigInt(l.amount)).toString() }))));
+      if (c.newJournalId && c.toAccount) out.push(view(c.newJournalId, c.onDate, `Suspense resolved: ${j.narration}`, j.voucherType,
+        j.lines.map((l) => (s.accounts.get(l.accountId)?.accountId === "SUSPENSE" || s.accounts.get(l.accountId)?.taxonomyTag === "BS.suspense" ? { ...l, accountId: c.toAccount! } : l))));
+    }
+  }
   const fromDrafts = (data as { journalsFromDrafts?: { txnDate: string; narration: string; lines: Line[] }[] } | undefined)?.journalsFromDrafts ?? [];
   fromDrafts.forEach((j, n) => out.push(view(`draft-${n}`, j.txnDate, j.narration, "journal", j.lines)));
   return out;
