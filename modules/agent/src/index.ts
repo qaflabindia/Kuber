@@ -20,7 +20,7 @@
  */
 import type { Sql, TransactionSql } from "postgres";
 import {
-  addDays, draftLifecycle, journalIdForRequest, stableId, uuid,
+  POLICY_CHECKER, addDays, draftLifecycle, journalIdForRequest, stableId, uuid,
   type CommandSignature, type Decision, type Envelope, type EventData, type Line, type RawTxn,
 } from "@kuber/contracts";
 import { DENY_ALL_GUARD, once, type EventStore, type MetaInput, type ModuleGuard, type NewEvent, type Projection } from "@kuber/eventstore";
@@ -301,7 +301,9 @@ export class Agent {
     const meta = { ...baseMeta, policyIds: decision.policyIds };
 
     if ((decision.action === "post" || decision.action === "post_then_ratify") && c.accountId !== SUSPENSE) {
-      events.push({ type: "PostingRequested", data: { requestId, bookId: d.bookId, ...proposal, autonomy: decision.level, confidence: c.confidence, sourceStream: stream } });
+      // Role model v2: the maker is this agent; the checker is the deterministic policy engine that cleared it (L3/L4), never a language model.
+      events.push({ type: "PostingRequested", data: { requestId, bookId: d.bookId, ...proposal, autonomy: decision.level, confidence: c.confidence, sourceStream: stream,
+        checker: POLICY_CHECKER } });
       if (decision.action === "post_then_ratify") {
         const dueBy = addDays(this.clock(), RATIFY_DAYS);
         events.push({ type: "RatificationRequested", data: { requestId, dueBy } });

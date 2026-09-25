@@ -19,7 +19,7 @@
  * module): membership, role, book scope and separation of duties. Without a guard, nothing passes.
  */
 import type { Sql, TransactionSql } from "postgres";
-import { canonical, planLifecycle, sha256, uuid, type CommandSignature, type CommandSummary, type EventData, type Line } from "@kuber/contracts";
+import { POLICY_CHECKER, canonical, isPrivilegedPrincipal, planLifecycle, sha256, uuid, type CommandSignature, type CommandSummary, type EventData, type Line } from "@kuber/contracts";
 import { tenantRlsFor, type EventStore, type Migration } from "@kuber/eventstore";
 import { DomainError, type BookState } from "@kuber/gl";
 import { AgentError } from "@kuber/agent";
@@ -227,9 +227,10 @@ export class Operations {
     // FIN-MDM-04: a person carrying out an approval someone else recorded for this hash executes it
     // under that approver's authority, which the guard checks again now (not only when approving).
     const approvedBy = !isAgent(principal) && row.status === "proposed" && row.hash === hash ? await this.activeApprover(tenant, planId, row.hash, principal) : null;
+    const paying = await this.paying(tenant, row.book_id, row.plan, row.actions);
     // Authorization first, for a replay too: the stored outcome goes only to someone who may commit it.
     await this.guard.check({ step: approvedBy ? "execute" : "commit", tenant, book: row.book_id, principal, op: { name: row.plan.op, kind: row.plan.kind, gate: row.plan.gate },
-      plan: row.plan, parties: planParties(row.plan, row.actions), ...(approvedBy ? { approvedBy } : {}) });
+      plan: row.plan, parties: planParties(row.plan, row.actions), bankVerifiers: await this.bankVerifiers(tenant, paying), ...(approvedBy ? { approvedBy } : {}) });
     if (row.status === "committed" && row.hash === hash) return { planId, status: "committed" as const, steps: row.result?.done ?? [], replayed: true };
     if (row.status !== "proposed") throw new OpsError("not_open", `plan is ${row.status}`);
     if (row.hash !== hash) throw new OpsError("hash_mismatch", "the plan you approved is not the plan on record; simulate again");
@@ -241,10 +242,16 @@ export class Operations {
     if (isAgent(principal) && (await this.guard.autonomyHalted?.(tenant, row.book_id))) {
       return { planId, status: "awaiting_person" as const, message: "Autonomous action is halted for this book (kill switch): a person must approve this plan in Kuber." };
     }
+    // Role model v2 (Agent Checker): the check of an agent's commit is the policy engine, and some
+    // classes always need a person as checker, whatever the policy says.
+    if (isAgent(principal)) {
+      const excluded = await agentCheckerExclusion(tenant, row.plan, paying, this.guard);
+      if (excluded) return { planId, status: "awaiting_person" as const, message: `A person must check this plan in Kuber: ${excluded}.` };
+    }
     const p = row.plan;
-    // FIN-GL-01: a controlled adjustment to a control account is committed only by an owner or controller.
-    if ((p.data as { controlledAdjustment?: unknown } | undefined)?.controlledAdjustment && !/^(owner|controller):/.test(principal)) {
-      throw new OpsError("forbidden", "a controlled adjustment to a control account needs an owner or controller to commit it", 403);
+    // FIN-GL-01: a controlled adjustment to a control account is committed only by a superuser or controller.
+    if ((p.data as { controlledAdjustment?: unknown } | undefined)?.controlledAdjustment && !isPrivilegedPrincipal(principal)) {
+      throw new OpsError("forbidden", "a controlled adjustment to a control account needs a superuser, owner or controller to commit it", 403);
     }
     let out: { steps: string[]; replayed?: true };
     try {
@@ -280,7 +287,9 @@ export class Operations {
         await this.store.append("ops", tenant, { streamId: `${tenant}/plan/${planId}`, expected: "any", events: [{ type: "PlanApproved", data: {
           planId, bookId: row.book_id, op: p.op, hash: row.hash, basisSeq: row.basis_seq, ...(row.basis_version !== null ? { basisVersion: row.basis_version } : {}),
           gate: p.gate, needsPerson: p.needsPerson, actions: row.actions.length, preparedBy: p.createdBy, policy: p.policy as EventData<"PlanApproved">["policy"],
-          ...(approvedBy ? { approvedBy } : {}), ...(signature ? { signature } : {}) } }] },
+          ...(approvedBy ? { approvedBy } : {}), ...(signature ? { signature } : {}),
+          // Maker is never checker: an agent's commit is checked by the policy engine (agent:policy), a person's by that person or the recorded approver.
+          checker: isAgent(principal) ? POLICY_CHECKER : approvedBy ?? principal } }] },
           { principal, commandId: planId, policyIds: p.policy?.ids }, b.tx);
         const steps: string[] = [];
         for (const a of row.actions) {
@@ -326,6 +335,18 @@ export class Operations {
     return { planId, status: "committed" as const, steps: out.steps, ...(out.replayed ? { replayed: true as const } : {}), ...(approvedBy ? { approvedBy } : {}) };
   }
 
+  /** Parties a stored plan pays (a cash-like credit in a journal naming them). */
+  private async paying(tenant: string, book: string, plan: Plan, actions: Action[]): Promise<string[]> {
+    const journals = paymentJournals(actions, plan.data);
+    if (!journals.some((j) => j.lines.some((l) => l.partyId))) return [];
+    return paidParties((await this.svc.gl.state(tenant, book)).accounts, journals);
+  }
+
+  /** Who verified the bank details of each paid party (conflict matrix: they may not approve the payment). */
+  private async bankVerifiers(tenant: string, partyIds: string[]) {
+    return partyIds.length && this.svc.parties?.verifiers ? this.svc.parties.verifiers(tenant, partyIds) : [];
+  }
+
   // ---------------------------------------------------------------- FIN-MDM-04: approve now, execute later
   /**
    * Record that `principal` approves exactly this plan hash, without executing it. The guard checks
@@ -340,7 +361,9 @@ export class Operations {
     if (!stored) throw new OpsError("no_plan", `no plan ${planId}`, 404);
     const keys = await this.store.keys(tenant);
     const plan = open<Plan>(keys, planId, "plan", stored.plan), actions = open<Action[]>(keys, planId, "actions", stored.actions);
-    await this.guard.check({ step: "approve", tenant, book: stored.book_id, principal, op: { name: plan.op, kind: plan.kind, gate: plan.gate }, plan, parties: planParties(plan, actions) });
+    const paying = await this.paying(tenant, stored.book_id, plan, actions);
+    await this.guard.check({ step: "approve", tenant, book: stored.book_id, principal, op: { name: plan.op, kind: plan.kind, gate: plan.gate }, plan, parties: planParties(plan, actions),
+      bankVerifiers: await this.bankVerifiers(tenant, paying) });
     if (stored.hash !== hash) throw new OpsError("hash_mismatch", "the plan you approved is not the plan on record; simulate again");
     if (plan.blocked) throw new OpsError("blocked", "a blocking check failed; resolve it and simulate again");
     await this.store.tenantTx(tenant, async (tx) => {
@@ -435,6 +458,18 @@ export async function invalidateApprovals(store: EventStore, tenant: string, cha
 }
 
 /** FIN-MDM-04: parties a plan's journals pay or receive from (its own journals and the drafts it would post). */
+/**
+ * Role model v2 (Agent Checker): why an agent may not commit `plan` although policy cleared it, or
+ * null. Excluded classes always need a person as checker: period operations, payments, master
+ * data and authority changes (never operations an agent can reach) and amounts above the limit.
+ */
+export async function agentCheckerExclusion(tenant: string, plan: Plan, paying: string[], guard: Pick<OpsGuard, "agentCheckerExclusion">): Promise<string | null> {
+  if (plan.gate === "human") return "period operations always need a person as checker";
+  if (paying.length) return `payments (to ${paying.join(", ")}) always need a person as checker`;
+  if (plan.needsPerson) return "policy does not clear it for autonomy L3 or L4";
+  return (await guard.agentCheckerExclusion?.(tenant, plan)) ?? null;
+}
+
 export function planParties(plan: Pick<Plan, "data">, actions: Action[]): string[] {
   const out = new Set<string>();
   for (const a of actions) if (a.type === "gl" && a.command.kind === "PostJournal") for (const l of a.command.lines) if (l.partyId) out.add(l.partyId);

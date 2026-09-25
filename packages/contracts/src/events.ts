@@ -23,7 +23,25 @@ export function isIsoDate(s: string): boolean {
   return d <= [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1]!;
 }
 export const IsoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "use YYYY-MM-DD").refine(isIsoDate, "not a real calendar date");
-export const Principal = z.string().regex(/^(owner|controller|preparer|approver|member|auditor|agent|system):[\w.@\-]+$/);
+/**
+ * Principal prefixes (role model v2, design 6.3): the roles, the legacy aliases kept in sealed
+ * history (owner, approver, preparer, member), agents and system actors.
+ */
+export const PRINCIPAL_PREFIXES = ["superuser", "admin", "system_owner", "controller", "treasurer", "staff", "auditor", "customer", "supplier",
+  "investor", "guest", "owner", "approver", "preparer", "member", "agent", "system"] as const;
+export const Principal = z.string().regex(new RegExp(`^(${PRINCIPAL_PREFIXES.join("|")}):[\\w.@\\-]+$`));
+/** Legacy principal prefixes and the role their memberships became (role model v2). */
+export const ROLE_ALIASES: Readonly<Record<string, string>> = { owner: "superuser", approver: "superuser", preparer: "staff", member: "staff" };
+/** The deterministic policy engine, recorded as checker of agent-made items that policy clears (L3/L4). Never a language model. */
+export const POLICY_CHECKER = "agent:policy";
+/** The role a principal stands for: its prefix, or the role a legacy prefix maps to (`owner:laksh` → superuser). */
+export const principalRole = (principal: string): string => {
+  if (principal === POLICY_CHECKER) return "agent_checker";
+  const p = principal.slice(0, Math.max(principal.indexOf(":"), 0));
+  return ROLE_ALIASES[p] ?? p;
+};
+/** Superusers and controllers: controlled adjustments, soft-locked periods and account controls (FIN-GL-01, FIN-MDM-02). */
+export const isPrivilegedPrincipal = (principal: string) => { const r = principalRole(principal); return r === "superuser" || r === "controller"; };
 export const AutonomyLevel = z.enum(["L0", "L1", "L2", "L3", "L4"]);
 export const Nature = z.enum(["asset", "liability", "equity", "income", "expense"]);
 export const Trust = z.enum(["authoritative", "provisional", "user"]);
@@ -260,6 +278,8 @@ export const AGENT = {
     requestId: Id, bookId: Id, txnDate: IsoDate, narration: z.string(), voucherType: z.string(),
     lines: z.array(Line).min(2), provisional: z.boolean(), autonomy: z.union([AutonomyLevel, z.literal("human")]),
     confidence: z.number().optional(), sourceStream: z.string(),
+    /** Role model v2: the checker of a posting policy cleared for L3/L4, the policy engine (agent:policy), distinct from the maker. */
+    checker: Principal.optional(),
   }),
   DraftQueued: z.object({ txnId: Id, draftId: Id, bookId: Id, status: z.enum(["queued", "awaiting_approval"]),
     proposal: z.object({ txnDate: IsoDate, narration: z.string(), voucherType: z.string(), lines: z.array(Line), provisional: z.boolean() }),
@@ -294,6 +314,12 @@ export const OPS = {
     approvedBy: Principal.optional(),
     /** Design 14.4/16.4: the committer's signature over this command (step-up-class plans), verified and stored in the same transaction. */
     signature: CommandSignature.optional(),
+    /**
+     * Role model v2: whose check let this commit happen. A person (the committer or the recorded
+     * approver), or `agent:policy` when an agent committed because policy cleared it (L3/L4). Never
+     * the maker, never a language model.
+     */
+    checker: Principal.optional(),
   }),
   /** FIN-MDM-04: a person approved exactly this plan hash; someone may execute it later (authority re-checked then). */
   PlanApprovalRecorded: z.object({ planId: Id, bookId: Id, hash: z.string().length(64), preparedBy: Principal, amountPaise: z.string().regex(/^\d+$/),
@@ -338,17 +364,20 @@ export const EVIDENCE = {
  */
 const Books = z.array(z.string()).nullable();
 export const IDENTITY = {
+  /** `partyId`: the party a Customer or Supplier membership is bound to (role model v2). */
   MemberAdded: z.object({ principal: Principal, role: z.string(), books: Books, source: z.string(), displayName: z.string(),
-    reactivated: z.boolean().default(false) }),
+    reactivated: z.boolean().default(false), partyId: Id.optional() }),
   MemberRemoved: z.object({ principal: Principal }),
   /**
    * Role or book scope of an active member changed. A role change re-keys the principal (its prefix
    * is its role): `principal` is then the successor and `previousPrincipal` the one it replaced.
    */
   MemberRoleChanged: z.object({ principal: Principal, role: z.string(), books: Books, previousRole: z.string(), previousBooks: Books,
-    previousPrincipal: Principal.optional() }),
+    previousPrincipal: Principal.optional(),
+    /** Why, when a migration changed it (role model v2: "role model v2"). */
+    reason: z.string().optional() }),
   /** `invitation` is the SHA-256 of the one-time code (the code itself is never recorded). */
-  InvitationIssued: z.object({ invitation: z.string(), principal: Principal, role: z.string(), books: Books, expiresAt: z.string() }),
+  InvitationIssued: z.object({ invitation: z.string(), principal: Principal, role: z.string(), books: Books, expiresAt: z.string(), partyId: Id.optional() }),
   InvitationRedeemed: z.object({ invitation: z.string(), principal: Principal, credentialId: z.string() }),
   CredentialRegistered: z.object({ principal: Principal, credentialId: z.string() }),
   CredentialRevoked: z.object({ principal: Principal, credentialId: z.string() }),
@@ -381,6 +410,13 @@ export const IDENTITY = {
   /** FIN-OPS-03 kill switch: autonomous posting for the tenant (bookId null) or one book goes to human review. */
   AutonomyHalted: z.object({ bookId: z.string().nullable(), reason: z.string() }),
   AutonomyResumed: z.object({ bookId: z.string().nullable(), reason: z.string() }),
+  /** Role model v2: a guest may read this item (a certified snapshot, or a report of a book) until `expiresAt`. */
+  ShareGranted: z.object({ shareId: Id, grantee: Principal, itemType: z.enum(["snapshot", "report"]), itemId: z.string(), expiresAt: z.string() }),
+  ShareRevoked: z.object({ shareId: Id, grantee: Principal }),
+  /** Role model v2: a customer raised a query (a case) about its own records; stream `<tenant>/portal/<partyId>`. */
+  PortalQueryOpened: z.object({ queryId: Id, partyId: Id, subject: z.string(), message: z.string(), reference: z.string().optional() }),
+  /** Role model v2: a certified snapshot was published to investors, or withdrawn. */
+  SnapshotPublished: z.object({ snapshotId: Id, bookId: Id, published: z.boolean() }),
 } as const;
 
 export const ALL_EVENTS = { ...GL, ...PARTY, ...CHANNELS, ...AGENT, ...OPS, ...EVIDENCE, ...IDENTITY } as const;

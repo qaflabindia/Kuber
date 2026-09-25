@@ -9,7 +9,7 @@
  * periods accept only owner or controller; every journal extends the book's hash chain.
  */
 import {
-  GENESIS_HASH, bookConfigOf, canonical, isIsoDate, sha256, type Account, type BookConfig, type CommandSignature, type Envelope, type EventData, type Line,
+  GENESIS_HASH, bookConfigOf, canonical, isIsoDate, isPrivilegedPrincipal, sha256, type Account, type BookConfig, type CommandSignature, type Envelope, type EventData, type Line,
 } from "@kuber/contracts";
 import type { NewEvent } from "@kuber/eventstore";
 import { JournalMap } from "./journals.ts";
@@ -87,8 +87,6 @@ export type BookCommand =
   | { kind: "ResolveSuspense"; itemId: string; journalId: string; reversalJournalId: string; newJournalId?: string; toAccount?: string;
       partyId?: string; dimensions?: Record<string, string>; onDate: string };
 
-const PRIVILEGED = new Set(["owner", "controller"]);
-const roleOf = (principal: string) => principal.split(":")[0] ?? "";
 
 export const evolve = (s: BookState, e: Envelope): BookState => ({ ...apply(s, e), version: e.streamVersion });
 
@@ -237,11 +235,11 @@ export function decide(s: BookState, c: BookCommand, principal: string, ctx: Dec
     }
     case "LockPeriod": {
       if (!isIsoDate(c.periodEnd)) throw new DomainError("bad_date", `bad period end ${c.periodEnd}`);
-      if (!PRIVILEGED.has(roleOf(principal))) throw new DomainError("forbidden", "only an owner or controller can lock a period");
+      if (!isPrivilegedPrincipal(principal)) throw new DomainError("forbidden", "only a superuser, owner or controller can lock a period");
       return [{ type: "PeriodLocked", data: { bookId: s.bookId, periodEnd: c.periodEnd, level: c.level, ...(c.signature ? { signature: c.signature } : {}) } }];
     }
     case "CloseAccount": {
-      if (!PRIVILEGED.has(roleOf(principal))) throw new DomainError("forbidden", "only an owner or controller can close an account");
+      if (!isPrivilegedPrincipal(principal)) throw new DomainError("forbidden", "only a superuser, owner or controller can close an account");
       if (!s.accounts.has(c.accountId)) throw new DomainError("no_account", `unknown account ${c.accountId}`);
       if (s.closed.has(c.accountId)) return [];                        // idempotent
       if (!c.reason.trim()) throw new DomainError("reason_required", "closing an account needs a reason");
@@ -252,7 +250,7 @@ export function decide(s: BookState, c: BookCommand, principal: string, ctx: Dec
       return [{ type: "AccountClosed", data: { bookId: s.bookId, accountId: c.accountId, reason: c.reason } }];
     }
     case "ChangeAccountControls": {
-      if (!PRIVILEGED.has(roleOf(principal))) throw new DomainError("forbidden", "only an owner or controller can change account controls");
+      if (!isPrivilegedPrincipal(principal)) throw new DomainError("forbidden", "only a superuser, owner or controller can change account controls");
       const a = s.accounts.get(c.accountId);
       if (!a) throw new DomainError("no_account", `unknown account ${c.accountId}`);
       if (c.taxonomyTag === undefined && c.requiredDims === undefined) return [];
@@ -347,7 +345,7 @@ export function validateJournal(s: BookState, txnDate: string, lines: Line[], pr
   for (const lock of s.locks) {
     if (txnDate > lock.periodEnd) continue;
     if (lock.level === "hard") throw new DomainError("period_hard_locked", `period ending ${lock.periodEnd} is hard-locked`);
-    if (!PRIVILEGED.has(roleOf(principal))) throw new DomainError("period_soft_locked", `period ending ${lock.periodEnd} is soft-locked; only owner or controller may post`);
+    if (!isPrivilegedPrincipal(principal)) throw new DomainError("period_soft_locked", `period ending ${lock.periodEnd} is soft-locked; only a superuser, owner or controller may post`);
   }
 }
 

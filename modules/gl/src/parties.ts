@@ -201,7 +201,7 @@ export class PartyMaster {
     const stream = partyStream(tenant, partyId);
     const keys = await this.store.keys(tenant);
     return this.store.tenantTx(tenant, async (tx) => {
-      await this.guard.permit(tenant, principal, action, { allBooks: true }, tx);
+      await this.guard.permit(tenant, principal, action, { allBooks: true, party: partyId }, tx);
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${stream}, 0))`;
       const before = (await this.store.readStream(tenant, stream, 0, tx)).reduce(evolveParty, emptyParty());
       const events = decideParty(before, c, principal);
@@ -254,8 +254,12 @@ export class PartyMaster {
   /**
    * Maker: request new beneficiary bank details. Puts the party on hold (POL-501) and, when another
    * party already has the same account, raises a review item for each such party (never a merge).
+   * `action`: `portal.supplier.bank_request` when the supplier itself asks through its portal (role
+   * model v2); the guard then holds it to its own party, and the supplier, as requester, can never
+   * verify or release its own change.
    */
-  async requestBankChange(tenant: string, principal: string, partyId: string, c: { bank: BankDetails; effectiveFrom?: string; source?: string; changeId?: string }) {
+  async requestBankChange(tenant: string, principal: string, partyId: string, c: { bank: BankDetails; effectiveFrom?: string; source?: string; changeId?: string },
+                          opts: { action?: "party.manage" | "portal.supplier.bank_request" } = {}) {
     const keys = await this.store.keys(tenant);
     const changeId = c.changeId ?? uuid();
     const accountIdx = keys.index("party-bank", normalizeBank(c.bank));
@@ -263,7 +267,7 @@ export class PartyMaster {
     const decision = this.policies?.decide({ eventCode: BANK_CHANGE_EVENT, on: this.clock(), confidence: 1 });
     const stream = partyStream(tenant, partyId);
     const out = await this.store.tenantTx(tenant, async (tx) => {
-      await this.guard.permit(tenant, principal, "party.manage", { allBooks: true }, tx);
+      await this.guard.permit(tenant, principal, opts.action ?? "party.manage", { allBooks: true, party: partyId }, tx);
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${stream}, 0))`;
       const before = (await this.store.readStream(tenant, stream, 0, tx)).reduce(evolveParty, emptyParty());
       const events = decideParty(before, { kind: "RequestBankChange", changeId, effectiveFrom: on, bank: c.bank, accountIdx, source: c.source }, principal);
@@ -321,6 +325,20 @@ export class PartyMaster {
     const q = (t: TransactionSql) => t<PartyHold[]>`
       SELECT party_id AS "partyId", change_id AS "changeId", status FROM mdm.bank_changes
       WHERE tenant_id = ${tenant} AND party_id = ANY(${ids}) AND status IN ('pending', 'verified') ORDER BY party_id`;
+    return tx ? q(tx) : this.store.tenantTx(tenant, q);
+  }
+
+  /**
+   * Who verified the bank details of each party among `partyIds`: the latest verified or released
+   * change per party (conflict matrix, role model v2: that person may not approve a payment to it).
+   */
+  async verifiers(tenant: string, partyIds: Iterable<string>, tx?: TransactionSql): Promise<{ partyId: string; principal: string }[]> {
+    const ids = [...new Set(partyIds)];
+    if (!ids.length) return [];
+    const q = (t: TransactionSql) => t<{ partyId: string; principal: string }[]>`
+      SELECT DISTINCT ON (party_id) party_id AS "partyId", verified_by AS principal FROM mdm.bank_changes
+      WHERE tenant_id = ${tenant} AND party_id = ANY(${ids}) AND status IN ('verified', 'released') AND verified_by IS NOT NULL
+      ORDER BY party_id, requested_at DESC`;
     return tx ? q(tx) : this.store.tenantTx(tenant, q);
   }
 

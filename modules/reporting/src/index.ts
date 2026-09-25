@@ -91,6 +91,14 @@ CREATE POLICY tenant_isolation ON reporting.snapshots
   USING (tenant_id = current_setting('kuber.tenant', true)) WITH CHECK (tenant_id = current_setting('kuber.tenant', true));
 CREATE POLICY system_scope ON reporting.snapshots TO kuber_system_scope USING (true) WITH CHECK (true);
 `,
+}, {
+  id: "reporting-005-investor-publication",
+  // Role model v2: investors read certified snapshots published to them, and nothing else.
+  sql: `
+ALTER TABLE reporting.snapshots ADD COLUMN published_to_investors BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN published_by TEXT, ADD COLUMN published_at TIMESTAMPTZ;
+CREATE INDEX snapshots_published ON reporting.snapshots (tenant_id, taken_at) WHERE published_to_investors;
+`,
 }];
 
 /** Largest drill-through page. */
@@ -320,10 +328,42 @@ export class Reporting {
     return { ...snap, verified };
   }
 
-  async listSnapshots(tenantId: string, bookId?: string) {
-    return this.store.tenantTx(tenantId, (tx) => tx<{ snapshot_id: string; book_id: string; kind: string; seq: number; content_hash: string; taken_by: string; taken_at: Date }[]>`
-      SELECT snapshot_id, book_id, kind, seq, content_hash, taken_by, taken_at FROM reporting.snapshots
-      WHERE tenant_id = ${tenantId} ${bookId ? tx`AND book_id = ${bookId}` : tx``} ORDER BY taken_at`);
+  async listSnapshots(tenantId: string, bookId?: string, opts: { publishedOnly?: boolean } = {}) {
+    return this.store.tenantTx(tenantId, (tx) => tx<{ snapshot_id: string; book_id: string; kind: string; seq: number; content_hash: string; taken_by: string; taken_at: Date;
+      published_to_investors: boolean }[]>`
+      SELECT snapshot_id, book_id, kind, seq, content_hash, taken_by, taken_at, published_to_investors FROM reporting.snapshots
+      WHERE tenant_id = ${tenantId} ${bookId ? tx`AND book_id = ${bookId}` : tx``} ${opts.publishedOnly ? tx`AND published_to_investors` : tx``} ORDER BY taken_at`);
+  }
+
+  /**
+   * Role model v2: mark a certified snapshot published to investors (or withdraw it). `authorize`
+   * runs first in the same transaction (the identity module checks snapshot.publish and records the
+   * change in its audit stream), so the flag and its audit event commit together. Returns the
+   * snapshot's book, or null when there is no such snapshot.
+   */
+  async publishSnapshot(tenantId: string, snapshotId: string, by: string, published: boolean,
+                        authorize: (tx: TransactionSql, bookId: string) => Promise<void>): Promise<{ snapshotId: string; bookId: string; published: boolean } | null> {
+    return this.store.tenantTx(tenantId, async (tx) => {
+      const [r] = await tx<{ book_id: string }[]>`SELECT book_id FROM reporting.snapshots WHERE tenant_id = ${tenantId} AND snapshot_id = ${snapshotId} FOR UPDATE`;
+      if (!r) return null;
+      await authorize(tx, r.book_id);
+      await tx`UPDATE reporting.snapshots SET published_to_investors = ${published}, published_by = ${by}, published_at = now()
+        WHERE tenant_id = ${tenantId} AND snapshot_id = ${snapshotId}`;
+      return { snapshotId, bookId: r.book_id, published };
+    });
+  }
+
+  /** Is this snapshot published to investors? */
+  async isPublished(tenantId: string, snapshotId: string): Promise<boolean> {
+    const [r] = await this.store.tenantTx(tenantId, (tx) => tx<{ p: boolean }[]>`
+      SELECT published_to_investors AS p FROM reporting.snapshots WHERE tenant_id = ${tenantId} AND snapshot_id = ${snapshotId}`);
+    return r?.p ?? false;
+  }
+
+  /** Books with a projection in this tenant (the portal's search space). */
+  async bookIds(tenantId: string): Promise<string[]> {
+    return (await this.store.tenantTx(tenantId, (tx) => tx<{ book_id: string }[]>`
+      SELECT DISTINCT book_id FROM reporting.accounts WHERE tenant_id = ${tenantId} ORDER BY 1`)).map((r) => r.book_id);
   }
 
   /** Recompute a certified report at its ledger position and compare content hashes. */

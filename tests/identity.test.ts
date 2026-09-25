@@ -15,7 +15,7 @@ import { Keyring } from "@kuber/crypto";
 import { EventStore } from "@kuber/eventstore";
 import { KeyAdmin, buildServer, kuberTools, Copilot, type Cell } from "@kuber/core";
 import { AUDIENCE, AUTH_HEADER, ISSUER, ReplayCache, STEP_UP_MAX_AGE_MS, authKey, bodyHash, signRequest, stepUpFresh, verifyRequest } from "@kuber/auth";
-import { ACTIONS, Identity, ROLES, can, identityStream, permissionTable, type Action, type Role } from "@kuber/identity";
+import { ACTIONS, Identity, ROLES, can, identityStream, permissionTable } from "@kuber/identity";
 import type { Plan } from "@kuber/ops";
 import { CORE_AUTH_SECRET, ORIGIN, RP_ID, SoftAuthenticator, b64u, enrol, newSession, signedInject, startCell, type SignedRequest } from "./helpers.ts";
 
@@ -80,20 +80,13 @@ describe("service assertions (BFF → core)", () => {
 
 // ---------------------------------------------------------------- permissions (pure)
 describe("role permissions", () => {
-  const expected: Record<Role, Action[]> = {
-    owner: [...ACTIONS],
-    controller: ACTIONS.filter((a) => a !== "members.manage" && a !== "settings.manage"),
-    // FIN-MDM-03: a preparer is the maker of party changes; an approver verifies and releases them.
-    preparer: ["read", "capture", "plan.prepare", "copilot", "party.manage"],
-    approver: ["read", "draft.decide", "journal.ratify", "plan.prepare", "plan.approve", "plan.discard", "copilot", "party.bank.verify", "party.bank.release"],
-    auditor: ["read", "members.read"],
-    member: ["read", "capture", "plan.prepare", "copilot"],
-  };
-  it.each(ROLES.flatMap((r) => ACTIONS.map((a) => [r, a] as const)))("%s may %s: as specified", (role, action) => {
-    expect(can(role, action)).toBe(expected[role].includes(action));
-  });
-  it("denies unknown roles and agents everything", () => {
-    for (const a of ACTIONS) { expect(can("agent", a)).toBe(false); expect(can("root", a)).toBe(false); }
+  // Role model v2: the full role x action matrix is in tests/roles.test.ts. Legacy role names stand for their roles.
+  it.each([["owner", "superuser"], ["approver", "superuser"], ["preparer", "staff"], ["member", "staff"], ["controller", "controller"], ["auditor", "auditor"]] as const)(
+    "legacy %s may exactly what %s may", (legacy, role) => {
+      for (const a of ACTIONS) expect(can(legacy, a)).toBe(can(role, a));
+    });
+  it("denies unknown roles everything; agents only capture and prepare", () => {
+    for (const a of ACTIONS) { expect(can("root", a)).toBe(false); expect(can("agent", a)).toBe(a === "capture" || a === "plan.prepare"); }
     expect(Object.keys(permissionTable())).toEqual([...ROLES]);
   });
 });

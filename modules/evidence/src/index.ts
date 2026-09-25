@@ -12,7 +12,7 @@
  * id, statement content hash, transaction id, draft id, event id, or the record hash itself.
  */
 import type { TransactionSql } from "postgres";
-import { canonical, sha256, stableId, type CommandSignature, type Envelope, type EventData, type EventType, type Line } from "@kuber/contracts";
+import { POLICY_CHECKER, canonical, principalRole, sha256, stableId, type CommandSignature, type Envelope, type EventData, type EventType, type Line } from "@kuber/contracts";
 import { once, tenantRlsFor, type EventStore, type Migration, type Projection } from "@kuber/eventstore";
 
 export const EVIDENCE_MIGRATIONS: Migration[] = [{
@@ -68,7 +68,10 @@ export type SignatureVerifier = (tenant: string, env: Pick<Envelope, "type" | "d
 
 const SUSPENSE = "SUSPENSE";
 const cite = (e: Envelope): Citation => ({ eventId: e.eventId, type: e.type, streamId: e.streamId, streamVersion: e.streamVersion });
-const roleOf = (principal: string) => principal.split(":")[0]!;
+/** The role a principal stands for (legacy prefixes map to their role model v2 role: owner:laksh is a superuser). */
+const roleOf = (principal: string) => principalRole(principal);
+/** The checker of a committed plan: recorded on PlanApproved (role model v2); earlier events: the recorded approver or the committer. */
+const checkerOf = (e: Envelope<"PlanApproved">) => e.data.checker ?? e.data.approvedBy ?? e.meta.principal;
 const last = <T extends EventType>(evs: Envelope[], type: T, pred: (d: EventData<T>) => boolean = () => true) =>
   [...evs].reverse().find((e) => e.type === type && pred(e.data as EventData<T>)) as Envelope<T> | undefined;
 
@@ -112,7 +115,10 @@ export class EvidenceService {
     let approval: Record<string, unknown> = planEvt
       ? { kind: "plan", by: planEvt.meta.principal, role: roleOf(planEvt.meta.principal), at: planEvt.meta.occurredAt, gate: planEvt.data.gate,
           authority: planEvt.data.policy ? { policyIds: planEvt.data.policy.ids, level: planEvt.data.policy.level } : null,
-          sod: { preparedBy: planEvt.data.preparedBy, approvedBy: planEvt.meta.principal, separate: planEvt.data.preparedBy !== planEvt.meta.principal } }
+          // Role model v2: the checker recorded with the commit (agent:policy for an agent's policy-cleared commit; a person otherwise).
+          checker: checkerOf(planEvt),
+          sod: { preparedBy: planEvt.data.preparedBy, approvedBy: planEvt.meta.principal, checker: checkerOf(planEvt),
+                 separate: planEvt.data.preparedBy !== checkerOf(planEvt) } }
       : { kind: "statement", by: env.meta.principal, role: roleOf(env.meta.principal), at: env.meta.occurredAt };
     // Design 14.4/16.4: the device signature over the approved command, re-verified here. When this
     // execution carries out someone else's recorded approval, that approval (and its signature) is cited.
@@ -173,6 +179,8 @@ export class EvidenceService {
             at: approved.meta.occurredAt, draftId: approved.data.draftId, accountChosen: approved.data.accountId,
             signature: await this.signatureOf(t, approved.data.signature ? approved : undefined) };
           else if (d.autonomy && d.autonomy !== "human") approval = { ...approval, kind: "policy", by: "policy", role: "policy",
+            // Role model v2: the maker is the agent that asked; the checker the policy engine, a distinct principal.
+            maker: req?.meta.principal ?? env.meta.principal, checker: req?.data.checker ?? POLICY_CHECKER,
             at: env.meta.occurredAt, authority: { policyIds: pol?.data.decision.policyIds ?? [], level: d.autonomy } };
         }
         if (ratify) exception("posted under policy; ratification by a person is due", pol?.data.decision.approver ?? "owner", ratify.data.dueBy);

@@ -9,7 +9,11 @@
  */
 import type { TransactionSql } from "postgres";
 
-export interface GuardScope { book?: string; allBooks?: boolean }
+/**
+ * `party`: the party-master record the action concerns. A party-bound member (Customer, Supplier;
+ * role model v2) may act only on the party its membership is bound to.
+ */
+export interface GuardScope { book?: string; allBooks?: boolean; party?: string }
 
 export interface ModuleGuard {
   /**

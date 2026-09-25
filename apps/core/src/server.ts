@@ -18,7 +18,7 @@
 import { Readable } from "node:stream";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { AUTH_HEADER, AuthError, ReplayCache, ReplayStoreUnavailable, authKey, verifyRequestAsync, type Claims, type ReplayStore } from "@kuber/auth";
-import { ACTIONS, AccessDenied, IdentityError, ROLES, can, inScope, type Action, type Member, type SigningIntent } from "@kuber/identity";
+import { ACTIONS, AccessDenied, IdentityError, LEGACY_ALIASES, PERSON_ROLES, can, inScope, type Action, type Member, type SigningIntent } from "@kuber/identity";
 import type { CommandSignature, SignedAction } from "@kuber/contracts";
 import type { TransactionSql } from "postgres";
 import { z, ZodError } from "zod";
@@ -34,6 +34,7 @@ import { Copilot } from "./copilot/index.ts";
 import { HELP } from "./copilot/router.ts";
 import { registerMcp } from "./mcp.ts";
 import { registerFinRoutes } from "./fin-routes.ts";
+import { registerPortalRoutes } from "./portal-routes.ts";
 import { SigningRequest, actionLabel, amountReason, draftIntent, lockIntent, planIntent, ratifyIntent } from "./signing.ts";
 import type { Who } from "./tools.ts";
 
@@ -537,9 +538,9 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     return reply.code(204).send();
   });
   // Passkeys: a member lists and revokes their own; an owner (members.manage) may revoke anyone's.
-  app.get<P>("/v1/tenants/:tenant/me/credentials", async (req) => { const { tenant, principal } = await who(req, "read"); return cell.identity.credentials(tenant, principal); });
+  app.get<P>("/v1/tenants/:tenant/me/credentials", async (req) => { const { tenant, principal } = await who(req, "self"); return cell.identity.credentials(tenant, principal); });
   app.post<{ Params: { tenant: string; id: string } }>("/v1/tenants/:tenant/credentials/:id/revoke", async (req, reply) => {
-    const { tenant, principal, member } = await who(req, "read");
+    const { tenant, principal, member } = await who(req, "self");
     const anyMember = can(member.role, "members.manage") && member.books === null;
     await cell.identity.revokeCredential(tenant, principal, req.params.id, { anyMember });
     return reply.code(204).send();
@@ -547,14 +548,17 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   // The member and what their role allows, so surfaces show only what the core would accept.
   // `passkeys` and `warnings`: an owner or controller with a single passkey is told to register a second (design 16.4).
   app.get<P>("/v1/tenants/:tenant/me", async (req) => {
-    const { tenant, principal, member } = await who(req, "read");
+    const { tenant, principal, member } = await who(req, "self");
     return { ...member, permissions: ACTIONS.filter((a) => can(member.role, a)), ...(await cell.identity.passkeyStatus(tenant, principal)) };
   });
   app.get<P>("/v1/tenants/:tenant/members", async (req) => { const { tenant } = await who(req, "members.read", { allBooks: true }); return cell.identity.members(tenant); });
   app.post<P>("/v1/tenants/:tenant/members/invitations", async (req, reply) => {
     const { tenant, principal } = await who(req, "members.manage", { allBooks: true });
-    const b = z.object({ role: z.enum(["owner", "controller", "preparer", "approver", "auditor", "member"]), displayName: z.string().min(2).max(80),
-      books: z.array(z.string().min(1)).min(1).nullable().default(null), ttlHours: z.number().int().min(1).max(24 * 14).optional() }).parse(req.body);
+    // Role model v2 roles; a legacy name (owner, preparer, ...) stands for its role, and the new member gets the new prefix.
+    // Customers and suppliers are bound to one party of the party master (partyId).
+    const b = z.object({ role: z.enum([...PERSON_ROLES, ...(Object.keys(LEGACY_ALIASES) as (keyof typeof LEGACY_ALIASES)[])] as [string, ...string[]]), displayName: z.string().min(2).max(80),
+      books: z.array(z.string().min(1)).min(1).nullable().default(null), ttlHours: z.number().int().min(1).max(24 * 14).optional(),
+      partyId: Id.optional() }).parse(req.body) as Parameters<typeof cell.identity.invite>[2];
     return reply.code(201).send(await cell.identity.invite(tenant, principal, b));
   });
   app.post<{ Params: { tenant: string; principal: string } }>("/v1/tenants/:tenant/members/:principal/revoke", async (req, reply) => {
@@ -566,7 +570,7 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   // A role and/or book-scope change; a role change answers with the successor principal.
   app.patch<M>("/v1/tenants/:tenant/members/:principal", async (req) => {
     const { tenant, principal } = await who(req, "members.manage", { allBooks: true });
-    const b = z.object({ role: z.enum(ROLES).optional(), books: z.array(z.string().min(1).max(64)).min(1).nullable().optional() })
+    const b = z.object({ role: z.enum(PERSON_ROLES).optional(), books: z.array(z.string().min(1).max(64)).min(1).nullable().optional() })
       .refine((x) => x.role !== undefined || x.books !== undefined, "change role, books or both").parse(req.body);
     return cell.identity.changeMember(tenant, principal, req.params.principal, b);
   });
@@ -575,29 +579,32 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   // Step-up: a signed-in person re-confirms with their own passkey before a sensitive approval.
   // The BFF then carries the time of that confirmation in its signed assertions (claim `su`).
   app.post<P>("/v1/tenants/:tenant/identity/stepup/options", async (req) => {
-    const { tenant, principal } = await who(req, "read");
+    const { tenant, principal } = await who(req, "self");
     return cell.identity.stepUpOptions(tenant, principal);
   });
   app.post<P>("/v1/tenants/:tenant/identity/stepup/verify", async (req) => {
-    const { tenant, principal } = await who(req, "read");
+    const { tenant, principal } = await who(req, "self");
     const b = z.union([z.object({ response: Json }), z.object({ dev: z.literal(true) })]).parse(req.body);
     return "dev" in b ? cell.identity.devStepUp(tenant, principal) : cell.identity.stepUp(tenant, principal, { response: b.response as never });
   });
   // Another passkey for the signed-in member (design 16.4: owners and controllers keep two). A member
   // who has a passkey confirms with it first (step-up, claim `su`).
   app.post<P>("/v1/tenants/:tenant/identity/passkeys/options", async (req) => {
-    const { tenant, principal } = await who(req, "read");
+    const { tenant, principal } = await who(req, "self");
     return cell.identity.addPasskeyOptions(tenant, principal);
   });
   app.post<P>("/v1/tenants/:tenant/identity/passkeys/verify", async (req, reply) => {
-    const { tenant, principal } = await who(req, "read");
+    const { tenant, principal } = await who(req, "self");
     const b = z.object({ response: Json }).parse(req.body);
     return reply.code(201).send(await cell.identity.addPasskey(tenant, principal, { response: b.response as never, stepUpAt: claimsOf.get(req)?.su }));
   });
   app.get<P>("/v1/tenants/:tenant/settings/separation", async (req) => cell.identity.settings((await who(req, "read")).tenant));
+  // Separation of duties is authority (role model v2): a superuser changes it, not an admin.
+  // `soloSuperuser` is the single-superuser exception; its earlier name `soloOwner` is still accepted.
   app.put<P>("/v1/tenants/:tenant/settings/separation", async (req) => {
-    const { tenant, principal } = await who(req, "settings.manage", { allBooks: true });
-    const b = z.object({ soloOwner: z.boolean(), sodLimitPaise: z.string().regex(/^\d+$/).nullable(), requireTwoAuthenticators: z.boolean().optional() }).parse(req.body);
+    const { tenant, principal } = await who(req, "authority.manage", { allBooks: true });
+    const b = z.object({ soloSuperuser: z.boolean().optional(), soloOwner: z.boolean().optional(), sodLimitPaise: z.string().regex(/^\d+$/).nullable(),
+      requireTwoAuthenticators: z.boolean().optional() }).refine((x) => x.soloSuperuser !== undefined || x.soloOwner !== undefined, "give soloSuperuser").parse(req.body);
     return cell.identity.setSettings(tenant, principal, b);
   });
 
@@ -765,6 +772,8 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
 
   // ------------------------------------------------------------ finance controls (FIN-MDM-04/05, FIN-OPS-02/03)
   registerFinRoutes(app, cell, who, attestFor, signatureRequired, Assertion);
+  // ------------------------------------------------------------ external roles (role model v2)
+  registerPortalRoutes(app, cell, who);
 
   return app;
 }

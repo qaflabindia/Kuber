@@ -31,7 +31,8 @@ import { rlsForTables } from "./fin-migrations.ts";
 /** How long a signing request may be answered. */
 export const SIGNING_TTL_MS = 5 * 60_000;
 /** Roles that must keep two authenticators (warning always; refusal when the tenant requires it). */
-export const TWO_AUTHENTICATOR_ROLES = new Set(["owner", "controller"]);
+/** Superusers and controllers keep two authenticators (design 16.4); legacy owners are superusers. */
+export const TWO_AUTHENTICATOR_ROLES = new Set(["superuser", "controller"]);
 /** Labelled in the stored record: the development fallback proves no possession of a key. */
 export const DEV_STEP_UP_NOTE = "DEVELOPMENT SIGN-IN ONLY: confirmed by a fresh step-up claim (su) from a member without a passkey; this is not a signature and proves nothing about the command";
 

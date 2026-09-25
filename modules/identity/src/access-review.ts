@@ -91,7 +91,7 @@ export class AccessReview {
     return this.store.tenantTx(tenant, async (tx: TransactionSql) => {
       await this.host.authorize(tenant, reviewer, "access.review", { allBooks: true }, tx);
       let kind: ReviewItem["kind"], subject: string | null, actor: string | null = null;
-      const dm = /^dormant:([a-z]+:[\w.@-]+):(never|\d{4}-\d{2}-\d{2})$/.exec(itemId);
+      const dm = /^dormant:([a-z_]+:[\w.@-]+):(never|\d{4}-\d{2}-\d{2})$/.exec(itemId);
       if (dm) { kind = "dormant"; subject = dm[1]!; }
       else {
         const e = (await this.store.readStream(tenant, `${tenant}/identity`, 0, tx)).find((x) => x.eventId === itemId && x.type !== "AccessReviewDisposed");

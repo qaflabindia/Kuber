@@ -27,7 +27,7 @@ type Who = (req: FastifyRequest, action: Action, scope?: { book?: string; allBoo
 type TP = { Params: { tenant: string } };
 type TI = { Params: { tenant: string; id: string } };
 const Paise = z.string().regex(/^\d{1,18}$/, "whole paise");
-const Principal = z.string().regex(/^[a-z]+:[\w.@-]+$/);
+const Principal = z.string().regex(/^[a-z_]+:[\w.@-]+$/);
 const When = z.string().refine((s) => !Number.isNaN(new Date(s).getTime()), "a date or timestamp");
 
 export function registerFinRoutes(app: FastifyInstance, cell: Cell, who: Who, attestFor: AttestFor, signatureRequired: SignatureRequired,
@@ -35,11 +35,11 @@ export function registerFinRoutes(app: FastifyInstance, cell: Cell, who: Who, at
   // ------------------------------------------------------------ FIN-MDM-04 authority matrix
   app.get<TP>("/v1/tenants/:tenant/authority", async (req) => cell.identity.authority.matrix((await who(req, "members.read", { allBooks: true })).tenant));
   app.put<TP>("/v1/tenants/:tenant/authority", async (req) => {
-    const { tenant, principal } = await who(req, "settings.manage", { allBooks: true });
+    const { tenant, principal } = await who(req, "authority.manage", { allBooks: true });
     return cell.identity.authority.setMatrix(tenant, principal, z.object({ enabled: z.boolean() }).parse(req.body).enabled);
   });
   app.put<TP>("/v1/tenants/:tenant/authority/bands", async (req) => {
-    const { tenant, principal } = await who(req, "settings.manage", { allBooks: true });
+    const { tenant, principal } = await who(req, "authority.manage", { allBooks: true });
     const b = z.object({ action: z.enum(DELEGABLE as [string, ...string[]]), book: z.string().min(1).nullable().default(null), role: z.string(),
       maxPaise: Paise.nullable() }).parse(req.body);
     return cell.identity.authority.setBand(tenant, principal, b);
@@ -47,7 +47,7 @@ export function registerFinRoutes(app: FastifyInstance, cell: Cell, who: Who, at
   app.get<TP>("/v1/tenants/:tenant/delegations", async (req) => {
     const { tenant, principal, member } = await who(req, "read");
     // People see delegations they gave or hold; members.read (owners, controllers, auditors) sees all.
-    return cell.identity.authority.delegations(tenant, member.books === null && ["owner", "controller", "auditor"].includes(member.role) ? {} : { principal });
+    return cell.identity.authority.delegations(tenant, member.books === null && ["superuser", "controller", "auditor"].includes(member.role) ? {} : { principal });
   });
   app.post<TP>("/v1/tenants/:tenant/delegations", async (req, reply) => {
     const { tenant, principal } = await who(req, "read");                     // holding the action is checked by delegate()

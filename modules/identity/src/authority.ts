@@ -26,7 +26,7 @@ import { randomUUID } from "node:crypto";
 import type { TransactionSql } from "postgres";
 import { Principal } from "@kuber/contracts";
 import type { EventStore, GuardScope, NewEvent } from "@kuber/eventstore";
-import { can, isRole, type Action, type Role } from "./roles.ts";
+import { can, isRole, mayNot, prefixOf, type Action, type Role } from "./roles.ts";
 import { relatedPartyNoteCtx } from "./fin-migrations.ts";
 
 /** What the authority service needs from the identity service (kept narrow to avoid an import cycle). */
@@ -57,9 +57,18 @@ export const DELEGABLE: readonly Action[] = ["plan.approve", "plan.approve.perio
  * the owner. Period operations (close, carry forward, allocate, rebalance) have no default band.
  * Each tenant sets its own with setBand.
  */
-export const DOA_DEFAULTS: Readonly<Record<string, Partial<Record<Role, bigint | null>>>> = {
-  "plan.approve": { owner: null, controller: 20_000_000n, approver: 2_500_000n },
+export const DOA_DEFAULTS: Readonly<Record<string, Partial<Record<BandRole, bigint | null>>>> = {
+  "plan.approve": { superuser: null, controller: 20_000_000n, treasurer: 20_000_000n, approver: 2_500_000n },
 };
+/**
+ * Band keys: the roles, plus the legacy `approver` band. Role model v2 migrated approver principals
+ * to Superuser, still bounded by the approver band of POL-002 while the matrix is enabled.
+ */
+export type BandRole = Role | "approver";
+/** The band a member's approvals are measured against: `approver:*` principals keep the approver band. */
+export const bandRole = (m: { principal: string; role: string }): string => (prefixOf(m.principal) === "approver" ? "approver" : m.role);
+/** Roles that can never receive approval authority by delegation. */
+const NO_AUTHORITY = new Set(["agent", "agent_checker", "auditor", "admin", "system_owner", "customer", "supplier", "investor", "guest"]);
 export const DOA_SOURCE = "POL-002 v1 (delegation of authority matrix) example bands";
 
 const rupees = (p: bigint) => `₹${(p / 100n).toLocaleString("en-IN")}${p % 100n ? `.${(p % 100n).toString().padStart(2, "0")}` : ""}`;
@@ -91,10 +100,10 @@ export class Authority {
     return r?.enabled ?? false;
   }
 
-  /** Switch the tenant's authority matrix on or off (settings.manage). Every recorded approval is re-examined. */
+  /** Switch the tenant's authority matrix on or off (authority.manage). Every recorded approval is re-examined. */
   async setMatrix(tenant: string, by: string, enabled: boolean) {
     await this.store.tenantTx(tenant, async (tx) => {
-      await this.host.authorize(tenant, by, "settings.manage", { allBooks: true }, tx);
+      await this.host.authorize(tenant, by, "authority.manage", { allBooks: true }, tx);
       await this.lock(tx, tenant);
       const [prev] = await tx<{ enabled: boolean }[]>`SELECT enabled FROM identity.authority_settings WHERE tenant_id = ${tenant}`;
       await tx`INSERT INTO identity.authority_settings (tenant_id, enabled, updated_by) VALUES (${tenant}, ${enabled}, ${by})
@@ -105,14 +114,14 @@ export class Authority {
     return this.matrix(tenant);
   }
 
-  /** Set one band (settings.manage): `maxPaise` null = no limit; `book` null = every book. */
+  /** Set one band (authority.manage): `maxPaise` null = no limit; `book` null = every book. */
   async setBand(tenant: string, by: string, b: { action: string; book: string | null; role: string; maxPaise: string | null }) {
     if (!DELEGABLE.includes(b.action as Action)) throw this.host.error("bad_action", `bands apply to ${DELEGABLE.join(", ")}`);
-    if (!isRole(b.role)) throw this.host.error("bad_role", `unknown role ${b.role}`);
+    if (!isRole(b.role) && b.role !== "approver") throw this.host.error("bad_role", `unknown role ${b.role}`);
     if (b.maxPaise !== null && !/^\d{1,18}$/.test(b.maxPaise)) throw this.host.error("bad_limit", "a band is whole paise");
     const book = b.book ?? "*";
     await this.store.tenantTx(tenant, async (tx) => {
-      await this.host.authorize(tenant, by, "settings.manage", { allBooks: true }, tx);
+      await this.host.authorize(tenant, by, "authority.manage", { allBooks: true }, tx);
       await this.lock(tx, tenant);
       const [prev] = await tx<{ max_paise: string | null }[]>`SELECT max_paise::text FROM identity.authority_bands
         WHERE tenant_id = ${tenant} AND action = ${b.action} AND book_id = ${book} AND role = ${b.role}`;
@@ -150,7 +159,7 @@ export class Authority {
     if (r) return r.max_paise === null ? null : BigInt(r.max_paise);
     const d = DOA_DEFAULTS[action];
     if (!d) return null;
-    const v = d[role as Role];
+    const v = d[role as BandRole];
     return v === undefined ? 0n : v;
   }
 
@@ -177,12 +186,12 @@ export class Authority {
       const roleOk = can(m.role, action), bookOk = m.books === null || m.books.includes(book);
       let limit: bigint | null = 0n;
       if (roleOk && bookOk) {
-        limit = await this.limitOf(t, tenant, action, book, m.role, enabled);
+        limit = await this.limitOf(t, tenant, action, book, bandRole(m), enabled);
         if (limit === null || amount <= limit) return { member: m, via: "role" as const, limitPaise: limit === null ? null : limit.toString() };
       }
       const d = await this.usableDelegation(t, tenant, principal, action, book, amount, enabled);
       if (d) return { member: m, via: "delegation" as const, delegationId: d.id, limitPaise: d.max };
-      if (!roleOk) throw this.host.denied(`${m.role} may not ${action}`);
+      if (!roleOk) throw this.host.denied(mayNot(m.principal, m.role, action));
       if (!bookOk) throw this.host.denied(`${principal} has no access to book ${book}`);
       throw this.host.denied(`${rupees(amount)} is above ${principal}'s authority of ${rupees(limit ?? 0n)} for ${action} in book ${book} (authority matrix, POL-002)`);
     });
@@ -200,7 +209,7 @@ export class Authority {
     for (const r of rows) {
       const g = await this.host.member(tenant, r.grantor, tx);
       if (!g || g.role === "agent" || !can(g.role, action as Action) || !(g.books === null || g.books.includes(book))) continue;
-      const gl = await this.limitOf(tx, tenant, action, book, g.role, enabled);
+      const gl = await this.limitOf(tx, tenant, action, book, bandRole(g), enabled);
       if (gl === null || amount <= gl) return { id: r.delegation_id, max: r.max_paise };
     }
     return null;
@@ -223,15 +232,15 @@ export class Authority {
       await this.lock(tx, tenant);
       const grantor = await this.host.member(tenant, by, tx);
       if (!grantor || grantor.role === "agent") throw this.host.denied(`${by} is not a member of workspace ${tenant}`);
-      if (!can(grantor.role, d.action as Action)) throw this.host.denied(`${grantor.role} may not ${d.action}, so cannot delegate it`);
+      if (!can(grantor.role, d.action as Action)) throw this.host.denied(`${mayNot(by, grantor.role, d.action)}, so cannot delegate it`);
       if (grantor.books !== null && (books === null || !books.every((b) => grantor.books!.includes(b))))
         throw this.host.denied(`${by} can delegate only within books ${grantor.books.join(", ")}`);
-      const own = await this.limitAcross(tx, tenant, d.action, grantor.role, books);
+      const own = await this.limitAcross(tx, tenant, d.action, bandRole(grantor), books);
       if (own !== null && max > own) throw this.host.denied(`a delegation of ${rupees(max)} exceeds the grantor's own authority of ${rupees(own)} for ${d.action}`);
       if (d.grantee === by) throw this.host.error("bad_grantee", "a delegation is to someone else");
       const grantee = await this.host.member(tenant, d.grantee, tx);
       if (!grantee) throw this.host.error("bad_grantee", `${d.grantee} is not an active member`, 404);
-      if (grantee.role === "agent" || grantee.role === "auditor") throw this.host.denied(`${grantee.role}s cannot receive approval authority`);
+      if (NO_AUTHORITY.has(grantee.role)) throw this.host.denied(`${grantee.role}s cannot receive approval authority`);
       await tx`INSERT INTO identity.delegations (tenant_id, delegation_id, grantor, grantee, action, books, max_paise, valid_from, valid_to, created_by)
         VALUES (${tenant}, ${id}, ${by}, ${d.grantee}, ${d.action}, ${books}, ${d.maxPaise}, ${from}, ${to}, ${by})`;
       await this.audit(tx, tenant, by, [{ type: "DelegationGranted", data: { delegationId: id, grantor: by, grantee: d.grantee, action: d.action, books,
@@ -241,13 +250,13 @@ export class Authority {
     });
   }
 
-  /** Revoke a delegation: its grantor, or an owner (members.manage). Approvals the grantee recorded no longer stand. */
+  /** Revoke a delegation: its grantor, or a superuser (authority.manage). Approvals the grantee recorded no longer stand. */
   async revokeDelegation(tenant: string, by: string, delegationId: string, reason: string) {
     await this.store.tenantTx(tenant, async (tx) => {
       await this.lock(tx, tenant);
       const [r] = await tx<DRow[]>`SELECT * FROM identity.delegations WHERE tenant_id = ${tenant} AND delegation_id = ${delegationId} FOR UPDATE`;
       if (!r) throw this.host.error("not_found", `no delegation ${delegationId}`, 404);
-      if (r.grantor !== by) await this.host.authorize(tenant, by, "members.manage", { allBooks: true }, tx);
+      if (r.grantor !== by) await this.host.authorize(tenant, by, "authority.manage", { allBooks: true }, tx);
       else if (!(await this.host.member(tenant, by, tx))) throw this.host.denied(`${by} is not a member of workspace ${tenant}`);
       if (r.status === "revoked") return;
       await tx`UPDATE identity.delegations SET status = 'revoked', revoked_by = ${by}, revoked_at = now() WHERE tenant_id = ${tenant} AND delegation_id = ${delegationId}`;

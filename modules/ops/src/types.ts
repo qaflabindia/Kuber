@@ -19,7 +19,7 @@ export type OpName = "record" | "post" | "balance" | "reconcile" | "allocate" | 
 
 export interface Services { gl: GeneralLedger; reporting: Reporting; agent: Agent; policies: PolicyEngine;
   /** Party master payment holds (FIN-MDM-03). Without it, no party is treated as held. */
-  parties?: Pick<PartyMaster, "holds"> & Partial<Pick<PartyMaster, "entities">>;
+  parties?: Pick<PartyMaster, "holds"> & Partial<Pick<PartyMaster, "entities" | "verifiers">>;
   /** Design 16.4: owners and controllers who have only one active passkey (the books-in-order check warns). */
   singlePasskeyPeople?: (tenant: string) => Promise<string[]> }
 
@@ -122,9 +122,20 @@ export interface OpsGuardQuery {
   approvedBy?: string;
   /** FIN-MDM-04: parties the plan's journals pay or receive from (related-party conflict rules). */
   parties?: string[];
+  /**
+   * Role model v2 conflict matrix: who verified the bank details of each party the plan pays. The
+   * person who verified a party's bank change may not approve a payment to that party.
+   */
+  bankVerifiers?: { partyId: string; principal: string }[];
 }
 export interface OpsGuard {
   check(q: OpsGuardQuery): Promise<void>;
   /** FIN-OPS-03: is autonomous action halted (kill switch) for this tenant or book? Absent: never. */
   autonomyHalted?(tenant: string, book: string): Promise<boolean>;
+  /**
+   * Role model v2 (Agent Checker): why an agent may not commit this plan even though policy cleared
+   * it, so a person must check it (amounts above the approval limit, ...), or null. Absent: only the
+   * exclusions the operations service knows itself (period operations, payments) apply.
+   */
+  agentCheckerExclusion?(tenant: string, plan: Plan): Promise<string | null>;
 }

@@ -17,6 +17,7 @@ import { Incidents, OPS_MIGRATIONS, Operations } from "@kuber/ops";
 import { EVIDENCE_MIGRATIONS, EvidenceService } from "@kuber/evidence";
 import { IDENTITY_MIGRATIONS, IDENTITY_SEAL_MIGRATION, Identity, type IdentityOptions } from "@kuber/identity";
 import { sealIdentityColumns } from "./keys-admin.ts";
+import { Portal } from "./portal.ts";
 
 export interface CellOptions {
   /** Application connection: must be a role without SUPERUSER or BYPASSRLS, or tenant isolation does not apply. */
@@ -121,6 +122,8 @@ export class Cell {
   incidents!: Incidents;
   /** Party master (FIN-MDM-03): vendors and customers, bank-detail changes and payment holds. */
   parties!: PartyMaster;
+  /** Role model v2: what customers, suppliers, investors and guests may read, filtered at this boundary. */
+  portal!: Portal;
 
   private constructor(
     public readonly cellId: string, public readonly sql: Sql, private readonly systemSql: Sql, public readonly store: EventStore, public readonly bus: Bus,
@@ -188,6 +191,10 @@ export class Cell {
     cell.deadLetters = deadLetters;
     cell.incidents = new Incidents(store, identity);
     cell.parties = parties;
+    cell.portal = new Portal(cell);
+    // Role model v2: legacy role values (owner, approver, preparer, member) become the new roles, once
+    // (idempotent; each change is a MemberRoleChanged event with the reason "role model v2").
+    await identity.migrateRoleModel();
     return cell;
   }
 

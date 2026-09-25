@@ -11,7 +11,7 @@
  *   insight   - report, simulate, dashboard
  */
 import { z } from "zod";
-import { BOOK_CURRENCY, IsoDate, isBookCurrency, parseAmount, stableId, type Line } from "@kuber/contracts";
+import { BOOK_CURRENCY, IsoDate, isBookCurrency, parseAmount, principalRole, stableId, type Line } from "@kuber/contracts";
 import { validateJournal, type BookState } from "@kuber/gl";
 import { balancesFromState, financialYear as fyOf, fiscalStart, latestTxnDate, openProvisional, pctToBp, rebalanceTransfers, splitByWeights } from "./math.ts";
 import type { Action, Check, Draft, OpContext, OpDef, Section } from "./types.ts";
@@ -51,8 +51,8 @@ const post = (journalId: string, txnDate: string, narration: string, lines: Line
   ({ type: "gl", command: { kind: "PostJournal", journalId, txnDate, narration, voucherType, lines, autonomy: "human", entry: "manual" } });
 
 /** FIN-GL-01: who may flag a manual entry to a control account as a controlled adjustment. */
-export const ADJUSTER_ROLES = new Set(["owner", "controller"]);
-const roleOf = (principal: string) => principal.split(":")[0] ?? "";
+export const ADJUSTER_ROLES = new Set(["superuser", "controller"]);
+const isAdjuster = (principal: string) => ADJUSTER_ROLES.has(principalRole(principal));
 
 /** Default date for transfers and allocations: never before the last posting already in the book. */
 function asOfDefault(ctx: OpContext) {
@@ -105,7 +105,7 @@ export const record: OpDef<z.infer<typeof RecordInput>> = {
     if (manualControl.length) {
       checks.push({ label: "Control account entered only as a controlled adjustment", ok: !!adj, blocking: true,
         detail: adj ? `${manualControl.join(", ")}: ${adj.reason}` : `${manualControl.join(", ")} is a control account; post it from its subledger (a registered party), or as a controlled adjustment naming the party` });
-      if (adj) checks.push({ label: "Controlled adjustment flagged by an owner or controller", ok: ADJUSTER_ROLES.has(roleOf(ctx.principal)), blocking: true });
+      if (adj) checks.push({ label: "Controlled adjustment flagged by a superuser, owner or controller", ok: isAdjuster(ctx.principal), blocking: true });
     }
     const dims = i.dimensions ?? {};
     const lines: Line[] = i.direction === "out"
@@ -149,7 +149,7 @@ export const postDrafts: OpDef<z.infer<typeof PostInput>> = {
     const actions: Action[] = [], skipped: DraftRow[] = [], refusedControl: string[] = [];
     let max = 0n;
     const rows: Section["rows"] = [];
-    const adjuster = ADJUSTER_ROLES.has(roleOf(ctx.principal));
+    const adjuster = isAdjuster(ctx.principal);
     // Parties of the drafts that are registered in the party master: their control lines are subledger postings.
     const draftParties = [...new Set(picked.flatMap((d) => d.proposal.lines.map((l) => l.partyId).filter((x): x is string => !!x)))];
     const registered = draftParties.length && ctx.svc.parties?.entities ? await ctx.svc.parties.entities(ctx.tenant, draftParties) : new Map<string, string>();

@@ -9,12 +9,10 @@
  *   FIN-GL-05  suspense: amounts leave suspense only through a suspense resolution (which reverses
  *              the original and posts its replacement), never through a balancing journal.
  */
-import { BOOK_CURRENCY, CURRENCY_EXPONENT, isBookCurrency, type Account, type Line } from "@kuber/contracts";
+import { BOOK_CURRENCY, CURRENCY_EXPONENT, isBookCurrency, isPrivilegedPrincipal, type Account, type Line } from "@kuber/contracts";
 import { DomainError, type BookState } from "./book.ts";
 import { JournalMap } from "./journals.ts";
 
-const PRIVILEGED = new Set(["owner", "controller"]);
-const roleOf = (principal: string) => principal.split(":")[0] ?? "";
 
 export function assertBookCurrency(currency: string | undefined) {
   if (isBookCurrency(currency)) return;
@@ -38,7 +36,7 @@ export function checkManualControl(s: BookState, lines: Line[], principal: strin
       `${ids} is a control account: it is posted from its subledger, not by a manual entry; a correction must be a controlled adjustment with the party`);
   }
   if (!adjustment.reason?.trim()) throw new DomainError("control_account_manual", "a controlled adjustment needs a reason");
-  if (!PRIVILEGED.has(roleOf(principal))) throw new DomainError("forbidden", `only an owner or controller may make a controlled adjustment to ${ids}`);
+  if (!isPrivilegedPrincipal(principal)) throw new DomainError("forbidden", `only a superuser, owner or controller may make a controlled adjustment to ${ids}`);
   const missing = control.filter((l) => !l.partyId);
   if (missing.length) throw new DomainError("control_needs_party", `a controlled adjustment to ${ids} must name the party (subledger reference) on every control line`);
 }

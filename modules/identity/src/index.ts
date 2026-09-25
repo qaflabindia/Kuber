@@ -37,16 +37,19 @@ import type { CommandSignature, Envelope } from "@kuber/contracts";
 import type { OpsGuard, OpsGuardQuery, Plan } from "@kuber/ops";
 import type { PolicyEngine } from "@kuber/policy";
 import { ReplayCache } from "@kuber/auth";
-import { ACTIONS, can, isRole, roleOf, type Action, type Role } from "./roles.ts";
+import { ACTIONS, EXTERNAL_ROLES, LEGACY_ALIASES, PARTY_BOUND_ROLES, POLICY_CHECKER, ROLE_MODEL_V2_REASON, TREASURY_OPS, can, isPersonRole, isRole, mayNot,
+  prefixMatchesRole, prefixOf, roleOf, type Action, type LegacyRole, type PersonRole, type Role } from "./roles.ts";
 import { Authority, type AuthorityChange, type AuthorityChangeHook, type IdentityHost } from "./authority.ts";
 import { AutonomySwitch } from "./autonomy.ts";
 import { AccessReview } from "./access-review.ts";
 import { IDENTITY_FIN_MIGRATIONS } from "./fin-migrations.ts";
+import { IDENTITY_V2_MIGRATIONS } from "./v2-migrations.ts";
 import { DEV_STEP_UP_NOTE, SIGNED_EVENT_TYPES, SIGNING_MIGRATIONS, SignedCommands, SigningError, TWO_AUTHENTICATOR_ROLES, expectedBinding,
   verifyCommandSignature, type SignatureReport, type SigningIntent } from "./signing.ts";
 import { STEP_UP_MAX_AGE_MS, stepUpFresh } from "@kuber/auth";
 
 export * from "./roles.ts";
+export { IDENTITY_V2_MIGRATIONS } from "./v2-migrations.ts";
 export { Authority, DELEGABLE, DOA_DEFAULTS, DOA_SOURCE, type AuthorityBasis, type AuthorityChange, type AuthorityChangeHook, type Delegation } from "./authority.ts";
 export { AutonomySwitch, type AutonomySwitchState } from "./autonomy.ts";
 export { AccessReview, REVIEW_DECISIONS, type AccessReviewReport, type ReviewDecision, type ReviewItem } from "./access-review.ts";
@@ -103,7 +106,7 @@ CREATE POLICY system_scope ON identity.sessions TO kuber_system_scope USING (tru
   // successor, so maker-checker still recognizes the person. (Passkey revocation columns: identity-002.)
   id: "identity-004-member-succession",
   sql: `ALTER TABLE identity.members ADD COLUMN succeeded_by TEXT;`,
-}, ...IDENTITY_FIN_MIGRATIONS, ...SIGNING_MIGRATIONS];
+}, ...IDENTITY_FIN_MIGRATIONS, ...SIGNING_MIGRATIONS, ...IDENTITY_V2_MIGRATIONS];
 
 /**
  * Data migration (run once by the cell after the SQL migrations, recorded in schema_migrations):
@@ -115,6 +118,10 @@ export const memberNameCtx = (principal: string) => `identity.members.display_na
 export const enrolmentNameCtx = (tokenHash: string) => `identity.enrolments.display_name|${tokenHash}`;
 /** The tenant's identity audit stream. */
 export const identityStream = (tenant: string) => `${tenant}/identity`;
+/** A party's portal stream (role model v2): queries its customer raised. */
+export const portalStream = (tenant: string, partyId: string) => `${tenant}/portal/${partyId}`;
+/** A time-limited share of one item with a guest (role model v2). */
+export interface Share { shareId: string; grantee: string; itemType: "snapshot" | "report"; itemId: string; expiresAt: string; grantedBy: string }
 
 /** 403: authenticated, but not allowed to do this. */
 export class AccessDenied extends Error {
@@ -127,17 +134,29 @@ export class IdentityError extends Error {
 }
 
 export interface Member {
-  tenant: string; principal: string; role: Role | "agent"; books: string[] | null;
+  tenant: string; principal: string; role: Role; books: string[] | null;
   displayName: string; status: "active" | "revoked"; source: string;
+  /** The party a Customer or Supplier membership is bound to (role model v2); null for every other role. */
+  partyId: string | null;
 }
 /**
  * Separation-of-duties settings. `requireTwoAuthenticators` (off by default, design 16.4): owners
  * and controllers with fewer than two active passkeys may not sign step-up-class approvals.
  */
-export interface Separation { soloOwner: boolean; sodLimitPaise: string | null; requireTwoAuthenticators?: boolean }
+export interface Separation {
+  /**
+   * The explicit single-superuser exception (role model v2 name; stored as solo_owner). `soloOwner`
+   * is the earlier name, still accepted on input and returned alongside.
+   */
+  soloSuperuser?: boolean; soloOwner?: boolean;
+  sodLimitPaise: string | null; requireTwoAuthenticators?: boolean;
+}
+/** Settings as read: both names of the single-superuser exception. */
+export interface SeparationSettings { soloSuperuser: boolean; soloOwner: boolean; sodLimitPaise: string | null; requireTwoAuthenticators: boolean }
 /** A member's passkey, as listed for management (never the key material). */
 export interface Credential { credentialId: string; principal: string; transports: string[]; createdAt: string; lastUsedAt: string | null; revokedAt: string | null }
-export interface MemberChange { role?: Role; books?: string[] | null }
+/** `role` may be a legacy name (preparer), which stands for its role (staff). */
+export interface MemberChange { role?: PersonRole | LegacyRole; books?: string[] | null }
 export interface IdentityOptions {
   /** WebAuthn relying party: the web origin's registrable domain, e.g. "kuber.example.com". */
   rpId: string;
@@ -160,11 +179,11 @@ const denied = (m: string) => new AccessDenied(m);
 /** Ceremony kinds bound into a challenge; step-up challenges are also bound to the principal. */
 type Ceremony = "reg" | "auth" | "stepup" | "addkey";
 
-type Row = { tenant_id: string; principal: string; role: string; books: string[] | null; display_name: string; status: string; source: string };
+type Row = { tenant_id: string; principal: string; role: string; books: string[] | null; display_name: string; status: string; source: string; party_id?: string | null };
 /** Rows written before names were sealed are plaintext until the sealing migration has run. */
 const openName = (keys: TenantKeys, v: string, ctx: string) => (isToken(v) ? keys.openText(v, ctx) : v);
 const toMember = (r: Row, keys: TenantKeys): Member => ({ tenant: r.tenant_id, principal: r.principal, role: r.role as Member["role"], books: r.books,
-  displayName: openName(keys, r.display_name, memberNameCtx(r.principal)), status: r.status as Member["status"], source: r.source });
+  displayName: openName(keys, r.display_name, memberNameCtx(r.principal)), status: r.status as Member["status"], source: r.source, partyId: r.party_id ?? null });
 const sameBooks = (a: string[] | null, b: string[] | null) => (a === null || b === null ? a === b : a.length === b.length && [...a].sort().join("\u0000") === [...b].sort().join("\u0000"));
 /** Event metadata needs a principal: operator and configuration actors ("operator:cli", "config") are recorded as system:<actor>. */
 const actor = (by: string) => (Principal.safeParse(by).success ? by : `system:${by.replace(/[^\w.@-]+/g, ".").replace(/^\.+|\.+$/g, "") || "unknown"}`);
@@ -233,7 +252,7 @@ export class Identity implements OpsGuard, ModuleGuard {
   /** The active membership of `principal`; in `tx` when given (the caller's tenant transaction). */
   async member(tenant: string, principal: string, tx?: TransactionSql): Promise<Member | null> {
     const q = (t: TransactionSql) => t<Row[]>`
-      SELECT tenant_id, principal, role, books, display_name, status, source FROM identity.members
+      SELECT tenant_id, principal, role, books, display_name, status, source, party_id FROM identity.members
       WHERE tenant_id = ${tenant} AND principal = ${principal} AND status = 'active'`;
     const [r] = tx ? await q(tx) : await this.store.tenantTx(tenant, q);
     return r ? toMember(r, await this.store.keys(tenant)) : null;
@@ -241,7 +260,7 @@ export class Identity implements OpsGuard, ModuleGuard {
 
   async members(tenant: string): Promise<Member[]> {
     const rows = await this.store.tenantTx(tenant, (tx) => tx<Row[]>`
-      SELECT tenant_id, principal, role, books, display_name, status, source FROM identity.members
+      SELECT tenant_id, principal, role, books, display_name, status, source, party_id FROM identity.members
       WHERE tenant_id = ${tenant} ORDER BY created_at`);
     const keys = await this.store.keys(tenant);
     return rows.map((r) => toMember(r, keys));
@@ -261,10 +280,26 @@ export class Identity implements OpsGuard, ModuleGuard {
   async authorize(tenant: string, principal: string, action: Action, scope: GuardScope = {}, tx?: TransactionSql): Promise<Member> {
     const m = await this.member(tenant, principal, tx);
     if (!m || m.role === "agent") throw denied(`${principal} is not a member of workspace ${tenant}`);
-    if (!can(m.role, action)) throw denied(`${m.role} may not ${action}`);
+    if (!can(m.role, action)) throw denied(mayNot(principal, m.role, action));
     if (scope.book !== undefined && !inScope(m, scope.book)) throw denied(`${principal} has no access to book ${scope.book}`);
     if (scope.allBooks && m.books !== null) throw denied(`${principal} is limited to books ${m.books.join(", ")}`);
+    // Party-bound roles (role model v2): every portal action concerns the party the membership is bound to, and only it.
+    if (PARTY_BOUND_ROLES.has(m.role) && action.startsWith("portal.")) {
+      if (!m.partyId) throw denied(`${principal} is not bound to a party`);
+      if (scope.party !== undefined && scope.party !== m.partyId) throw denied(`${principal} may act only for party ${m.partyId}`);
+    }
     return m;
+  }
+
+  /**
+   * The party a Customer or Supplier member may act for with `action` (role model v2): the party
+   * its membership is bound to, never one taken from the request. Every portal query is filtered to
+   * this party at the module boundary.
+   */
+  async boundParty(tenant: string, principal: string, action: Action, tx?: TransactionSql): Promise<string> {
+    const m = await this.authorize(tenant, principal, action, {}, tx);
+    if (!PARTY_BOUND_ROLES.has(m.role) || !m.partyId) throw denied(`${principal} is not bound to a party`);
+    return m.partyId;
   }
 
   /**
@@ -280,6 +315,7 @@ export class Identity implements OpsGuard, ModuleGuard {
       return;
     }
     if (principal.startsWith("agent:")) {
+      if (principal === POLICY_CHECKER) throw denied(`${POLICY_CHECKER} is the policy engine's checker identity: it is recorded as checker, it never acts`);
       const m = await this.member(tenant, principal, tx);
       if (!m || m.role !== "agent") throw denied(`${principal} has no grant in workspace ${tenant}`);
       if (!AGENT_ACTIONS.has(action)) throw denied(`an agent may not ${action} directly; it proposes a plan for a person`);
@@ -291,25 +327,28 @@ export class Identity implements OpsGuard, ModuleGuard {
   }
 
   /** Add a member directly: operator tooling, MCP grants and tests. People normally arrive by enrolment. */
-  async addMember(tenant: string, by: string, m: { principal: string; books?: string[] | null; displayName?: string; source?: Member["source"] }): Promise<Member> {
-    const role = roleOf(m.principal);
-    if (!isRole(role) && role !== "agent") throw new IdentityError("bad_role", `unknown role in ${m.principal}`);
+  async addMember(tenant: string, by: string, m: { principal: string; books?: string[] | null; displayName?: string; source?: Member["source"]; partyId?: string | null }): Promise<Member> {
+    // The prefix is the role or a legacy alias of it (owner:laksh is a superuser); agent:policy is never a member.
+    const role = m.principal === POLICY_CHECKER ? "agent_checker" : roleOf(m.principal);
+    if (!isPersonRole(role) && role !== "agent") throw new IdentityError("bad_role", `unknown role in ${m.principal}`);
+    const partyId = this.partyFor(role, m.partyId);
     const keys = await this.store.keys(tenant);
     return this.store.tenantTx(tenant, async (tx) => {
       await this.lockTenant(tx, tenant);
-      const [prev] = await tx<Row[]>`SELECT tenant_id, principal, role, books, display_name, status, source FROM identity.members
+      const [prev] = await tx<Row[]>`SELECT tenant_id, principal, role, books, display_name, status, source, party_id FROM identity.members
         WHERE tenant_id = ${tenant} AND principal = ${m.principal}`;
-      const name = m.displayName ?? m.principal.slice(role.length + 1);
+      const name = m.displayName ?? m.principal.slice(m.principal.indexOf(":") + 1);
       const [r] = await tx<Row[]>`
-        INSERT INTO identity.members (tenant_id, principal, role, books, display_name, source, created_by)
-        VALUES (${tenant}, ${m.principal}, ${role}, ${m.books ?? null}, ${keys.seal(name, memberNameCtx(m.principal))}, ${m.source ?? "operator"}, ${by})
-        ON CONFLICT (tenant_id, principal) DO UPDATE SET status = 'active', books = EXCLUDED.books, revoked_by = NULL, revoked_at = NULL
-        RETURNING tenant_id, principal, role, books, display_name, status, source`;
+        INSERT INTO identity.members (tenant_id, principal, role, books, display_name, source, created_by, party_id)
+        VALUES (${tenant}, ${m.principal}, ${role}, ${m.books ?? null}, ${keys.seal(name, memberNameCtx(m.principal))}, ${m.source ?? "operator"}, ${by}, ${partyId})
+        ON CONFLICT (tenant_id, principal) DO UPDATE SET status = 'active', books = EXCLUDED.books, role = EXCLUDED.role, party_id = EXCLUDED.party_id,
+          revoked_by = NULL, revoked_at = NULL
+        RETURNING tenant_id, principal, role, books, display_name, status, source, party_id`;
       const member = toMember(r!, keys);
       if (!prev || prev.status !== "active") {
         await this.audit(tx, tenant, by, [{ type: "MemberAdded", data: { principal: member.principal, role: member.role, books: member.books,
-          source: member.source, displayName: member.displayName, reactivated: !!prev } }]);
-      } else if (!sameBooks(prev.books, member.books) || prev.role !== member.role) {
+          source: member.source, displayName: member.displayName, reactivated: !!prev, ...(member.partyId ? { partyId: member.partyId } : {}) } }]);
+      } else if (!sameBooks(prev.books, member.books) || prev.role !== member.role || (prev.party_id ?? null) !== member.partyId) {
         await this.audit(tx, tenant, by, [{ type: "MemberRoleChanged", data: { principal: member.principal, role: member.role, books: member.books,
           previousRole: prev.role, previousBooks: prev.books } }]);
         // FIN-MDM-04: approvals this member (or anyone holding a delegation from them) recorded no longer stand.
@@ -334,13 +373,10 @@ export class Identity implements OpsGuard, ModuleGuard {
   async revoke(tenant: string, by: string, principal: string) {
     await this.store.tenantTx(tenant, async (tx) => {
       await this.lockTenant(tx, tenant);
-      const [m] = await tx<Row[]>`SELECT tenant_id, principal, role, books, display_name, status, source FROM identity.members
+      const [m] = await tx<Row[]>`SELECT tenant_id, principal, role, books, display_name, status, source, party_id FROM identity.members
         WHERE tenant_id = ${tenant} AND principal = ${principal} AND status = 'active'`;
       if (!m) throw new IdentityError("not_found", `no active member ${principal}`, 404);
-      if (m.role === "owner") {
-        const [o] = await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM identity.members WHERE tenant_id = ${tenant} AND role = 'owner' AND status = 'active'`;
-        if (o!.n <= 1) throw new IdentityError("last_owner", "a workspace keeps at least one owner", 409);
-      }
+      if (m.role === "superuser") await this.keepOneSuperuser(tx, tenant);
       await tx`UPDATE identity.members SET status = 'revoked', revoked_by = ${by}, revoked_at = now() WHERE tenant_id = ${tenant} AND principal = ${principal}`;
       await this.audit(tx, tenant, by, [{ type: "MemberRemoved", data: { principal } }]);
       // FIN-MDM-04/05: their approvals (and their delegates') no longer stand, and plans they saved are stale.
@@ -353,10 +389,14 @@ export class Identity implements OpsGuard, ModuleGuard {
    * A one-time enrolment code for a new member (or, from operator tooling, for the owner of an
    * existing workspace that predates passkeys). Only the hash is stored.
    */
-  async invite(tenant: string, by: string, i: { role: Role; displayName: string; books?: string[] | null; principal?: string; ttlHours?: number }) {
-    if (!isRole(i.role)) throw new IdentityError("bad_role", `unknown role ${i.role}`);
+  async invite(tenant: string, by: string, input: { role: PersonRole | LegacyRole; displayName: string; books?: string[] | null; principal?: string; ttlHours?: number; partyId?: string | null }) {
+    const i = { ...input, role: (LEGACY_ALIASES[input.role] ?? input.role) as PersonRole };
+    if (!isPersonRole(i.role)) throw new IdentityError("bad_role", `unknown role ${i.role}`);
+    // New principals use the new prefixes; an explicit legacy principal (operator tooling re-inviting
+    // someone whose history is under owner:<name>) is accepted when its prefix is an alias of the role.
     const principal = i.principal ?? `${i.role}:${slug(i.displayName) || i.role}`;
-    if (roleOf(principal) !== i.role || !/^[a-z]+:[\w.@-]+$/.test(principal)) throw new IdentityError("bad_principal", `principal ${principal} must be ${i.role}:<name>`);
+    if (!prefixMatchesRole(principal, i.role) || !Principal.safeParse(principal).success) throw new IdentityError("bad_principal", `principal ${principal} must be ${i.role}:<name>`);
+    const partyId = this.partyFor(i.role, i.partyId);
     const token = randomBytes(24).toString("base64url");
     const expiresAt = new Date(this.now() + (i.ttlHours ?? ENROLMENT_TTL_HOURS) * 3600_000);
     const keys = await this.store.keys(tenant), hash = sha(token);
@@ -364,11 +404,12 @@ export class Identity implements OpsGuard, ModuleGuard {
       await this.lockTenant(tx, tenant);
       const [exists] = await tx`SELECT 1 FROM identity.members WHERE tenant_id = ${tenant} AND principal = ${principal} AND status = 'active'`;
       if (exists) throw new IdentityError("member_exists", `${principal} is already a member (to restore access for someone who lost their passkeys, an operator runs identity-cli recover)`, 409);
-      await tx`INSERT INTO identity.enrolments (tenant_id, token_hash, principal, role, books, display_name, created_by, expires_at)
-        VALUES (${tenant}, ${hash}, ${principal}, ${i.role}, ${i.books ?? null}, ${keys.seal(i.displayName, enrolmentNameCtx(hash))}, ${by}, ${expiresAt})`;
-      await this.audit(tx, tenant, by, [{ type: "InvitationIssued", data: { invitation: hash, principal, role: i.role, books: i.books ?? null, expiresAt: expiresAt.toISOString() } }]);
+      await tx`INSERT INTO identity.enrolments (tenant_id, token_hash, principal, role, books, display_name, created_by, expires_at, party_id)
+        VALUES (${tenant}, ${hash}, ${principal}, ${i.role}, ${i.books ?? null}, ${keys.seal(i.displayName, enrolmentNameCtx(hash))}, ${by}, ${expiresAt}, ${partyId})`;
+      await this.audit(tx, tenant, by, [{ type: "InvitationIssued", data: { invitation: hash, principal, role: i.role, books: i.books ?? null, expiresAt: expiresAt.toISOString(),
+        ...(partyId ? { partyId } : {}) } }]);
     });
-    return { token, principal, role: i.role, books: i.books ?? null, expiresAt: expiresAt.toISOString() };
+    return { token, principal, role: i.role, books: i.books ?? null, partyId, expiresAt: expiresAt.toISOString() };
   }
 
   /**
@@ -387,7 +428,7 @@ export class Identity implements OpsGuard, ModuleGuard {
     const keys = await this.store.keys(tenant);
     await this.store.tenantTx(tenant, async (tx) => {
       await this.lockTenant(tx, tenant);
-      const [m] = await tx<Row[]>`SELECT tenant_id, principal, role, books, display_name, status, source FROM identity.members
+      const [m] = await tx<Row[]>`SELECT tenant_id, principal, role, books, display_name, status, source, party_id FROM identity.members
         WHERE tenant_id = ${tenant} AND principal = ${principal} AND status = 'active'`;
       if (!m || m.role === "agent") throw new IdentityError("not_found", `no active member ${principal} to recover (invite new people instead)`, 404);
       const name = openName(keys, m.display_name, memberNameCtx(principal));
@@ -400,15 +441,23 @@ export class Identity implements OpsGuard, ModuleGuard {
     return { token, principal, revokeExisting, expiresAt: expiresAt.toISOString() };
   }
 
-  async settings(tenant: string, tx?: TransactionSql): Promise<Separation & { requireTwoAuthenticators: boolean }> {
+  async settings(tenant: string, tx?: TransactionSql): Promise<SeparationSettings> {
     const q = (t: TransactionSql) => t<{ solo_owner: boolean; sod_limit_paise: string | null; require_two_authenticators: boolean }[]>`
       SELECT solo_owner, sod_limit_paise::text, require_two_authenticators FROM identity.settings WHERE tenant_id = ${tenant}`;
     const [r] = tx ? await q(tx) : await this.store.tenantTx(tenant, q);
-    return { soloOwner: r?.solo_owner ?? false, sodLimitPaise: r?.sod_limit_paise ?? null, requireTwoAuthenticators: r?.require_two_authenticators ?? false };
+    const solo = r?.solo_owner ?? false;
+    return { soloSuperuser: solo, soloOwner: solo, sodLimitPaise: r?.sod_limit_paise ?? null, requireTwoAuthenticators: r?.require_two_authenticators ?? false };
   }
 
-  /** `requireTwoAuthenticators` left out keeps its current value. */
-  async setSettings(tenant: string, by: string, s: Separation) {
+  /**
+   * `requireTwoAuthenticators` left out keeps its current value. The single-superuser exception is
+   * `soloSuperuser`; the earlier name `soloOwner` is accepted too (the event keeps `soloOwner`,
+   * as recorded in sealed history).
+   */
+  async setSettings(tenant: string, by: string, input: Separation) {
+    if (input.soloSuperuser !== undefined && input.soloOwner !== undefined && input.soloSuperuser !== input.soloOwner)
+      throw new IdentityError("bad_settings", "soloSuperuser and its earlier name soloOwner disagree");
+    const s = { soloOwner: input.soloSuperuser ?? input.soloOwner ?? false, sodLimitPaise: input.sodLimitPaise, requireTwoAuthenticators: input.requireTwoAuthenticators };
     if (s.sodLimitPaise !== null && !/^\d+$/.test(s.sodLimitPaise)) throw new IdentityError("bad_limit", "limit must be whole paise");
     await this.store.tenantTx(tenant, async (tx) => {
       await this.lockTenant(tx, tenant);
@@ -432,25 +481,26 @@ export class Identity implements OpsGuard, ModuleGuard {
    * passkey, and maker-checker still treats both principals as one person.
    */
   async changeMember(tenant: string, by: string, principal: string, change: MemberChange): Promise<Member> {
-    if (change.role !== undefined && !isRole(change.role)) throw new IdentityError("bad_role", `unknown role ${String(change.role)}`);
+    if (change.role !== undefined) change = { ...change, role: LEGACY_ALIASES[change.role] ?? change.role };
+    if (change.role !== undefined && !isPersonRole(change.role)) throw new IdentityError("bad_role", `unknown role ${String(change.role)}`);
     if (change.books !== undefined && change.books !== null && (!Array.isArray(change.books) || !change.books.length || change.books.some((b) => typeof b !== "string" || !b)))
       throw new IdentityError("bad_books", "books is a non-empty list of book ids, or null for every book");
     const keys = await this.store.keys(tenant);
     return this.store.tenantTx(tenant, async (tx) => {
       await this.lockTenant(tx, tenant);
-      const [r] = await tx<Row[]>`SELECT tenant_id, principal, role, books, display_name, status, source FROM identity.members
+      const [r] = await tx<Row[]>`SELECT tenant_id, principal, role, books, display_name, status, source, party_id FROM identity.members
         WHERE tenant_id = ${tenant} AND principal = ${principal} AND status = 'active'`;
       if (!r) throw new IdentityError("not_found", `no active member ${principal}`, 404);
       if (r.role === "agent") throw new IdentityError("agent_grant", "agent grants come from configuration", 400);
       const role = change.role ?? (r.role as Role);
       const books = change.books !== undefined ? change.books : r.books;
-      if (r.role === "owner" && role !== "owner") {
-        const [o] = await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM identity.members WHERE tenant_id = ${tenant} AND role = 'owner' AND status = 'active'`;
-        if (o!.n <= 1) throw new IdentityError("last_owner", "a workspace keeps at least one owner", 409);
-      }
+      // Party-bound memberships are created by invitation with their party; a role change never moves into or out of one.
+      if (role !== r.role && (PARTY_BOUND_ROLES.has(role as Role) || PARTY_BOUND_ROLES.has(r.role as Role)))
+        throw new IdentityError("party_bound", "customer and supplier memberships are bound to a party: invite a new member instead of changing the role", 400);
+      if (r.role === "superuser" && role !== "superuser") await this.keepOneSuperuser(tx, tenant);
       if (role === r.role) {
         const [u] = await tx<Row[]>`UPDATE identity.members SET books = ${books} WHERE tenant_id = ${tenant} AND principal = ${principal}
-          RETURNING tenant_id, principal, role, books, display_name, status, source`;
+          RETURNING tenant_id, principal, role, books, display_name, status, source, party_id`;
         if (!sameBooks(r.books, books)) await this.audit(tx, tenant, by, [{ type: "MemberRoleChanged", data: { principal, role, books,
           previousRole: r.role, previousBooks: r.books } }]);
         return toMember(u!, keys);
@@ -465,7 +515,7 @@ export class Identity implements OpsGuard, ModuleGuard {
         VALUES (${tenant}, ${next}, ${role}, ${books}, ${keys.seal(name, memberNameCtx(next))}, ${r.source}, ${by})
         ON CONFLICT (tenant_id, principal) DO UPDATE SET status = 'active', books = EXCLUDED.books, display_name = EXCLUDED.display_name,
           revoked_by = NULL, revoked_at = NULL, succeeded_by = NULL
-        RETURNING tenant_id, principal, role, books, display_name, status, source`;
+        RETURNING tenant_id, principal, role, books, display_name, status, source, party_id`;
       await tx`UPDATE identity.credentials SET principal = ${next} WHERE tenant_id = ${tenant} AND principal = ${principal}`;
       await tx`UPDATE identity.members SET status = 'revoked', revoked_by = ${by}, revoked_at = now(), succeeded_by = ${next}
         WHERE tenant_id = ${tenant} AND principal = ${principal}`;
@@ -493,9 +543,13 @@ export class Identity implements OpsGuard, ModuleGuard {
   // ------------------------------------------------------------------ operations guard (F02)
   async check(q: OpsGuardQuery): Promise<void> {
     const { step, tenant, book, principal, op, plan } = q;
+    // Role model v2: the policy engine's checker identity is recorded on commits, it never acts itself.
+    if (principal === POLICY_CHECKER) throw denied(`${POLICY_CHECKER} is the policy engine's checker identity: it is recorded as checker, it never acts`);
+    if (q.approvedBy === COPILOT || q.approvedBy === POLICY_CHECKER) throw denied(`${q.approvedBy} can never be the recorded approver of a plan`);
     if (principal === COPILOT) {
-      // The copilot prepares plans for the person who asked; the person's role decides.
-      if (step !== "plan" || !q.onBehalfOf || q.onBehalfOf.startsWith("agent:")) throw denied("the copilot proposes; a person commits");
+      // The copilot prepares plans for the person who asked; the person's role decides. A language
+      // model is never a checker: it cannot commit, approve or execute anything.
+      if (step !== "plan" || !q.onBehalfOf || q.onBehalfOf.startsWith("agent:")) throw denied("the copilot proposes; a person commits (a language model is never a checker)");
       await this.authorize(tenant, q.onBehalfOf, op.kind === "write" ? "plan.prepare" : "read", { book });
       return;
     }
@@ -505,9 +559,11 @@ export class Identity implements OpsGuard, ModuleGuard {
       if (!inScope(m, book)) throw denied(`${principal} is not granted book ${book}`);
       if (step === "discard" && plan?.createdBy !== principal) throw denied("an agent may withdraw only its own plans");
       if (step === "approve" || step === "execute") throw denied("approvals are recorded and carried out by people");
-      return;                                        // commit authority is then limited by policy (needsPerson)
+      // Commit: allowed only as far as policy clears it (needsPerson, agentCheckerExclusion); the
+      // checker recorded is then agent:policy, never this agent.
+      return;
     }
-    if (!/^[a-z]+:/.test(principal) || principal.startsWith("system:")) throw denied(`${principal} may not use operations`);
+    if (!/^[a-z_]+:/.test(principal) || principal.startsWith("system:")) throw denied(`${principal} may not use operations`);
     if (step === "plan") { await this.authorize(tenant, principal, op.kind === "write" ? "plan.prepare" : "read", { book }); return; }
     if (!plan) throw denied("no plan to check");
     if (step === "discard") {
@@ -539,8 +595,25 @@ export class Identity implements OpsGuard, ModuleGuard {
     const approved = (plan.data as { approvedAmount?: string } | undefined)?.approvedAmount;
     const amount = approved && /^\d+$/.test(approved) && BigInt(approved) > planAmount(plan) ? BigInt(approved) : planAmount(plan);
     const { member: m } = await this.authority.approvalAuthority(tenant, principal, action, book, amount);
+    // A treasurer approves treasury plans only (payments, reconciliation, rebalance, cash allocation).
+    if (m.role === "treasurer" && !TREASURY_OPS.has(op.name)) throw denied(`a treasurer approves treasury plans only (${[...TREASURY_OPS].join(", ")}), not ${op.name}`);
     await this.authority.checkConflicts(tenant, principal, q.parties ?? []);
+    // Conflict matrix: whoever verified a party's bank details does not also approve a payment to it (POL-501).
+    for (const v of q.bankVerifiers ?? []) {
+      if (await this.samePerson(tenant, v.principal, principal))
+        throw denied(`${principal} verified the bank details of ${v.partyId}, so may not approve a payment to it: another person approves (conflict matrix, POL-501)`);
+    }
     await this.separation(tenant, m as Member, plan);
+  }
+
+  /**
+   * Role model v2 (Agent Checker, OpsGuard): why policy clearance alone may not commit this plan,
+   * so a person must check it. Amounts above the approval limit always need a human checker.
+   */
+  async agentCheckerExclusion(tenant: string, plan: Plan): Promise<string | null> {
+    if (plan.gate === "human") return "period operations always need a person as checker";
+    const s = await this.separationReason(tenant, plan);
+    return s ? `${s}, which always needs a person as checker` : null;
   }
 
   /** Why a plan needs someone other than its preparer to approve it, or null. */
@@ -565,15 +638,169 @@ export class Identity implements OpsGuard, ModuleGuard {
     if (!(await this.samePerson(tenant, preparer, approver.principal))) return;
     const reason = await this.separationReason(tenant, plan);
     if (!reason) return;
-    // Explicit single-owner exception: set by the owner, and only while they are the only person.
-    if (approver.role === "owner" && (await this.settings(tenant)).soloOwner && (await this.people(tenant)) === 1) return;
+    // Explicit single-superuser exception: set by the superuser, and only while they are the only person.
+    if (approver.role === "superuser" && (await this.settings(tenant)).soloSuperuser && (await this.people(tenant)) === 1) return;
     throw denied(`${reason}: it needs approval by someone other than its preparer (${preparer})`);
   }
 
   private async people(tenant: string): Promise<number> {
     const [r] = await this.store.tenantTx(tenant, (tx) => tx<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM identity.members WHERE tenant_id = ${tenant} AND status = 'active' AND role <> 'agent'`);
+      SELECT count(*)::int AS n FROM identity.members WHERE tenant_id = ${tenant} AND status = 'active'
+        AND role NOT IN ('agent', 'customer', 'supplier', 'investor', 'guest')`);
     return r!.n;
+  }
+
+  /** The party a membership of `role` is bound to: required for Customer and Supplier, refused for every other role. */
+  private partyFor(role: string, partyId: string | null | undefined): string | null {
+    if (PARTY_BOUND_ROLES.has(role as Role)) {
+      if (!partyId || !/^[A-Za-z0-9_.:@+-]{1,200}$/.test(partyId)) throw new IdentityError("party_required", `a ${role} membership is bound to one party: give its party id`);
+      return partyId;
+    }
+    if (partyId) throw new IdentityError("not_party_bound", `a ${role} membership is not bound to a party`);
+    return null;
+  }
+
+  /** A workspace keeps at least one superuser (legacy owners count: their memberships are superusers). */
+  private async keepOneSuperuser(tx: TransactionSql, tenant: string) {
+    const [o] = await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM identity.members WHERE tenant_id = ${tenant} AND role IN ('superuser', 'owner') AND status = 'active'`;
+    if (o!.n <= 1) throw new IdentityError("last_owner", "a workspace keeps at least one owner (superuser)", 409);
+  }
+
+  // ------------------------------------------------------------------ role model v2: data migration
+  /**
+   * Rewrite legacy role values (owner, approver → superuser; preparer, member → staff) in every
+   * tenant's memberships, pending invitations and authority bands. Principals keep their names
+   * (they are identifiers in sealed history). Each member changed gets a MemberRoleChanged event
+   * with the reason "role model v2", in the same transaction. Idempotent: a second run finds
+   * nothing to change and writes nothing. Returns the members changed per tenant.
+   */
+  async migrateRoleModel(): Promise<Record<string, number>> {
+    const legacy = Object.keys(LEGACY_ALIASES);
+    const tenants = (await this.store.systemTx((tx) => tx<{ tenant_id: string }[]>`
+      SELECT DISTINCT tenant_id FROM identity.members WHERE role IN ${tx(legacy)}
+      UNION SELECT DISTINCT tenant_id FROM identity.enrolments WHERE role IN ${tx(legacy)} AND used_at IS NULL
+      ORDER BY 1`)).map((r) => r.tenant_id);
+    const out: Record<string, number> = {};
+    for (const tenant of tenants) out[tenant] = await this.migrateTenantRoles(tenant);
+    return out;
+  }
+
+  /** The role model v2 migration of one tenant (see migrateRoleModel). */
+  async migrateTenantRoles(tenant: string): Promise<number> {
+    const legacy = Object.keys(LEGACY_ALIASES);
+    return this.store.tenantTx(tenant, async (tx) => {
+      await this.lockTenant(tx, tenant);
+      const rows = await tx<{ principal: string; role: string; books: string[] | null }[]>`
+        SELECT principal, role, books FROM identity.members WHERE tenant_id = ${tenant} AND role IN ${tx(legacy)} ORDER BY created_at, principal FOR UPDATE`;
+      const events: NewEvent[] = [];
+      for (const r of rows) {
+        const role = LEGACY_ALIASES[r.role]!;
+        await tx`UPDATE identity.members SET role = ${role} WHERE tenant_id = ${tenant} AND principal = ${r.principal}`;
+        events.push({ type: "MemberRoleChanged", data: { principal: r.principal, role, books: r.books, previousRole: r.role, previousBooks: r.books,
+          reason: ROLE_MODEL_V2_REASON } });
+      }
+      for (const [from, to] of Object.entries(LEGACY_ALIASES)) {
+        await tx`UPDATE identity.enrolments SET role = ${to} WHERE tenant_id = ${tenant} AND role = ${from}`;
+        // Owner bands become superuser bands; approver bands stay (approver principals keep that band).
+        if (from !== "approver") {
+          await tx`UPDATE identity.authority_bands b SET role = ${to} WHERE tenant_id = ${tenant} AND role = ${from}
+            AND NOT EXISTS (SELECT 1 FROM identity.authority_bands x WHERE x.tenant_id = b.tenant_id AND x.action = b.action AND x.book_id = b.book_id AND x.role = ${to})`;
+        }
+      }
+      await this.audit(tx, tenant, "system:migration", events);
+      return rows.length;
+    });
+  }
+
+  // ------------------------------------------------------------------ role model v2: guest shares and portal queries
+  /**
+   * Share a certified snapshot or a report with a guest until `expiresAt` (share.grant). The guest
+   * reads it, and nothing else, until then (share.read). `itemId`: a snapshot id, or
+   * `<book>/<report kind>` for a report.
+   */
+  async grantShare(tenant: string, by: string, s: { grantee: string; itemType: "snapshot" | "report"; itemId: string; expiresAt: string }): Promise<Share> {
+    const expires = new Date(s.expiresAt);
+    if (Number.isNaN(expires.getTime()) || expires.getTime() <= this.now()) throw new IdentityError("bad_expiry", "a share expires in the future");
+    if (!/^[A-Za-z0-9_.:@+/-]{1,200}$/.test(s.itemId)) throw new IdentityError("bad_item", "item ids are identifiers");
+    const shareId = `shr-${randomBytes(12).toString("hex")}`;
+    return this.store.tenantTx(tenant, async (tx) => {
+      await this.authorize(tenant, by, "share.grant", { allBooks: true }, tx);
+      const g = await this.member(tenant, s.grantee, tx);
+      if (!g || g.role !== "guest") throw new IdentityError("bad_grantee", `${s.grantee} is not an active guest of this workspace`, 404);
+      await tx`INSERT INTO identity.shares (tenant_id, share_id, grantee, item_type, item_id, expires_at, granted_by)
+        VALUES (${tenant}, ${shareId}, ${s.grantee}, ${s.itemType}, ${s.itemId}, ${expires}, ${by})`;
+      await this.audit(tx, tenant, by, [{ type: "ShareGranted", data: { shareId, grantee: s.grantee, itemType: s.itemType, itemId: s.itemId, expiresAt: expires.toISOString() } }]);
+      return { shareId, grantee: s.grantee, itemType: s.itemType, itemId: s.itemId, expiresAt: expires.toISOString(), grantedBy: by };
+    });
+  }
+
+  async revokeShare(tenant: string, by: string, shareId: string) {
+    await this.store.tenantTx(tenant, async (tx) => {
+      await this.authorize(tenant, by, "share.grant", { allBooks: true }, tx);
+      const [r] = await tx<{ grantee: string }[]>`UPDATE identity.shares SET revoked_at = now(), revoked_by = ${by}
+        WHERE tenant_id = ${tenant} AND share_id = ${shareId} AND revoked_at IS NULL RETURNING grantee`;
+      if (!r) throw new IdentityError("not_found", `no active share ${shareId}`, 404);
+      await this.audit(tx, tenant, by, [{ type: "ShareRevoked", data: { shareId, grantee: r.grantee } }]);
+    });
+  }
+
+  /** The unexpired, unrevoked shares granted to this guest (share.read). Expired shares are never returned. */
+  async sharesFor(tenant: string, principal: string): Promise<Share[]> {
+    await this.authorize(tenant, principal, "share.read");
+    const rows = await this.store.tenantTx(tenant, (tx) => tx<{ share_id: string; grantee: string; item_type: "snapshot" | "report"; item_id: string; expires_at: Date; granted_by: string }[]>`
+      SELECT share_id, grantee, item_type, item_id, expires_at, granted_by FROM identity.shares
+      WHERE tenant_id = ${tenant} AND grantee = ${principal} AND revoked_at IS NULL AND expires_at > ${new Date(this.now())} ORDER BY granted_at, share_id`);
+    return rows.map((r) => ({ shareId: r.share_id, grantee: r.grantee, itemType: r.item_type, itemId: r.item_id, expiresAt: r.expires_at.toISOString(), grantedBy: r.granted_by }));
+  }
+
+  /** One share of this guest, if it is unexpired and unrevoked; otherwise 404 (an expired share is as if it never existed). */
+  async shareFor(tenant: string, principal: string, shareId: string): Promise<Share> {
+    const s = (await this.sharesFor(tenant, principal)).find((x) => x.shareId === shareId);
+    if (!s) throw new IdentityError("not_found", `no current share ${shareId}`, 404);
+    return s;
+  }
+
+  /** Shares granted in the workspace (share.grant): for the people who manage them. */
+  async shares(tenant: string, by: string): Promise<(Share & { revoked: boolean; expired: boolean })[]> {
+    await this.authorize(tenant, by, "share.grant", { allBooks: true });
+    const now = this.now();
+    const rows = await this.store.tenantTx(tenant, (tx) => tx<{ share_id: string; grantee: string; item_type: "snapshot" | "report"; item_id: string; expires_at: Date; granted_by: string; revoked_at: Date | null }[]>`
+      SELECT share_id, grantee, item_type, item_id, expires_at, granted_by, revoked_at FROM identity.shares WHERE tenant_id = ${tenant} ORDER BY granted_at, share_id`);
+    return rows.map((r) => ({ shareId: r.share_id, grantee: r.grantee, itemType: r.item_type, itemId: r.item_id, expiresAt: r.expires_at.toISOString(), grantedBy: r.granted_by,
+      revoked: r.revoked_at !== null, expired: r.expires_at.getTime() <= now }));
+  }
+
+  /** Role model v2: may `by` publish snapshots of this book to investors (snapshot.publish)? Records the change in the audit stream, in `tx`. */
+  async recordSnapshotPublication(tx: TransactionSql, tenant: string, by: string, p: { snapshotId: string; bookId: string; published: boolean }) {
+    await this.authorize(tenant, by, "snapshot.publish", { book: p.bookId }, tx);
+    await this.audit(tx, tenant, by, [{ type: "SnapshotPublished", data: p }]);
+  }
+
+  /**
+   * A customer raises a query about its own records (portal.customer.query): recorded as a
+   * PortalQueryOpened event on the party's portal stream, for a person to answer. The party is
+   * the one the membership is bound to, never one named in the request.
+   */
+  async openPortalQuery(tenant: string, principal: string, q: { subject: string; message: string; reference?: string }) {
+    const subject = q.subject.trim().slice(0, 200), message = q.message.trim().slice(0, 4000);
+    if (subject.length < 2 || message.length < 2) throw new IdentityError("bad_query", "a query has a subject and a message");
+    const queryId = `qry-${randomBytes(12).toString("hex")}`;
+    return this.store.tenantTx(tenant, async (tx) => {
+      const partyId = await this.boundParty(tenant, principal, "portal.customer.query", tx);
+      await this.store.append("identity", tenant, { streamId: portalStream(tenant, partyId), expected: "any", events: [{ type: "PortalQueryOpened",
+        data: { queryId, partyId, subject, message, ...(q.reference ? { reference: q.reference.slice(0, 200) } : {}) } }] }, { principal }, tx);
+      return { queryId, partyId, subject, status: "open" as const };
+    });
+  }
+
+  /** The queries this customer raised (its own party's portal stream only). */
+  async portalQueries(tenant: string, principal: string) {
+    const partyId = await this.boundParty(tenant, principal, "portal.customer.read");
+    const events = await this.store.readStream(tenant, portalStream(tenant, partyId));
+    return events.filter((e) => e.type === "PortalQueryOpened").map((e) => {
+      const d = e.data as { queryId: string; subject: string; message: string; reference?: string };
+      return { queryId: d.queryId, subject: d.subject, message: d.message, reference: d.reference ?? null, openedAt: e.recordedAt, openedBy: e.meta.principal };
+    });
   }
 
   // ------------------------------------------------------------------ passkeys (WebAuthn)
@@ -620,13 +847,13 @@ export class Identity implements OpsGuard, ModuleGuard {
   }
 
   private async enrolment(tx: TransactionSql, tenant: string, code: string, lock = false) {
-    type E = { principal: string; role: string; books: string[] | null; display_name: string; purpose: "enrol" | "recovery"; revoke_existing: boolean };
+    type E = { principal: string; role: string; books: string[] | null; display_name: string; purpose: "enrol" | "recovery"; revoke_existing: boolean; party_id: string | null };
     const [r] = lock
       ? await tx<E[]>`
-          SELECT principal, role, books, display_name, purpose, revoke_existing FROM identity.enrolments
+          SELECT principal, role, books, display_name, purpose, revoke_existing, party_id FROM identity.enrolments
           WHERE tenant_id = ${tenant} AND token_hash = ${sha(code)} AND used_at IS NULL AND expires_at > now() FOR UPDATE`
       : await tx<E[]>`
-          SELECT principal, role, books, display_name, purpose, revoke_existing FROM identity.enrolments
+          SELECT principal, role, books, display_name, purpose, revoke_existing, party_id FROM identity.enrolments
           WHERE tenant_id = ${tenant} AND token_hash = ${sha(code)} AND used_at IS NULL AND expires_at > now()`;
     if (!r) throw new IdentityError("bad_code", "that invitation code is not valid (used, expired or for another workspace)", 403);
     return r;
@@ -640,7 +867,7 @@ export class Identity implements OpsGuard, ModuleGuard {
     const principal = await this.store.tenantTx(tenant, async (tx) => {
       if (i.enrolment) return (await this.enrolment(tx, tenant, i.enrolment)).principal;
       if (!(await this.claimable(tx, tenant))) throw new IdentityError("workspace_taken", "that workspace already exists: sign in with your passkey, or ask its owner for an invitation", 409);
-      return `owner:${slug(displayName) || "owner"}`;
+      return `superuser:${slug(displayName) || "superuser"}`;
     });
     return generateRegistrationOptions({
       rpName: this.o.rpName ?? "Kuber", rpID: this.o.rpId, userName: `${principal.split(":")[1]}@${tenant}`, userDisplayName: displayName,
@@ -670,7 +897,7 @@ export class Identity implements OpsGuard, ModuleGuard {
         // Recovery: the same member keeps role, books and history; only the passkeys change.
         const e = await this.enrolment(tx, tenant, i.enrolment, true);
         const hash = sha(i.enrolment);
-        const [r] = await tx<Row[]>`SELECT tenant_id, principal, role, books, display_name, status, source FROM identity.members
+        const [r] = await tx<Row[]>`SELECT tenant_id, principal, role, books, display_name, status, source, party_id FROM identity.members
           WHERE tenant_id = ${tenant} AND principal = ${e.principal} AND status = 'active'`;
         if (!r) throw new IdentityError("bad_code", "that recovery code is for someone who is no longer an active member", 403);
         await tx`UPDATE identity.enrolments SET used_at = now() WHERE tenant_id = ${tenant} AND token_hash = ${hash}`;
@@ -689,25 +916,27 @@ export class Identity implements OpsGuard, ModuleGuard {
         await tx`UPDATE identity.enrolments SET used_at = now() WHERE tenant_id = ${tenant} AND token_hash = ${hash}`;
         const [prev] = await tx<{ status: string }[]>`SELECT status FROM identity.members WHERE tenant_id = ${tenant} AND principal = ${e.principal}`;
         const name = displayName || openName(keys, e.display_name, enrolmentNameCtx(hash));
+        // An invitation issued before role model v2 names a legacy role: the membership takes the role it maps to.
+        const role = LEGACY_ALIASES[e.role] ?? e.role;
         const [r] = await tx<Row[]>`
-          INSERT INTO identity.members (tenant_id, principal, role, books, display_name, source, created_by)
-          VALUES (${tenant}, ${e.principal}, ${e.role}, ${e.books}, ${keys.seal(name, memberNameCtx(e.principal))}, 'enrolment', ${e.principal})
-          ON CONFLICT (tenant_id, principal) DO UPDATE SET status = 'active', role = EXCLUDED.role, books = EXCLUDED.books,
+          INSERT INTO identity.members (tenant_id, principal, role, books, display_name, source, created_by, party_id)
+          VALUES (${tenant}, ${e.principal}, ${role}, ${e.books}, ${keys.seal(name, memberNameCtx(e.principal))}, 'enrolment', ${e.principal}, ${e.party_id})
+          ON CONFLICT (tenant_id, principal) DO UPDATE SET status = 'active', role = EXCLUDED.role, books = EXCLUDED.books, party_id = EXCLUDED.party_id,
             display_name = EXCLUDED.display_name, revoked_by = NULL, revoked_at = NULL
-          RETURNING tenant_id, principal, role, books, display_name, status, source`;
+          RETURNING tenant_id, principal, role, books, display_name, status, source, party_id`;
         member = toMember(r!, keys);
         events.push({ type: "InvitationRedeemed", data: { invitation: hash, principal: member.principal, credentialId: cred.id } },
           { type: "MemberAdded", data: { principal: member.principal, role: member.role, books: member.books, source: member.source,
-            displayName: member.displayName, reactivated: !!prev } });
+            displayName: member.displayName, reactivated: !!prev, ...(member.partyId ? { partyId: member.partyId } : {}) } });
       } else {
         if (!(await this.claimable(tx, tenant))) throw new IdentityError("workspace_taken", "that workspace already exists", 409);
-        const principal = `owner:${slug(displayName) || "owner"}`;
+        const principal = `superuser:${slug(displayName) || "superuser"}`;
         const [r] = await tx<Row[]>`
           INSERT INTO identity.members (tenant_id, principal, role, books, display_name, source, created_by)
-          VALUES (${tenant}, ${principal}, 'owner', NULL, ${keys.seal(displayName, memberNameCtx(principal))}, 'passkey', ${principal})
-          RETURNING tenant_id, principal, role, books, display_name, status, source`;
+          VALUES (${tenant}, ${principal}, 'superuser', NULL, ${keys.seal(displayName, memberNameCtx(principal))}, 'passkey', ${principal})
+          RETURNING tenant_id, principal, role, books, display_name, status, source, party_id`;
         member = toMember(r!, keys);
-        events.push({ type: "MemberAdded", data: { principal, role: "owner", books: null, source: "passkey", displayName: member.displayName, reactivated: false } });
+        events.push({ type: "MemberAdded", data: { principal, role: "superuser", books: null, source: "passkey", displayName: member.displayName, reactivated: false } });
       }
       await tx`INSERT INTO identity.credentials (tenant_id, credential_id, principal, public_key, counter, transports)
         VALUES (${tenant}, ${cred.id}, ${member.principal}, ${Buffer.from(cred.publicKey)}, ${cred.counter}, ${cred.transports ?? []})`;
@@ -835,20 +1064,22 @@ export class Identity implements OpsGuard, ModuleGuard {
   }
 
   /**
-   * Development sign-in (KUBER_DEV_SIGNIN=true only): an owner by name, for a workspace that has
-   * no people yet or where that owner already exists. No proof of identity: never in production.
+   * Development sign-in (KUBER_DEV_SIGNIN=true only): a superuser by name, for a workspace that has
+   * no people yet or where that superuser (or a legacy owner of that name) already exists. No proof
+   * of identity: never in production.
    */
   async devSignIn(tenant: string, name: string, session?: string | null): Promise<Member> {
     if (!this.o.devSignIn) throw denied("development sign-in is disabled");
     this.validTenant(tenant);
-    const principal = `owner:${slug(name) || "owner"}`;
+    const who = slug(name) || "superuser";
+    const principal = `superuser:${who}`;
     const keys = await this.store.keys(tenant);
     return this.store.tenantTx(tenant, async (tx) => {
       await this.lockTenant(tx, tenant);
-      const [r] = await tx<Row[]>`SELECT tenant_id, principal, role, books, display_name, status, source FROM identity.members
-        WHERE tenant_id = ${tenant} AND principal = ${principal} AND status = 'active'`;
+      const [r] = await tx<Row[]>`SELECT tenant_id, principal, role, books, display_name, status, source, party_id FROM identity.members
+        WHERE tenant_id = ${tenant} AND principal IN (${principal}, ${`owner:${who}`}) AND status = 'active' ORDER BY principal = ${principal} DESC LIMIT 1`;
       if (r) {
-        if (session) await this.bindSession(tx, tenant, session, principal, null);
+        if (session) await this.bindSession(tx, tenant, session, r.principal, null);
         return toMember(r, keys);
       }
       const [people] = await tx`SELECT 1 FROM identity.members WHERE tenant_id = ${tenant} AND role <> 'agent' AND status = 'active' LIMIT 1`;
@@ -856,11 +1087,11 @@ export class Identity implements OpsGuard, ModuleGuard {
       const [prev] = await tx`SELECT 1 FROM identity.members WHERE tenant_id = ${tenant} AND principal = ${principal}`;
       const [n] = await tx<Row[]>`
         INSERT INTO identity.members (tenant_id, principal, role, books, display_name, source, created_by)
-        VALUES (${tenant}, ${principal}, 'owner', NULL, ${keys.seal(name.trim().slice(0, 80), memberNameCtx(principal))}, 'dev', ${principal})
+        VALUES (${tenant}, ${principal}, 'superuser', NULL, ${keys.seal(name.trim().slice(0, 80), memberNameCtx(principal))}, 'dev', ${principal})
         ON CONFLICT (tenant_id, principal) DO UPDATE SET status = 'active', revoked_by = NULL, revoked_at = NULL
-        RETURNING tenant_id, principal, role, books, display_name, status, source`;
+        RETURNING tenant_id, principal, role, books, display_name, status, source, party_id`;
       const member = toMember(n!, keys);
-      await this.audit(tx, tenant, principal, [{ type: "MemberAdded", data: { principal, role: "owner", books: null, source: "dev",
+      await this.audit(tx, tenant, principal, [{ type: "MemberAdded", data: { principal, role: "superuser", books: null, source: "dev",
         displayName: member.displayName, reactivated: !!prev } }]);
       if (session) await this.bindSession(tx, tenant, session, principal, null);
       return member;
@@ -887,7 +1118,7 @@ export class Identity implements OpsGuard, ModuleGuard {
   /**
    * Revoke a passkey: it can no longer sign in, and sessions bound to it at sign-in stop working.
    * `by` may revoke its own passkeys; `anyMember` (members.manage, checked by the caller) any in the
-   * workspace. The workspace's only owner keeps at least one passkey, or nobody could manage it
+   * workspace. The workspace's only superuser keeps at least one passkey, or nobody could manage it
    * again without operator tooling.
    */
   async revokeCredential(tenant: string, by: string, credentialId: string, opts: { anyMember?: boolean } = {}) {
@@ -898,8 +1129,8 @@ export class Identity implements OpsGuard, ModuleGuard {
       if (!c || (!opts.anyMember && c.principal !== by)) throw new IdentityError("not_found", "no such passkey", 404);
       if (c.revoked_at) return;
       const [n] = await tx<{ owner: boolean; owners: number; mine: number }[]>`
-        SELECT EXISTS (SELECT 1 FROM identity.members WHERE tenant_id = ${tenant} AND principal = ${c.principal} AND role = 'owner' AND status = 'active') AS owner,
-               (SELECT count(*)::int FROM identity.members WHERE tenant_id = ${tenant} AND role = 'owner' AND status = 'active') AS owners,
+        SELECT EXISTS (SELECT 1 FROM identity.members WHERE tenant_id = ${tenant} AND principal = ${c.principal} AND role IN ('superuser', 'owner') AND status = 'active') AS owner,
+               (SELECT count(*)::int FROM identity.members WHERE tenant_id = ${tenant} AND role IN ('superuser', 'owner') AND status = 'active') AS owners,
                (SELECT count(*)::int FROM identity.credentials WHERE tenant_id = ${tenant} AND principal = ${c.principal} AND revoked_at IS NULL) AS mine`;
       if (n!.owner && n!.owners <= 1 && n!.mine <= 1) throw new IdentityError("last_owner_passkey", "the workspace's only owner keeps at least one passkey", 409);
       await tx`UPDATE identity.credentials SET revoked_at = now(), revoked_by = ${by} WHERE tenant_id = ${tenant} AND credential_id = ${credentialId}`;
