@@ -248,7 +248,21 @@ export const OPS = {
     gate: z.enum(["policy", "human"]), needsPerson: z.boolean(), actions: z.number().int().nonnegative(),
     preparedBy: Principal,
     policy: z.object({ ids: z.array(z.string()), level: AutonomyLevel, approver: z.string(), reasons: z.array(z.string()) }).nullable(),
+    /** FIN-MDM-04: the person whose recorded approval this execution carries out (their authority re-checked now). */
+    approvedBy: Principal.optional(),
   }),
+  /** FIN-MDM-04: a person approved exactly this plan hash; someone may execute it later (authority re-checked then). */
+  PlanApprovalRecorded: z.object({ planId: Id, bookId: Id, hash: z.string().length(64), preparedBy: Principal, amountPaise: z.string().regex(/^\d+$/) }),
+  /** FIN-MDM-04: an approval no longer stands (the approver's authority or delegation changed); the plan needs re-approval. */
+  PlanApprovalInvalidated: z.object({ planId: Id, bookId: Id, approver: Principal, reason: z.string() }),
+  /** FIN-MDM-04: a saved plan can no longer be executed as prepared (its preparer's authority changed). */
+  PlanMarkedStale: z.object({ planId: Id, bookId: Id, reason: z.string() }),
+  /** FIN-OPS-02: financial incident register. Amounts are paise. */
+  IncidentOpened: z.object({ incidentId: Id, title: z.string(), description: z.string(), books: z.array(Id), periods: z.array(z.string()),
+    possibleLossPaise: z.string().regex(/^\d+$/), duplication: z.boolean(), owner: Principal }),
+  IncidentUpdated: z.object({ incidentId: Id, containment: z.string().optional(), corrections: z.array(Id).optional(), owner: Principal.optional(),
+    note: z.string().optional(), status: z.enum(["open", "contained"]) }),
+  IncidentClosed: z.object({ incidentId: Id, reconciliationRef: z.string().min(1), owner: Principal, approvedBy: Principal, note: z.string().optional() }),
   /** FIN-GL-02/03: a recurring or recognition schedule was defined (it posts nothing until approved by a plan). */
   ScheduleCreated: z.object({ scheduleId: Id, bookId: Id, kind: z.enum(["recurring", "recognition"]), hash: z.string().length(64), policyVersion: z.string() }),
   /** An occurrence could not post as scheduled (locked period, amount above the approval, ledger refusal): a person decides. */
@@ -296,6 +310,23 @@ export const IDENTITY = {
     previous: z.object({ soloOwner: z.boolean(), sodLimitPaise: z.string().nullable() }).nullable() }),
   /** `session` is the SHA-256 of the session id. */
   SessionRevoked: z.object({ session: z.string(), principal: Principal.nullable() }),
+  /** FIN-MDM-04: the tenant's authority matrix (amount bands per action, book and role) was switched on or off. */
+  AuthorityMatrixChanged: z.object({ enabled: z.boolean(), previous: z.boolean().nullable() }),
+  /** FIN-MDM-04: one band: `maxPaise` null means no limit; `removed` falls back to the default (POL-002). */
+  AuthorityBandSet: z.object({ action: z.string(), bookId: z.string().nullable(), role: z.string(), maxPaise: z.string().nullable(),
+    previousMaxPaise: z.string().nullable(), removed: z.boolean() }),
+  DelegationGranted: z.object({ delegationId: Id, grantor: Principal, grantee: Principal, action: z.string(), books: Books,
+    maxPaise: z.string().regex(/^\d+$/), validFrom: z.string(), validTo: z.string() }),
+  DelegationRevoked: z.object({ delegationId: Id, grantor: Principal, grantee: Principal, reason: z.string() }),
+  /** FIN-MDM-04 conflict rule: this member may not approve plans that pay this party. */
+  RelatedPartyFlagged: z.object({ principal: Principal, partyId: Id, note: z.string() }),
+  RelatedPartyCleared: z.object({ principal: Principal, partyId: Id, note: z.string() }),
+  /** FIN-MDM-05: a reviewer's disposition of one access-review item. */
+  AccessReviewDisposed: z.object({ itemId: z.string(), kind: z.string(), subject: Principal.nullable(),
+    decision: z.enum(["appropriate", "revoke", "investigate", "accepted"]), note: z.string() }),
+  /** FIN-OPS-03 kill switch: autonomous posting for the tenant (bookId null) or one book goes to human review. */
+  AutonomyHalted: z.object({ bookId: z.string().nullable(), reason: z.string() }),
+  AutonomyResumed: z.object({ bookId: z.string().nullable(), reason: z.string() }),
 } as const;
 
 export const ALL_EVENTS = { ...GL, ...PARTY, ...CHANNELS, ...AGENT, ...OPS, ...EVIDENCE, ...IDENTITY } as const;

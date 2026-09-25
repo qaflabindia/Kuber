@@ -9,7 +9,9 @@
  * command id, and only while:
  *   - the approver still holds that authority (the ops guard is asked again on every run),
  *   - the definition is byte-for-byte the one approved (hash) and the policy version is unchanged,
- *   - the occurrence moves no more than the approved amount.
+ *   - the occurrence moves no more than the approved amount,
+ *   - autonomous posting is not halted for the book (FIN-OPS-03 kill switch): occurrences post with
+ *     no person present, so the switch holds them (still due, dates unchanged) until a person resumes.
  *
  * Every occurrence has a business id (schedule + period + kind). Its row is written in the same
  * transaction, under the same book lock, as its journal, and the journal id is derived from the
@@ -316,9 +318,16 @@ export class Schedules {
       if (v.definition.policyVersion !== this.currentPolicyVersion()) {
         out.skipped.push({ scheduleId: r.schedule_id, reason: `policy changed (${v.definition.policyVersion} → ${this.currentPolicyVersion()}); approve the schedule again` }); continue;
       }
+      // FIN-OPS-03: scheduled occurrences post without a person at the moment of posting, so the kill
+      // switch holds them too. They stay due (dates unchanged) and post on the first run after it is lifted.
+      if (await this.guard.autonomyHalted?.(tenant, r.book_id)) {
+        out.skipped.push({ scheduleId: r.schedule_id, reason: "autonomy halted (kill switch): occurrences wait until a person resumes it" }); continue;
+      }
       try {
         const plan = await this.getPlan(tenant, r.approval_plan_id!);
-        await this.guard.check({ step: "commit", tenant, book: r.book_id, principal: r.approved_by!, op: { name: "schedule_approve", kind: "write", gate: "human" }, plan });
+        // FIN-MDM-04: role, band, delegation, conflicts (parties the due occurrences pay) and separation, as of now.
+        const parties = [...new Set(due.flatMap((o) => o.lines.map((l) => l.partyId).filter((p): p is string => !!p)))].sort();
+        await this.guard.check({ step: "commit", tenant, book: r.book_id, principal: r.approved_by!, op: { name: "schedule_approve", kind: "write", gate: "human" }, plan, parties });
       } catch (e) { out.skipped.push({ scheduleId: r.schedule_id, reason: `approval no longer valid: ${e instanceof Error ? e.message : String(e)}` }); continue; }
       for (const o of due) await this.runOne(tenant, r, v, o, out);
     }

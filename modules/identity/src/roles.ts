@@ -18,6 +18,11 @@ export const ACTIONS = [
   "plan.discard",         // withdraw someone else's proposal (anyone may withdraw their own)
   "copilot",
   "members.read", "members.manage", "settings.manage",
+  // Finance controls (owners and controllers only):
+  "access.review",        // FIN-MDM-05: record dispositions on the periodic access and master-change review
+  "conflicts.manage",     // FIN-MDM-04: flag or clear related-party conflicts between members and parties
+  "autonomy.manage",      // FIN-OPS-03: halt or resume autonomous posting (kill switch)
+  "incident.manage",      // FIN-OPS-02: open, update and close financial incidents
   "account.close",        // close an account, change its statement mapping or mandatory dimensions (FIN-MDM-02)
   "party.manage",         // create a party, change its details, request a bank-detail change (maker, FIN-MDM-03)
   "party.bank.verify",    // record the out-of-band verification of a bank-detail change, or reject it (checker)

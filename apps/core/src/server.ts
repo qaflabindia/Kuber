@@ -24,13 +24,14 @@ import { Account, BankDetails, BookPurpose, Id, IsoDate, JOURNAL_STATES, PartyKi
 import { CommandConflict, ConcurrencyError, GuardDenied } from "@kuber/eventstore";
 import { DomainError, type BookCommand } from "@kuber/gl";
 import { AgentError } from "@kuber/agent";
-import { OpsError, ScheduleError, financialYear, fiscalStart } from "@kuber/ops";
+import { IncidentError, OpsError, ScheduleError, financialYear, fiscalStart } from "@kuber/ops";
 import { StaleReportError, type ReportBasis, type ReportOptions } from "@kuber/reporting";
 import { IngestionError } from "@kuber/channels";
 import type { Cell } from "./cell.ts";
 import { Copilot } from "./copilot/index.ts";
 import { HELP } from "./copilot/router.ts";
 import { registerMcp } from "./mcp.ts";
+import { registerFinRoutes } from "./fin-routes.ts";
 import type { Who } from "./tools.ts";
 
 export interface ServerOptions {
@@ -122,6 +123,7 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     if (err instanceof AgentError) return reply.code(err.code === "not_found" ? 404 : 409).send({ error: err.code, message: err.message });
     if (err instanceof IngestionError) return reply.code(422).send({ error: err.code, message: err.message, detail: err.detail });
     if (err instanceof OpsError) return reply.code(err.status).send({ error: err.code, message: err.message });
+    if (err instanceof IncidentError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof ScheduleError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof ConcurrencyError) return reply.code(409).send({ error: "conflict", message: err.message });
     if (err instanceof StaleReportError) return reply.code(409).send({ error: err.code, message: err.message, basis: err.basis });
@@ -564,7 +566,10 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     // Period operations and amounts above the approval limit need a fresh passkey step-up. The
     // guard runs first, so nobody is asked for a passkey for a plan they could not approve anyway.
     const plan = await cell.ops.get(tenant, req.params.id);
-    if (plan.status === "proposed" && plan.kind === "write" && !principal.startsWith("agent:")) {
+    // FIN-MDM-04: carrying out someone else's recorded approval needs no step-up from the executor:
+    // the approver confirmed with their passkey when approving (POST …/approve), and ops.commit re-checks them.
+    const approvedBy = plan.status === "proposed" && !principal.startsWith("agent:") ? await cell.ops.activeApprover(tenant, plan.planId, b.hash, principal) : null;
+    if (plan.status === "proposed" && plan.kind === "write" && !principal.startsWith("agent:") && !approvedBy) {
       await cell.identity.check({ step: "commit", tenant, book: plan.bookId, principal, op: { name: plan.op, kind: plan.kind, gate: plan.gate }, plan });
       const reason = await cell.identity.stepUpReason(tenant, plan);
       if (reason && !stepUpFresh(claimsOf.get(req)!)) {
@@ -654,6 +659,9 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     const broken = await cell.gl.verify((await who(req, "read")).tenant, req.params.book);
     return { intact: broken === null, firstBrokenJournal: broken };
   });
+
+  // ------------------------------------------------------------ finance controls (FIN-MDM-04/05, FIN-OPS-02/03)
+  registerFinRoutes(app, cell, who, (req) => { const c = claimsOf.get(req); return !!c && stepUpFresh(c); });
 
   return app;
 }

@@ -37,8 +37,16 @@ import type { OpsGuard, OpsGuardQuery, Plan } from "@kuber/ops";
 import type { PolicyEngine } from "@kuber/policy";
 import { ReplayCache } from "@kuber/auth";
 import { ACTIONS, can, isRole, roleOf, type Action, type Role } from "./roles.ts";
+import { Authority, type AuthorityChange, type AuthorityChangeHook, type IdentityHost } from "./authority.ts";
+import { AutonomySwitch } from "./autonomy.ts";
+import { AccessReview } from "./access-review.ts";
+import { IDENTITY_FIN_MIGRATIONS } from "./fin-migrations.ts";
 
 export * from "./roles.ts";
+export { Authority, DELEGABLE, DOA_DEFAULTS, DOA_SOURCE, type AuthorityBasis, type AuthorityChange, type AuthorityChangeHook, type Delegation } from "./authority.ts";
+export { AutonomySwitch, type AutonomySwitchState } from "./autonomy.ts";
+export { AccessReview, REVIEW_DECISIONS, type AccessReviewReport, type ReviewDecision, type ReviewItem } from "./access-review.ts";
+export { IDENTITY_FIN_MIGRATIONS, accessReviewNoteCtx, autonomyReasonCtx, relatedPartyNoteCtx, rlsForTables } from "./fin-migrations.ts";
 
 export const IDENTITY_MIGRATIONS: Migration[] = [{
   id: "identity-001",
@@ -89,7 +97,7 @@ CREATE POLICY system_scope ON identity.sessions TO kuber_system_scope USING (tru
   // successor, so maker-checker still recognizes the person. (Passkey revocation columns: identity-002.)
   id: "identity-004-member-succession",
   sql: `ALTER TABLE identity.members ADD COLUMN succeeded_by TEXT;`,
-}];
+}, ...IDENTITY_FIN_MIGRATIONS];
 
 /**
  * Data migration (run once by the cell after the SQL migrations, recorded in schema_migrations):
@@ -173,9 +181,37 @@ export class Identity implements OpsGuard, ModuleGuard {
   private readonly challengeKey = randomBytes(32);
   private readonly used = new ReplayCache(50_000);
   private readonly now: () => number;
+  /** FIN-MDM-04: amount bands, delegations and conflict rules. */
+  readonly authority: Authority;
+  /** FIN-OPS-03: the autonomy kill switch. */
+  readonly autonomy: AutonomySwitch;
+  /** FIN-MDM-05: periodic access and master-change review. */
+  readonly accessReview: AccessReview;
+  private readonly authorityHooks: AuthorityChangeHook[] = [];
   constructor(private store: EventStore, private policies: PolicyEngine, private o: IdentityOptions) {
     this.now = o.now ?? Date.now;
+    const host: IdentityHost = {
+      member: (t, p, tx) => this.member(t, p, tx), authorize: (t, p, a, sc, tx) => this.authorize(t, p, a, sc, tx),
+      now: () => this.now(), denied: (m) => denied(m), error: (c, m, st) => new IdentityError(c, m, st),
+      changed: (tx, t, c) => this.authorityChanged(tx, t, c),
+    };
+    this.authority = new Authority(store, host);
+    this.autonomy = new AutonomySwitch(store, host);
+    this.accessReview = new AccessReview(store, host);
   }
+
+  /**
+   * FIN-MDM-04: run `hook` in the transaction of every change that can alter someone's approval
+   * authority (bands, delegations, conflicts, removal, role or scope). The cell registers the ops
+   * module here, which invalidates approvals that relied on it.
+   */
+  onAuthorityChange(hook: AuthorityChangeHook) { this.authorityHooks.push(hook); }
+  private async authorityChanged(tx: TransactionSql, tenant: string, change: AuthorityChange) {
+    for (const h of this.authorityHooks) await h(tenant, change, tx);
+  }
+
+  /** FIN-OPS-03: is autonomous action halted (kill switch) for this book? (OpsGuard, ModuleGuard and the GL's gate.) */
+  autonomyHalted(tenant: string, book: string, tx?: TransactionSql): Promise<boolean> { return this.autonomy.halted(tenant, book, tx); }
 
   get devSignInEnabled() { return !!this.o.devSignIn; }
 
@@ -262,6 +298,9 @@ export class Identity implements OpsGuard, ModuleGuard {
       } else if (!sameBooks(prev.books, member.books) || prev.role !== member.role) {
         await this.audit(tx, tenant, by, [{ type: "MemberRoleChanged", data: { principal: member.principal, role: member.role, books: member.books,
           previousRole: prev.role, previousBooks: prev.books } }]);
+        // FIN-MDM-04: approvals this member (or anyone holding a delegation from them) recorded no longer stand.
+        await this.authorityChanged(tx, tenant, { approvers: [member.principal, ...(await this.authority.delegatesOf(tx, tenant, member.principal))],
+          books: null, reason: `${member.principal} changed role or book scope` });
       }
       return member;
     });
@@ -290,6 +329,9 @@ export class Identity implements OpsGuard, ModuleGuard {
       }
       await tx`UPDATE identity.members SET status = 'revoked', revoked_by = ${by}, revoked_at = now() WHERE tenant_id = ${tenant} AND principal = ${principal}`;
       await this.audit(tx, tenant, by, [{ type: "MemberRemoved", data: { principal } }]);
+      // FIN-MDM-04/05: their approvals (and their delegates') no longer stand, and plans they saved are stale.
+      await this.authorityChanged(tx, tenant, { approvers: [principal, ...(await this.authority.delegatesOf(tx, tenant, principal))],
+        books: null, stalePreparedBy: [principal], reason: `${principal} was removed from the workspace` });
     });
   }
 
@@ -415,6 +457,7 @@ export class Identity implements OpsGuard, ModuleGuard {
       if (!m || m.role !== "agent") throw denied(`${principal} has no grant in workspace ${tenant}`);
       if (!inScope(m, book)) throw denied(`${principal} is not granted book ${book}`);
       if (step === "discard" && plan?.createdBy !== principal) throw denied("an agent may withdraw only its own plans");
+      if (step === "approve" || step === "execute") throw denied("approvals are recorded and carried out by people");
       return;                                        // commit authority is then limited by policy (needsPerson)
     }
     if (!/^[a-z]+:/.test(principal) || principal.startsWith("system:")) throw denied(`${principal} may not use operations`);
@@ -425,8 +468,32 @@ export class Identity implements OpsGuard, ModuleGuard {
       await this.authorize(tenant, principal, own ? "plan.prepare" : "plan.discard", { book });
       return;
     }
-    const m = await this.authorize(tenant, principal, op.gate === "human" ? "plan.approve.period" : "plan.approve", { book });
-    await this.separation(tenant, m, plan);
+    if (step === "execute") {
+      // FIN-MDM-04: carrying out someone else's recorded approval. The executor must be a person who
+      // may prepare plans in this book; the approver's authority is checked again, in full, now.
+      await this.authorize(tenant, principal, "plan.prepare", { book });
+      if (!q.approvedBy) throw denied("no recorded approval to execute");
+      await this.approverAuthority({ ...q, principal: q.approvedBy });
+      return;
+    }
+    await this.approverAuthority(q);                 // commit (approve and execute at once) or approve
+  }
+
+  /**
+   * FIN-MDM-04: may `q.principal` approve this plan now? Role and book scope, or a current
+   * delegation, within the authority matrix's amount band; no related-party conflict with a party
+   * the plan pays; separation of duties from its preparer (explicit single-owner exception kept).
+   */
+  private async approverAuthority(q: OpsGuardQuery) {
+    const { tenant, book, principal, op, plan } = q;
+    if (!plan) throw denied("no plan to check");
+    const action: Action = op.gate === "human" ? "plan.approve.period" : "plan.approve";
+    // A schedule approval moves no journal itself; its band amount is the per-occurrence amount it approves.
+    const approved = (plan.data as { approvedAmount?: string } | undefined)?.approvedAmount;
+    const amount = approved && /^\d+$/.test(approved) && BigInt(approved) > planAmount(plan) ? BigInt(approved) : planAmount(plan);
+    const { member: m } = await this.authority.approvalAuthority(tenant, principal, action, book, amount);
+    await this.authority.checkConflicts(tenant, principal, q.parties ?? []);
+    await this.separation(tenant, m as Member, plan);
   }
 
   /** Why a plan needs someone other than its preparer to approve it, or null. */

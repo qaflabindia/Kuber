@@ -28,7 +28,8 @@ import { GENESIS_LINK, eventContext, isSealed, linkOf, sealEvent, type EventStor
 import { narrationCtx, snapshotCtx } from "@kuber/reporting";
 import { accountNameCtx, matchReviewCtx, provisionalSourceCtx } from "@kuber/agent";
 import { signalDetailCtx, signalOriginalCtx } from "@kuber/channels";
-import { IDENTITY_SEAL_MIGRATION, enrolmentNameCtx, memberNameCtx } from "@kuber/identity";
+import { IDENTITY_SEAL_MIGRATION, accessReviewNoteCtx, autonomyReasonCtx, enrolmentNameCtx, memberNameCtx, relatedPartyNoteCtx } from "@kuber/identity";
+import { incidentDetailCtx } from "@kuber/ops";
 import { bankChangeCtx, partyDetailCtx } from "@kuber/gl";
 
 export interface SealedColumn {
@@ -55,6 +56,11 @@ export const SEALED_COLUMNS: SealedColumn[] = [
   // Personal data in the identity schema: the names people and invitations are shown by.
   { table: "identity.members", column: "display_name", kind: "text", keyCols: ["principal"], ctx: (r) => memberNameCtx(r.principal!) },
   { table: "identity.enrolments", column: "display_name", kind: "text", keyCols: ["token_hash"], ctx: (r) => enrolmentNameCtx(r.token_hash!) },
+  // Finance controls (FIN-MDM-04/05, FIN-OPS-02/03): free-text notes and reasons, incident details.
+  { table: "identity.related_parties", column: "note", kind: "text", keyCols: ["principal", "party_id"], ctx: (r) => relatedPartyNoteCtx(r.principal!, r.party_id!) },
+  { table: "identity.access_reviews", column: "note", kind: "text", keyCols: ["item_id"], ctx: (r) => accessReviewNoteCtx(r.item_id!) },
+  { table: "identity.autonomy_switches", column: "reason", kind: "text", keyCols: ["book_id"], ctx: (r) => autonomyReasonCtx(r.book_id!) },
+  { table: "ops.incidents", column: "detail", kind: "text", keyCols: ["incident_id"], ctx: (r) => incidentDetailCtx(r.incident_id!) },
   // Party master (FIN-MDM-03): names, terms and tax status history; beneficiary bank details.
   { table: "mdm.parties", column: "detail", kind: "text", keyCols: ["party_id"], ctx: (r) => partyDetailCtx(r.party_id!) },
   { table: "mdm.bank_changes", column: "bank", kind: "text", keyCols: ["change_id"], ctx: (r) => bankChangeCtx(r.change_id!) },
@@ -80,6 +86,11 @@ export const RETENTION: Record<string, "purge" | "sealed" | "keys" | "tombstone"
   // value once the tenant's books are unreadable. Credentials before members (foreign key).
   "identity.credentials": "purge", "identity.enrolments": "purge", "identity.members": "purge", "identity.settings": "purge",
   "identity.sessions": "purge",
+  // Finance controls: authority matrix, delegations, conflicts, access reviews, kill switch, plan
+  // approvals and the incident register. Their history is in the sealed event streams.
+  "identity.authority_settings": "purge", "identity.authority_bands": "purge", "identity.delegations": "purge",
+  "identity.related_parties": "purge", "identity.access_reviews": "purge", "identity.autonomy_switches": "purge",
+  "ops.plan_approvals": "purge", "ops.incidents": "purge",
   "mdm.parties": "purge", "mdm.bank_changes": "purge", "mdm.reviews": "purge",
   "evidence.balances": "purge", "evidence.records": "purge", "evidence.lookup": "purge",
   "es.outbox": "purge", "es.snapshots": "purge", "es.dead_letters": "purge", "es.commands": "purge", "es.verify_checkpoints": "purge",

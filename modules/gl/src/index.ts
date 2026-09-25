@@ -41,6 +41,12 @@ export interface GlOptions {
   /** Take a durable snapshot once this many events follow the last one (default KUBER_SNAPSHOT_EVERY or 500; 0 disables). */
   snapshotEvery?: number;
   /**
+   * FIN-OPS-03 kill switch: when it answers true for a book, posting requests made autonomously
+   * (autonomy L3/L4) are refused with PostingRejected "autonomy_halted" instead of posted; the
+   * agent turns them into drafts for a person. People's postings are unaffected.
+   */
+  autonomyGate?: (tenantId: string, bookId: string) => Promise<boolean>;
+  /**
    * Legal entity of registered parties (the party master, FIN-MDM-01/03), read in the book's
    * transaction before a journal naming parties is decided. Without it, party entities are not checked.
    */
@@ -67,6 +73,7 @@ export class GeneralLedger {
   private snapshotEvery: number;
   private partyEntities?: GlOptions["partyEntities"];
   readonly snapshots: SnapshotStore;
+  private autonomyGate?: GlOptions["autonomyGate"];
 
   private inFlight = new Map<string, Promise<void>>();
 
@@ -76,6 +83,7 @@ export class GeneralLedger {
     this.cacheBytes = o.cacheBytes ?? envInt("KUBER_GL_CACHE_MB", 256) * 1024 * 1024;
     this.snapshotEvery = o.snapshotEvery ?? envInt("KUBER_SNAPSHOT_EVERY", 500);
     this.snapshots = new SnapshotStore(store);
+    this.autonomyGate = o.autonomyGate;
     this.partyEntities = o.partyEntities;
   }
 
@@ -280,6 +288,9 @@ export class GeneralLedger {
         if (env.type === "PostingRequested") {
           const d = env.data as EventData<"PostingRequested">;
           bookId = d.bookId; requestId = d.requestId;
+          if ((d.autonomy === "L3" || d.autonomy === "L4") && this.autonomyGate && (await this.autonomyGate(tenant, d.bookId))) {
+            throw new DomainError("autonomy_halted", "autonomous posting is halted for this book (kill switch); the entry goes to review");
+          }
           await this.execute(tenant, d.bookId, {
             kind: "PostJournal", journalId: journalIdForRequest(tenant, d.requestId), txnDate: d.txnDate,
             narration: d.narration, voucherType: d.voucherType, lines: d.lines, provisional: d.provisional,
