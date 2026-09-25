@@ -21,6 +21,8 @@ export interface BusConsumerAdmin {
 }
 import { pruneOutbox } from "./keys-admin.ts";
 import { autonomyErrors, compareCells } from "./fin-ops.ts";
+import { DEFAULT_LIMITS, RateLimiter, TurnRecorder, type AgentPeriodStats } from "./copilot/governance/recorder.ts";
+import { ToolRegister, loadRegister } from "./copilot/governance/register.ts";
 
 /**
  * Event types each consumer takes (keep in step with the subscriptions in cell.ts). Keyed by module
@@ -263,7 +265,43 @@ export class OpsAdmin {
       gaps: await this.gaps(),
       reports,
       autonomy: await this.autonomy(),
+      agent: await this.agent(),
     };
+  }
+
+  // ------------------------------------------------------------------ copilot governance (TAGOF Part VII)
+  private recorder?: TurnRecorder;
+  private turnsRecorder(): TurnRecorder {
+    return this.recorder ??= new TurnRecorder(this.cell.store, new ToolRegister(loadRegister()), new RateLimiter(DEFAULT_LIMITS));
+  }
+
+  /**
+   * Deliverable E signals of the copilot per tenant and month: turns, refused inputs by category,
+   * injection flags, tool denials, grounding failures, plans proposed, model vs rules share, p95
+   * latency, anomalies and HITL bypass (0 by construction: MON-09, any > 0 is an incident).
+   * Tenants without turns are left out unless asked for.
+   */
+  async agent(tenant?: string, since?: string): Promise<{ tenant: string; copilotHalted: { book: string | null; reason: string; by: string; at: string }[];
+      hitlBypass: number; periods: AgentPeriodStats[] }[]> {
+    const out = [];
+    for (const t of tenant ? [tenant] : await this.tenants()) {
+      const periods = await this.turnsRecorder().stats(t, { since });
+      const halted = (await this.cell.identity.autonomy.status(t)).filter((s) => s.scope === "copilot" && s.halted)
+        .map((s) => ({ book: s.book, reason: s.reason, by: s.setBy, at: s.setAt }));
+      if (!periods.length && !halted.length && !tenant) continue;
+      out.push({ tenant: t, copilotHalted: halted, hitlBypass: periods.reduce((n, p) => n + p.hitlBypass, 0), periods });
+    }
+    return out;
+  }
+
+  /** TOL-05 / AGT-07: recorded turns, newest first, for one tenant or every tenant. */
+  async agentTurns(o: { tenant?: string; book?: string; since?: string; limit?: number } = {}) {
+    const out = [];
+    for (const t of o.tenant ? [o.tenant] : await this.tenants()) {
+      const r = await this.turnsRecorder().query(t, { book: o.book, since: o.since, limit: o.limit ?? 100 });
+      if (r.turns.length || o.tenant) out.push({ tenant: t, ...r });
+    }
+    return out;
   }
 
   // ------------------------------------------------------------------ finance controls
@@ -276,7 +314,8 @@ export class OpsAdmin {
     for (const t of tenant ? [tenant] : await this.tenants()) {
       const [switches, periods] = [await this.cell.identity.autonomy.status(t), await autonomyErrors(this.cell.store, t)];
       if (!switches.length && !periods.length && !tenant) continue;
-      out.push({ tenant: t, halted: switches.filter((s) => s.halted).map((s) => ({ book: s.book, reason: s.reason, by: s.setBy, at: s.setAt })),
+      out.push({ tenant: t, halted: switches.filter((s) => s.halted && s.scope === "autonomy").map((s) => ({ book: s.book, reason: s.reason, by: s.setBy, at: s.setAt })),
+        copilotHalted: switches.filter((s) => s.halted && s.scope === "copilot").map((s) => ({ book: s.book, reason: s.reason, by: s.setBy, at: s.setAt })),
         errors: { reversed: periods.reduce((n, p) => n + p.reversed, 0), corrected: periods.reduce((n, p) => n + p.corrected, 0), periods } });
     }
     return out;

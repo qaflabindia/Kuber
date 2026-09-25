@@ -6,6 +6,7 @@ import { buildServer } from "./server.ts";
 import { Copilot } from "./copilot/index.ts";
 import { ExternalTools, parseServers } from "./copilot/external.ts";
 import { providerFromEnv } from "./copilot/provider.ts";
+import { PROCESSING_ENV, createGovernance, processingFromEnv } from "./copilot/governance/index.ts";
 import { parseGrants } from "./mcp.ts";
 import { classifierFromEnv } from "./llm-classifier.ts";
 import { replayStoreFromEnv } from "@kuber/auth/valkey";
@@ -53,6 +54,14 @@ if (devSignIn && process.env.NODE_ENV === "production") {
 const origins = env("WEBAUTHN_ORIGIN", "http://localhost:3000").split(",").map((o) => o.trim()).filter(Boolean);
 const rpId = env("WEBAUTHN_RP_ID", new URL(origins[0]!).hostname);
 
+/**
+ * TAGOF Domain 12 / GEN-04: sending book data to a model needs a recorded processing decision
+ * (KUBER_LLM_PROCESSING_APPROVED=<approver>:<YYYY-MM-DD>:<data-location>). A malformed record is a
+ * configuration error: refuse to start rather than guess. Absent, every model path stays off.
+ */
+const processing = processingFromEnv();
+if (!processing.ok && processing.configured) { console.error(`refusing to start: ${processing.reason}`); process.exit(1); }
+
 const classifier = classifierFromEnv();
 const cell = await Cell.start({
   databaseUrl: env("DATABASE_URL"),
@@ -77,10 +86,13 @@ const copilot = new Copilot(cell, providerFromEnv(), external, clock);
 const mcpGrants = parseGrants(process.env.KUBER_MCP_TOKENS);
 // Replay protection shared by every core instance (Valkey) when VALKEY_URL is set; otherwise in-process.
 const replay = replayStoreFromEnv();
-const app = buildServer(cell, { copilot, mcpGrants, clock, https: httpsCfg, auth: { secret: coreAuthSecret, replay } });
+// The governance layer loads only hash-locked prompts, register and patterns (agent/prompts.lock.json): refuse to start otherwise.
+const governance = createGovernance(cell);
+const app = buildServer(cell, { copilot, mcpGrants, clock, https: httpsCfg, auth: { secret: coreAuthSecret, replay }, governance });
 console.log(`classifier: ${classifier ? classifier.name : "rules, history and keywords (set KUBER_LLM_CLASSIFY=on for the LLM step)"}`);
 console.log(`replay protection: ${replay.kind === "valkey" ? "shared (Valkey)" : "in-process (single instance)"}`);
 console.log(`sign-in: passkeys (relying party ${rpId}, origins ${origins.join(", ")})${devSignIn ? "; DEVELOPMENT SIGN-IN ENABLED (KUBER_DEV_SIGNIN=true): anyone can claim an empty workspace by name" : ""}`);
+console.log(`model processing (${PROCESSING_ENV}): ${processing.ok ? `approved by ${processing.approval.approver} on ${processing.approval.date}, data location ${processing.approval.location}` : "not approved; no book data is sent to a model"}`);
 console.log(`copilot: ${copilot.engine}; MCP server: ${mcpGrants.size ? `/mcp (${mcpGrants.size} token(s))` : "off (set KUBER_MCP_TOKENS)"}`);
 await app.listen({ port: Number(env("PORT", "8080")), host: "0.0.0.0" });
 console.log(`kuber core: cell ${cell.cellId} listening (${httpsCfg ? "https" : "http"}; data encrypted with ${cell.keyring.kms.name} KMS)`);

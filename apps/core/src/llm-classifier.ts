@@ -11,6 +11,7 @@
  *   (account numbers, UPI and card references) are masked first; amounts are not sent.
  * - Answers are cached per tenant, so a repeated narration costs one call.
  */
+import { processingFromEnv } from "./copilot/governance/processing.ts";
 import { createHash } from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
@@ -93,5 +94,8 @@ export function classifierFromEnv(env = process.env): LlmClassifier | undefined 
     console.warn("KUBER_LLM_CLASSIFY=on needs ANTHROPIC_API_KEY and KUBER_LLM_CLASSIFY_MODEL or KUBER_LLM_MODEL; LLM classification is off");
     return undefined;
   }
+  // TAGOF Domain 12: statement lines go to the model only under a recorded processing decision.
+  const processing = processingFromEnv(env);
+  if (!processing.ok) { console.warn(`LLM classification is off: ${processing.reason}`); return undefined; }
   return new AnthropicClassifier(key, model);
 }

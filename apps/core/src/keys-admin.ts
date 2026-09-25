@@ -91,6 +91,9 @@ export const RETENTION: Record<string, "purge" | "sealed" | "keys" | "tombstone"
   "identity.authority_settings": "purge", "identity.authority_bands": "purge", "identity.delegations": "purge",
   "identity.related_parties": "purge", "identity.access_reviews": "purge", "identity.autonomy_switches": "purge",
   "ops.plan_approvals": "purge", "ops.incidents": "purge",
+  // Copilot turn index (ids, hashes, counts): the turn history itself is the sealed AgentTurnRecorded
+  // events in <tenant>/agent-turns/<book>, kept with es.events (TAGOF LOG-03, Tier 1 retention).
+  "agent.copilot_turns": "purge",
   "mdm.parties": "purge", "mdm.bank_changes": "purge", "mdm.reviews": "purge",
   "evidence.balances": "purge", "evidence.records": "purge", "evidence.lookup": "purge",
   "es.outbox": "purge", "es.snapshots": "purge", "es.dead_letters": "purge", "es.commands": "purge", "es.verify_checkpoints": "purge",

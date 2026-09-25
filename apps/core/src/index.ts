@@ -9,3 +9,6 @@ export { KeyAdmin, SEALED_COLUMNS, sealColumnsOnce, sealIdentityColumns } from "
 export { PROJECTION_TABLES, RETENTION, pruneOutbox } from "./keys-admin.ts";
 export { OpsAdmin, CONSUMER_INPUTS, type BusConsumerAdmin, type ConsistencyReport } from "./ops-admin.ts";
 export { autonomyErrors, compareCells, dbName, type AutonomyErrorPeriod, type CellComparison } from "./fin-ops.ts";
+export { providerFromEnv } from "./copilot/provider.ts";
+export { classifierFromEnv } from "./llm-classifier.ts";
+export * from "./copilot/governance/index.ts";

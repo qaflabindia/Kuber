@@ -34,11 +34,15 @@ import { Copilot } from "./copilot/index.ts";
 import { HELP } from "./copilot/router.ts";
 import { registerMcp } from "./mcp.ts";
 import { registerFinRoutes } from "./fin-routes.ts";
+import { createGovernance, type KuberGovernance } from "./copilot/governance/index.ts";
+import { registerAgentRoutes } from "./copilot/governance/routes.ts";
 import { SigningRequest, actionLabel, amountReason, draftIntent, lockIntent, planIntent, ratifyIntent } from "./signing.ts";
 import type { Who } from "./tools.ts";
 
 export interface ServerOptions {
   copilot?: Copilot; mcpGrants?: Map<string, Who>; clock?: () => string; https?: { key: Buffer; cert: Buffer };
+  /** The copilot's governance layer (TAGOF); created from the repository's agent/ directory when absent. */
+  governance?: KuberGovernance;
   /** Shared secret with the BFF (CORE_AUTH_SECRET). Without it every /v1 request is refused. */
   auth?: { secret: string | Buffer; issuers?: string[]; replay?: ReplayStore };
 }
@@ -764,7 +768,15 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   });
 
   // ------------------------------------------------------------ finance controls (FIN-MDM-04/05, FIN-OPS-02/03)
-  registerFinRoutes(app, cell, who, attestFor, signatureRequired, Assertion);
+  /** The authenticated person, no action check: for services that check a named action themselves. */
+  const authn = async (req: FastifyRequest) => {
+    const c = claimsOf.get(req);
+    if (!c?.tenant) throw new AuthError("unauthenticated", "request is not authenticated");
+    if (!c.principal) throw new AuthError("unauthenticated", "this request needs a signed-in person");
+    return { tenant: c.tenant, principal: Principal.parse(c.principal) };
+  };
+  registerFinRoutes(app, cell, who, attestFor, signatureRequired, Assertion, authn);
+  registerAgentRoutes(app, cell, opts.governance ?? createGovernance(cell), authn);
 
   return app;
 }

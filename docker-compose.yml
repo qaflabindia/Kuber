@@ -113,6 +113,9 @@ services:
       KUBER_LLM_MODEL: ${KUBER_LLM_MODEL:-}
       KUBER_LLM_CLASSIFY: ${KUBER_LLM_CLASSIFY:-off}
       KUBER_LLM_CLASSIFY_MODEL: ${KUBER_LLM_CLASSIFY_MODEL:-}
+      # TAGOF Domain 12: model processing needs a recorded decision, <approver>:<YYYY-MM-DD>:<data-location>
+      # (e.g. system_owner:asha:2026-09-25:us). Without it no book data is sent to a model. See agent/dependencies.md.
+      KUBER_LLM_PROCESSING_APPROVED: ${KUBER_LLM_PROCESSING_APPROVED:-}
       # MCP server for external agents (optional): {"<token>": {"tenant": "...", "book": "main", "principal": "agent:<name>"}}
       KUBER_MCP_TOKENS: ${KUBER_MCP_TOKENS:-}
       # External MCP servers the copilot may read from (optional): [{"name": "...", "url": "...", "allow": [...]}]
