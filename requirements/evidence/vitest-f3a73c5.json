@@ -1,10 +1,10 @@
 {
- "commit": "367b8814ea3ff8e336806f22789567645cb33548",
+ "commit": "f3a73c5163c872ab52742e5c874d312bc1f2db19",
  "dirty": false,
- "ranAt": "2026-09-25T00:57:56.363Z",
- "command": "npx vitest run --config vitest.config.ts --no-file-parallelism --reporter=default --reporter=json --outputFile=/tmp/register-V4xHxh/vitest.json tests/authz-hardening.test.ts tests/bus-consumers.test.ts tests/encryption.test.ts tests/fin-gl.test.ts tests/fin-mdm.test.ts tests/fin-ops.test.ts tests/identity.test.ts tests/ingestion.test.ts tests/isolation.test.ts tests/ledger-correctness.test.ts tests/ops-lifecycle.test.ts tests/scale.test.ts tests/verify-checkpoints.test.ts",
+ "ranAt": "2026-09-25T01:27:17.982Z",
+ "command": "npx vitest run --config vitest.config.ts --no-file-parallelism --reporter=default --reporter=json --outputFile=/tmp/register-waCVBJ/vitest.json tests/authz-hardening.test.ts tests/bus-consumers.test.ts tests/encryption.test.ts tests/fin-gl.test.ts tests/fin-mdm.test.ts tests/fin-ops.test.ts tests/identity.test.ts tests/ingestion.test.ts tests/isolation.test.ts tests/ledger-correctness.test.ts tests/ops-lifecycle.test.ts tests/scale.test.ts tests/verify-checkpoints.test.ts tests/web-shell.test.ts",
  "summary": {
-  "passed": 400,
+  "passed": 407,
   "failed": 0,
   "skipped": 2
  },
@@ -2287,7 +2287,7 @@
     "F02: roles, book scope and maker-checker",
     "passkey step-up for sensitive approvals"
    ],
-   "title": "a period operation is refused without a step-up claim, and with a stale one; a fresh one commits",
+   "title": "a period operation is refused without a signature; a step-up claim alone (stale, future or fresh) does not commit it",
    "status": "passed"
   },
   {
@@ -2296,7 +2296,7 @@
     "F02: roles, book scope and maker-checker",
     "passkey step-up for sensitive approvals"
    ],
-   "title": "an amount above the approval limit needs a step-up; below it the path is unchanged",
+   "title": "an amount above the approval limit needs a signature; below it the path is unchanged",
    "status": "passed"
   },
   {
@@ -2661,6 +2661,30 @@
     "database-role separation"
    ],
    "title": "refuses to start with a tenant role that is a member of system scope",
+   "status": "passed"
+  },
+  {
+   "file": "tests/isolation.test.ts",
+   "ancestors": [
+    "F14: runtime roles cannot migrate"
+   ],
+   "title": "the application and system roles can read schema_migrations but not write it",
+   "status": "passed"
+  },
+  {
+   "file": "tests/isolation.test.ts",
+   "ancestors": [
+    "F14: runtime roles cannot migrate"
+   ],
+   "title": "a cell started without migrationUrl only checks the migrations, and starts when all are applied",
+   "status": "passed"
+  },
+  {
+   "file": "tests/isolation.test.ts",
+   "ancestors": [
+    "F14: runtime roles cannot migrate"
+   ],
+   "title": "a cell started without migrationUrl refuses to run while a migration is pending, and says how to apply it",
    "status": "passed"
   },
   {
@@ -3229,6 +3253,38 @@
     "verification checkpoints"
    ],
    "title": "the application role can read checkpoints but not write them; the system role and the owner can",
+   "status": "passed"
+  },
+  {
+   "file": "tests/web-shell.test.ts",
+   "ancestors": [
+    "F15: the web shell shows unavailable controls as unavailable"
+   ],
+   "title": "a failed attention call is 'unavailable', with no counts, not an empty queue",
+   "status": "passed"
+  },
+  {
+   "file": "tests/web-shell.test.ts",
+   "ancestors": [
+    "F15: the web shell shows unavailable controls as unavailable"
+   ],
+   "title": "an answered attention call with nothing waiting is an empty queue, and counts show when there are some",
+   "status": "passed"
+  },
+  {
+   "file": "tests/web-shell.test.ts",
+   "ancestors": [
+    "F15: the web shell shows unavailable controls as unavailable"
+   ],
+   "title": "a failed verification is 'unavailable', distinct from verified and from a broken chain",
+   "status": "passed"
+  },
+  {
+   "file": "tests/web-shell.test.ts",
+   "ancestors": [
+    "F15: the web shell shows unavailable controls as unavailable"
+   ],
+   "title": "the role falls back to the session's when the member call fails; members stay hidden",
    "status": "passed"
   }
  ]
