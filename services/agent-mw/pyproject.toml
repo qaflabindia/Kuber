@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kuber-agent-mw"
+version = "0.1.0"
+description = "Kuber agent middleware: DSPy reasoning programs behind a signed, gated, internal-only HTTP API. Reasoning only: no database, ledger or tools."
+requires-python = ">=3.11"
+# Pinned: an artifact's hash and behaviour are tied to the DSPy version that compiled it.
+dependencies = [
+    "dspy==3.4.0",
+    "fastapi==0.141.1",
+    "uvicorn==0.53.0",
+    "pydantic==2.13.5",
+    "jsonschema==4.26.0",
+]
+
+[project.optional-dependencies]
+# The offline optimiser's MIPROv2 needs optuna; GEPA ships with dspy. Not installed in the serving image.
+optimize = [
+    "optuna==5.0.0",
+]
+dev = [
+    "pytest==9.1.1",
+    "httpx==0.28.1",
+    "optuna==5.0.0",
+]
+
+[project.scripts]
+agent-mw = "agentmw.__main__:main"
+
+[tool.setuptools]
+# The offline optimiser lives in services/agent-mw/optimize/ and is imported as agentmw.optimize.
+packages = ["agentmw", "agentmw.programs", "agentmw.optimize"]
+
+[tool.setuptools.package-dir]
+"agentmw" = "agentmw"
+"agentmw.programs" = "agentmw/programs"
+"agentmw.optimize" = "optimize"
+
+[tool.setuptools.package-data]
+"agentmw.optimize" = ["sample/*.jsonl"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"

@@ -1,0 +1,243 @@
+{
+ "source": "apps/core/src/copilot/governance/grounding.ts on ws5/agent-gov (deb8ebc), run under tsx on 2026-09-25",
+ "cases": [
+  {
+   "reply": "Your bank balance is ₹1,30,206.50.",
+   "toolOutputs": [
+    "BANK balance ₹1,30,206.50 as at 2026-09-25"
+   ],
+   "expected": {
+    "ok": true,
+    "ungrounded": []
+   }
+  },
+  {
+   "reply": "Balance ₹130,206.50",
+   "toolOutputs": [
+    "BANK 13020650"
+   ],
+   "expected": {
+    "ok": true,
+    "ungrounded": []
+   }
+  },
+  {
+   "reply": "Net profit ₹1.3 lakh",
+   "toolOutputs": [
+    "Net profit ₹1,30,000.00"
+   ],
+   "expected": {
+    "ok": true,
+    "ungrounded": []
+   }
+  },
+  {
+   "reply": "Net profit ₹1.35 lakh",
+   "toolOutputs": [
+    "Net profit ₹1,30,000.00"
+   ],
+   "expected": {
+    "ok": false,
+    "ungrounded": [
+     "₹1.35 lakh"
+    ]
+   }
+  },
+  {
+   "reply": "Revenue INR 2.5 cr",
+   "toolOutputs": [
+    "Revenue 25000000"
+   ],
+   "expected": {
+    "ok": true,
+    "ungrounded": []
+   }
+  },
+  {
+   "reply": "Paid Rs. 45,000/- to the plumber",
+   "toolOutputs": [
+    "Rs 45000"
+   ],
+   "expected": {
+    "ok": true,
+    "ungrounded": []
+   }
+  },
+  {
+   "reply": "Total is ₹5,80,000",
+   "toolOutputs": [
+    "Income ₹4,50,000.00; Other ₹1,30,000.00"
+   ],
+   "expected": {
+    "ok": true,
+    "ungrounded": []
+   }
+  },
+  {
+   "reply": "Difference ₹3,20,000",
+   "toolOutputs": [
+    "Income ₹4,50,000.00; Net ₹1,30,000.00"
+   ],
+   "expected": {
+    "ok": true,
+    "ungrounded": []
+   }
+  },
+  {
+   "reply": "Margin 28.9%",
+   "toolOutputs": [
+    "margin 28.9 percent"
+   ],
+   "expected": {
+    "ok": true,
+    "ungrounded": []
+   }
+  },
+  {
+   "reply": "Margin 29%",
+   "toolOutputs": [
+    "margin 28.9%"
+   ],
+   "expected": {
+    "ok": false,
+    "ungrounded": [
+     "29%"
+    ]
+   }
+  },
+  {
+   "reply": "You have 3 drafts totalling ₹12,500",
+   "toolOutputs": [
+    "Suspense ₹12,500.00 across 3 items"
+   ],
+   "expected": {
+    "ok": true,
+    "ungrounded": []
+   }
+  },
+  {
+   "reply": "Sum ₹15",
+   "toolOutputs": [
+    "3 drafts, 12 months"
+   ],
+   "expected": {
+    "ok": false,
+    "ungrounded": [
+     "₹15"
+    ]
+   }
+  },
+  {
+   "reply": "90k spent",
+   "toolOutputs": [
+    "Spent ₹90,000"
+   ],
+   "expected": {
+    "ok": true,
+    "ungrounded": []
+   }
+  },
+  {
+   "reply": "1200 rupees",
+   "toolOutputs": [
+    "x 120000 y"
+   ],
+   "expected": {
+    "ok": true,
+    "ungrounded": []
+   }
+  },
+  {
+   "reply": "50 paise fee",
+   "toolOutputs": [
+    "fee ₹0.50"
+   ],
+   "expected": {
+    "ok": true,
+    "ungrounded": []
+   }
+  },
+  {
+   "reply": "Loss of -₹500",
+   "toolOutputs": [
+    "balance -₹500.00"
+   ],
+   "expected": {
+    "ok": true,
+    "ungrounded": []
+   }
+  },
+  {
+   "reply": "On 2026-09-25 you had ₹2,026",
+   "toolOutputs": [
+    "as at 2026-09-25 cash ₹100"
+   ],
+   "expected": {
+    "ok": false,
+    "ungrounded": [
+     "₹2,026"
+    ]
+   }
+  },
+  {
+   "reply": "₹1,23,45,678.90 total",
+   "toolOutputs": [
+    "total 1234567890"
+   ],
+   "expected": {
+    "ok": true,
+    "ungrounded": []
+   }
+  },
+  {
+   "reply": "40 per cent up",
+   "toolOutputs": [
+    "up 40%"
+   ],
+   "expected": {
+    "ok": true,
+    "ungrounded": []
+   }
+  },
+  {
+   "reply": "No figures here, just words.",
+   "toolOutputs": [],
+   "expected": {
+    "ok": true,
+    "ungrounded": []
+   }
+  },
+  {
+   "reply": "₹1.2345678 lakh odd",
+   "toolOutputs": [
+    "x"
+   ],
+   "expected": {
+    "ok": false,
+    "ungrounded": [
+     "₹1.2345678 lakh"
+    ]
+   }
+  },
+  {
+   "reply": "Cash ₹6,00,000; burn ₹1,50,000; runway 4 months",
+   "toolOutputs": [
+    "Cash ₹6,00,000.00; average monthly burn ₹1,50,000.00; runway 4 months"
+   ],
+   "expected": {
+    "ok": true,
+    "ungrounded": []
+   }
+  },
+  {
+   "reply": "Rs 10 mn and 2 million",
+   "toolOutputs": [
+    "10000000 and ₹20,00,000"
+   ],
+   "expected": {
+    "ok": true,
+    "ungrounded": []
+   }
+  }
+ ]
+}

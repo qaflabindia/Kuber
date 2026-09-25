@@ -73,6 +73,11 @@ export interface SignInput {
   /** The web session this request is made for (16 to 128 base64url characters). */
   session?: string | null;
   issuer?: string; now?: number; ttlMs?: number;
+  /**
+   * Audience of the assertion; default "kuber-core". The core signs requests to the agent middleware
+   * with audience "kuber-agent-mw" and issuer "kuber-core" under a separate secret (AGENT_MW_SECRET).
+   */
+  audience?: string;
   /** Time of the principal's last verified passkey step-up (epoch ms), if any. */
   stepUpAt?: number;
 }
@@ -84,7 +89,7 @@ export const SESSION_ID_RE = /^[A-Za-z0-9_-]{16,128}$/;
 export function signRequest(key: Buffer, i: SignInput): string {
   const now = i.now ?? Date.now();
   const claims: Claims = {
-    v: 1, iss: i.issuer ?? ISSUER, aud: AUDIENCE, tenant: i.tenant, principal: i.principal, sid: i.session ?? null,
+    v: 1, iss: i.issuer ?? ISSUER, aud: i.audience ?? AUDIENCE, tenant: i.tenant, principal: i.principal, sid: i.session ?? null,
     method: i.method.toUpperCase(), path: i.path, bh: bodyHash(i.body), iat: now,
     exp: now + Math.min(i.ttlMs ?? MAX_TTL_MS, MAX_TTL_MS), nonce: randomBytes(16).toString("base64url"),
     ...(typeof i.stepUpAt === "number" && i.principal ? { su: i.stepUpAt } : {}),
@@ -134,6 +139,8 @@ export interface VerifyInput {
   header: string | string[] | undefined;
   method: string; path: string; body: string | Uint8Array | null | undefined;
   issuers?: string[]; now?: number;
+  /** Expected audience; default "kuber-core". */
+  audience?: string;
 }
 
 /** Every check but the replay check. Throws AuthError. */
@@ -147,7 +154,7 @@ function checkRequest(key: Buffer, i: VerifyInput): Claims {
   try { c = JSON.parse(Buffer.from(m[1]!, "base64url").toString("utf8")) as Claims; }
   catch { throw new AuthError("unauthenticated", "service assertion is not readable"); }
   const now = i.now ?? Date.now();
-  if (c.v !== 1 || c.aud !== AUDIENCE) throw new AuthError("wrong_audience", "service assertion is not for the core");
+  if (c.v !== 1 || c.aud !== (i.audience ?? AUDIENCE)) throw new AuthError("wrong_audience", "service assertion is not for the core");
   if (!(i.issuers ?? [ISSUER]).includes(c.iss)) throw new AuthError("wrong_issuer", "service assertion issuer is not trusted");
   if (typeof c.iat !== "number" || typeof c.exp !== "number" || c.exp - c.iat > MAX_TTL_MS || c.exp <= c.iat) throw new AuthError("bad_lifetime", "service assertion lifetime is invalid");
   if (c.iat > now + SKEW_MS) throw new AuthError("not_yet_valid", "service assertion is dated in the future");
