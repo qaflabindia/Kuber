@@ -90,7 +90,7 @@ describe("evidence record", () => {
     const r = e!.record;
     expect(r.source).toMatchObject({ kind: "signal", channel: expect.any(String), contentHash: expect.stringMatching(/^[0-9a-f]{64}$/) });
     expect(r.decision).toMatchObject({ classification: { accountId: expect.any(String), by: expect.any(String) }, level: expect.any(String) });
-    expect(r.approval).toMatchObject({ kind: "draft", by: OWNER, role: "owner", accountChosen: "LOANS" });
+    expect(r.approval).toMatchObject({ kind: "draft", by: OWNER, role: "superuser", accountChosen: "LOANS" });
     expect(r.execution).toMatchObject({ operation: "agent.pipeline", requestId: expect.any(String) });
     expect((r.result.balances as unknown[]).length).toBe(2);
   });

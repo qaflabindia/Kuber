@@ -24,7 +24,7 @@ import type { Plan } from "@kuber/ops";
 import { CORE_AUTH_SECRET, ORIGIN, ROOT, RP_ID, SoftAuthenticator, b64u, enrol, signedInject, startCell, type SignedRequest } from "./helpers.ts";
 
 const T = "signco", B = "main", F = "free";
-const P = { owner: "owner:ravi", asha: "controller:asha", kiran: "controller:kiran", meena: "approver:meena", preparer: "preparer:dev" };
+const P = { owner: "superuser:ravi", asha: "controller:asha", kiran: "controller:kiran", meena: "treasurer:meena", preparer: "preparer:dev" };
 const clock = { value: "2026-11-25" };
 let nowMs: number | undefined;
 let cell: Cell, app: FastifyInstance, stop: () => Promise<void>, ownerUrl: string;
@@ -248,7 +248,7 @@ describe("two authenticators and recovery", () => {
     const balance = await cell.ops.plan(T, B, P.owner, "balance", {});
     const c = balance.checks.find((x) => x.label === "Owners and controllers have a second passkey")!;
     expect(c).toMatchObject({ ok: false, blocking: false });
-    expect(c.detail).toMatch(/controller:asha, controller:kiran, owner:ravi/);
+    expect(c.detail).toMatch(/controller:asha, controller:kiran, superuser:ravi/);
     expect(balance.blocked).toBe(false);
   });
 

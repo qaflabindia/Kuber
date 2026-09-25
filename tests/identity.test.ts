@@ -93,7 +93,7 @@ describe("role permissions", () => {
 
 // ---------------------------------------------------------------- core, end to end
 const T = "firm", B = "main", B2 = "restricted";
-const P = { owner: "owner:ravi", controller: "controller:asha", controller2: "controller:kiran", preparer: "preparer:dev", approver: "approver:meena",
+const P = { owner: "owner:ravi", controller: "controller:asha", controller2: "controller:kiran", preparer: "preparer:dev", approver: "treasurer:meena",
   auditor: "auditor:outsider", member: "member:anu", scoped: "controller:branch", agent: "agent:main-only" };
 const clock = { value: "2026-11-25" };
 let cell: Cell, app: FastifyInstance, stop: () => Promise<void>, ownerUrl: string;
@@ -211,7 +211,7 @@ describe("F02: roles, book scope and maker-checker", () => {
     const p = await cell.ops.plan(T, B, P.controller, "close", { periodEnd: "2026-09-30" });
     expect(p.blocked).toBe(false);
     await expect(cell.ops.commit(T, p.planId, P.controller, p.hash)).rejects.toThrow(/period operation: it needs approval by someone other than its preparer/);
-    await expect(cell.ops.commit(T, p.planId, P.approver, p.hash)).rejects.toThrow(/approver may not plan.approve.period/);
+    await expect(cell.ops.commit(T, p.planId, P.approver, p.hash)).rejects.toThrow(/treasurer may not plan.approve.period/);
     // Over HTTP a period operation is a signed command (tests/signed-commands.test.ts): a step-up claim alone is refused.
     const r = await as(P.controller2, "POST", `/v1/tenants/${T}/plans/${p.planId}/commit`, { hash: p.hash }, T, Date.now());
     expect(r.statusCode).toBe(403);
@@ -359,8 +359,8 @@ describe("F02: roles, book scope and maker-checker", () => {
       expect(list.find((m) => m.principal === "controller:sam")?.displayName).toBe("sam");               // sealed name re-sealed for the successor
       const changes = (await cell.store.readStream(T, identityStream(T))).filter((e) => e.type === "MemberRoleChanged").slice(-2);
       expect(changes.map((e) => e.data)).toMatchObject([
-        { principal: "preparer:sam", role: "preparer", books: [B], previousRole: "preparer", previousBooks: null },
-        { principal: "controller:sam", role: "controller", books: null, previousRole: "preparer", previousBooks: [B], previousPrincipal: "preparer:sam" },
+        { principal: "preparer:sam", role: "staff", books: [B], previousRole: "staff", previousBooks: null },
+        { principal: "controller:sam", role: "controller", books: null, previousRole: "staff", previousBooks: [B], previousPrincipal: "preparer:sam" },
       ]);
       expect(changes.map((e) => e.meta.principal)).toEqual([P.owner, P.owner]);
       expect((await as(P.owner, "PATCH", url("controller:sam"), {})).statusCode).toBe(400);
@@ -372,8 +372,8 @@ describe("F02: roles, book scope and maker-checker", () => {
       await enrol(cell, T, ["controller:lee"]);
       const p = await cell.ops.plan(T, B, "controller:lee", "rebalance", rebalance(55));
       await cell.identity.changeMember(T, P.owner, "controller:lee", { role: "owner" });
-      await expect(cell.ops.commit(T, p.planId, "owner:lee", p.hash)).rejects.toThrow(/other than its preparer \(controller:lee\)/);
-      await cell.identity.changeMember(T, P.owner, "owner:lee", { role: "controller" });              // and back again
+      await expect(cell.ops.commit(T, p.planId, "superuser:lee", p.hash)).rejects.toThrow(/other than its preparer \(controller:lee\)/);
+      await cell.identity.changeMember(T, P.owner, "superuser:lee", { role: "controller" });              // and back again
       await expect(cell.ops.commit(T, p.planId, "controller:lee", p.hash)).rejects.toThrow(/other than its preparer/);
       await cell.ops.discard(T, p.planId, "controller:lee");
     });
@@ -411,7 +411,7 @@ describe("passkeys", () => {
     expect(opts.authenticatorSelection).toMatchObject({ residentKey: "required", userVerification: "required" });
     const r = await ceremony(W, "registration/verify", { displayName: "Priya Rao", response: owner.create(opts) });
     expect(r.statusCode).toBe(201);
-    expect(r.json()).toMatchObject({ tenant: W, principal: "owner:priya-rao", role: "owner", books: null });
+    expect(r.json()).toMatchObject({ tenant: W, principal: "superuser:priya-rao", role: "superuser", books: null });
     const again = await ceremony(W, "registration/options", { displayName: "Someone Else" });
     expect(again.statusCode).toBe(409);
     expect(again.json().error).toBe("workspace_taken");
@@ -434,7 +434,7 @@ describe("passkeys", () => {
     const assertion = owner.get(opts);
     const ok = await ceremony(W, "authentication/verify", { response: assertion });
     expect(ok.statusCode).toBe(200);
-    expect(ok.json().principal).toBe("owner:priya-rao");
+    expect(ok.json().principal).toBe("superuser:priya-rao");
     expect((await ceremony(W, "authentication/verify", { response: assertion })).statusCode).toBe(401);
     const o2 = (await ceremony(W, "authentication/options")).json();
     expect((await ceremony(W, "authentication/verify", { response: new SoftAuthenticator().get(o2) })).statusCode).toBe(401);
@@ -447,7 +447,7 @@ describe("passkeys", () => {
   });
 
   it("the owner invites an auditor limited to one book; the code works once", async () => {
-    const inv = await as("owner:priya-rao", "POST", `/v1/tenants/${W}/members/invitations`, { role: "auditor", displayName: "CA Firm", books: ["main"] }, W);
+    const inv = await as("superuser:priya-rao", "POST", `/v1/tenants/${W}/members/invitations`, { role: "auditor", displayName: "CA Firm", books: ["main"] }, W);
     expect(inv.statusCode).toBe(201);
     const { token, principal } = inv.json();
     expect(principal).toBe("auditor:ca-firm");
@@ -458,47 +458,47 @@ describe("passkeys", () => {
     expect((await ceremony(W, "registration/options", { displayName: "CA Firm", enrolment: token })).statusCode).toBe(403);
     const me = (await as("auditor:ca-firm", "GET", `/v1/tenants/${W}/me`, undefined, W)).json();
     expect(me.role).toBe("auditor");
-    expect(me.permissions).toEqual(["read", "members.read"]);
+    expect(me.permissions).toEqual(["self", "read", "members.read", "agent.turns.read"]);
   });
 
   it("step-up: re-confirms the signed-in person with their own passkey only", async () => {
     const su = (principal: string, path: string, payload: unknown = {}) => as(principal, "POST", `/v1/tenants/${W}/identity/stepup/${path}`, payload, W);
-    const opts = (await su("owner:priya-rao", "options")).json();
+    const opts = (await su("superuser:priya-rao", "options")).json();
     expect(opts.userVerification).toBe("required");
     expect(opts.allowCredentials.map((c: { id: string }) => c.id)).toEqual([b64u(owner.credId)]);
-    const ok = await su("owner:priya-rao", "verify", { response: owner.get(opts) });
+    const ok = await su("superuser:priya-rao", "verify", { response: owner.get(opts) });
     expect(ok.statusCode).toBe(200);
-    expect(ok.json().principal).toBe("owner:priya-rao");
+    expect(ok.json().principal).toBe("superuser:priya-rao");
     expect(Math.abs(ok.json().at - Date.now())).toBeLessThan(60_000);
     // Another member's step-up challenge cannot be answered with the owner's passkey, nor a sign-in challenge.
     const theirs = (await su("auditor:ca-firm", "options")).json();
     expect((await su("auditor:ca-firm", "verify", { response: owner.get(theirs) })).statusCode).toBe(401);
     const signin = (await ceremony(W, "authentication/options")).json();
-    expect((await su("owner:priya-rao", "verify", { response: owner.get(signin) })).statusCode).toBe(401);
+    expect((await su("superuser:priya-rao", "verify", { response: owner.get(signin) })).statusCode).toBe(401);
     // Unauthenticated ceremonies (no principal) cannot step up; nor can the dev path when disabled.
     expect((await ceremony(W, "stepup/options")).statusCode).toBe(401);
-    expect((await su("owner:priya-rao", "verify", { dev: true })).statusCode).toBe(403);
+    expect((await su("superuser:priya-rao", "verify", { dev: true })).statusCode).toBe(403);
   });
 
   it("a role change keeps the person's passkey; a revoked passkey no longer signs in", async () => {
     const auditor = new SoftAuthenticator();
-    const inv = await cell.identity.invite(W, "owner:priya-rao", { role: "auditor", displayName: "Second CA" });
+    const inv = await cell.identity.invite(W, "superuser:priya-rao", { role: "auditor", displayName: "Second CA" });
     const ro = (await ceremony(W, "registration/options", { displayName: "Second CA", enrolment: inv.token })).json();
     expect((await ceremony(W, "registration/verify", { displayName: "Second CA", enrolment: inv.token, response: auditor.create(ro) })).statusCode).toBe(201);
-    const changed = await as("owner:priya-rao", "PATCH", `/v1/tenants/${W}/members/${encodeURIComponent("auditor:second-ca")}`, { role: "approver" }, W);
-    expect(changed.json().principal).toBe("approver:second-ca");
-    const creds = (await as("owner:priya-rao", "GET", `/v1/tenants/${W}/credentials`, undefined, W)).json() as { credentialId: string; principal: string }[];
-    expect(creds.find((c) => c.credentialId === b64u(auditor.credId))?.principal).toBe("approver:second-ca");
+    const changed = await as("superuser:priya-rao", "PATCH", `/v1/tenants/${W}/members/${encodeURIComponent("auditor:second-ca")}`, { role: "controller" }, W);
+    expect(changed.json().principal).toBe("controller:second-ca");
+    const creds = (await as("superuser:priya-rao", "GET", `/v1/tenants/${W}/credentials`, undefined, W)).json() as { credentialId: string; principal: string }[];
+    expect(creds.find((c) => c.credentialId === b64u(auditor.credId))?.principal).toBe("controller:second-ca");
     const o1 = (await ceremony(W, "authentication/options")).json();
-    expect((await ceremony(W, "authentication/verify", { response: auditor.get(o1) })).json().principal).toBe("approver:second-ca");
-    expect((await as("owner:priya-rao", "POST", `/v1/tenants/${W}/credentials/${b64u(auditor.credId)}/revoke`, {}, W)).statusCode).toBe(204);
+    expect((await ceremony(W, "authentication/verify", { response: auditor.get(o1) })).json().principal).toBe("controller:second-ca");
+    expect((await as("superuser:priya-rao", "POST", `/v1/tenants/${W}/credentials/${b64u(auditor.credId)}/revoke`, {}, W)).statusCode).toBe(204);
     expect((await cell.store.readStream(W, identityStream(W))).filter((e) => e.type === "CredentialRevoked").at(-1))
-      .toMatchObject({ meta: { principal: "owner:priya-rao" }, data: { principal: "approver:second-ca", credentialId: b64u(auditor.credId) } });
+      .toMatchObject({ meta: { principal: "superuser:priya-rao" }, data: { principal: "controller:second-ca", credentialId: b64u(auditor.credId) } });
     const o2 = (await ceremony(W, "authentication/options")).json();
     expect((await ceremony(W, "authentication/verify", { response: auditor.get(o2) })).statusCode).toBe(401);
-    expect((await as("approver:second-ca", "POST", `/v1/tenants/${W}/identity/stepup/options`, {}, W)).json().error).toBe("no_passkey");
+    expect((await as("controller:second-ca", "POST", `/v1/tenants/${W}/identity/stepup/options`, {}, W)).json().error).toBe("no_passkey");
     // The only owner keeps their last passkey.
-    const last = await as("owner:priya-rao", "POST", `/v1/tenants/${W}/credentials/${b64u(owner.credId)}/revoke`, {}, W);
+    const last = await as("superuser:priya-rao", "POST", `/v1/tenants/${W}/credentials/${b64u(owner.credId)}/revoke`, {}, W);
     expect(last.statusCode).toBe(409);
     expect(last.json().error).toBe("last_owner_passkey");
   });
@@ -506,7 +506,7 @@ describe("passkeys", () => {
   it("development sign-in is off unless explicitly enabled, and never takes over a workspace with people", async () => {
     expect((await ceremony("devco", "dev-signin", { name: "Dev User" })).statusCode).toBe(403);
     const dev = new Identity(cell.store, cell.policies, { rpId: RP_ID, origins: [ORIGIN], devSignIn: true });
-    expect(await dev.devSignIn("devco", "Dev User")).toMatchObject({ principal: "owner:dev-user", source: "dev" });
+    expect(await dev.devSignIn("devco", "Dev User")).toMatchObject({ principal: "superuser:dev-user", source: "dev" });
     await expect(dev.devSignIn(W, "Mallory")).rejects.toThrow(/sign in with a passkey/);
   });
 
@@ -534,28 +534,28 @@ describe("passkeys", () => {
     const reg = (await ceremony(S, "registration/options", { displayName: "Sam Owner" })).json();
     expect((await ceremony(S, "registration/verify", { displayName: "Sam Owner", response: key.create(reg) })).statusCode).toBe(201);
     // A second passkey arrives by invitation to a second person, so the workspace keeps a way in.
-    const inv = (await send({ method: "POST", url: `/v1/tenants/${S}/members/invitations`, tenant: S, principal: "owner:sam-owner", payload: { role: "owner", displayName: "Second Owner" } })).json();
+    const inv = (await send({ method: "POST", url: `/v1/tenants/${S}/members/invitations`, tenant: S, principal: "superuser:sam-owner", payload: { role: "owner", displayName: "Second Owner" } })).json();
     const o2 = (await ceremony(S, "registration/options", { displayName: "Second Owner", enrolment: inv.token })).json();
     expect((await ceremony(S, "registration/verify", { displayName: "Second Owner", enrolment: inv.token, response: spare.create(o2) })).statusCode).toBe(201);
     // Sign in with a session id the web tier chose; the core binds it to this passkey.
     const sid = newSession();
     const opts = (await ceremony(S, "authentication/options")).json();
     const signedIn = await send({ method: "POST", url: `/v1/tenants/${S}/identity/authentication/verify`, tenant: S, principal: null, session: sid, payload: { response: key.get(opts) } });
-    expect(signedIn.json().principal).toBe("owner:sam-owner");
-    const me = () => send({ method: "GET", url: `/v1/tenants/${S}/me`, tenant: S, principal: "owner:sam-owner", session: sid });
+    expect(signedIn.json().principal).toBe("superuser:sam-owner");
+    const me = () => send({ method: "GET", url: `/v1/tenants/${S}/me`, tenant: S, principal: "superuser:sam-owner", session: sid });
     expect((await me()).statusCode).toBe(200);
     // The same session id cannot be used for another principal.
-    expect((await send({ method: "GET", url: `/v1/tenants/${S}/me`, tenant: S, principal: "owner:second-owner", session: sid })).statusCode).toBe(401);
-    const creds = (await me().then(() => send({ method: "GET", url: `/v1/tenants/${S}/me/credentials`, tenant: S, principal: "owner:sam-owner" }))).json();
+    expect((await send({ method: "GET", url: `/v1/tenants/${S}/me`, tenant: S, principal: "superuser:second-owner", session: sid })).statusCode).toBe(401);
+    const creds = (await me().then(() => send({ method: "GET", url: `/v1/tenants/${S}/me/credentials`, tenant: S, principal: "superuser:sam-owner" }))).json();
     expect(creds).toHaveLength(1);
     // Another owner (members.manage) may revoke it; see the next test for someone who may not.
-    expect((await send({ method: "POST", url: `/v1/tenants/${S}/credentials/${creds[0].credentialId}/revoke`, tenant: S, principal: "owner:second-owner", payload: {} })).statusCode).toBe(204);
+    expect((await send({ method: "POST", url: `/v1/tenants/${S}/credentials/${creds[0].credentialId}/revoke`, tenant: S, principal: "superuser:second-owner", payload: {} })).statusCode).toBe(204);
     const ended = await me();
     expect(ended.statusCode).toBe(401);
     expect(ended.json().error).toBe("session_revoked");
     const o3 = (await ceremony(S, "authentication/options")).json();
     expect((await ceremony(S, "authentication/verify", { response: key.get(o3) })).statusCode).toBe(401);
-    expect((await send({ method: "GET", url: `/v1/tenants/${S}/me/credentials`, tenant: S, principal: "owner:sam-owner" })).json()[0].revokedAt).not.toBeNull();
+    expect((await send({ method: "GET", url: `/v1/tenants/${S}/me/credentials`, tenant: S, principal: "superuser:sam-owner" })).json()[0].revokedAt).not.toBeNull();
     // The whole story is in the identity stream, sealed like every event.
     expect((await cell.store.readStream(S, identityStream(S))).map((e) => e.type)).toEqual([
       "MemberAdded", "CredentialRegistered", "InvitationIssued", "InvitationRedeemed", "MemberAdded", "CredentialRegistered", "CredentialRevoked",
@@ -563,9 +563,9 @@ describe("passkeys", () => {
   });
 
   it("a member may revoke only their own passkeys unless they manage members", async () => {
-    const [c] = await cell.identity.credentials(W, "owner:priya-rao");
+    const [c] = await cell.identity.credentials(W, "superuser:priya-rao");
     expect((await as("auditor:ca-firm", "POST", `/v1/tenants/${W}/credentials/${c!.credentialId}/revoke`, {}, W)).statusCode).toBe(404);
-    expect((await cell.identity.credentials(W, "owner:priya-rao"))[0]!.revokedAt).toBeNull();
+    expect((await cell.identity.credentials(W, "superuser:priya-rao"))[0]!.revokedAt).toBeNull();
   });
 
   it("crypto-shredding a workspace removes its members, passkeys, invitations and settings", async () => {
@@ -583,7 +583,7 @@ describe("passkeys", () => {
       const keyring = new Keyring(owner, cell.keyring.kms, 0);
       await new KeyAdmin(owner, keyring, new EventStore(owner, "admin", { keyring }), 0).shred(G, "operator:test", "erasure request");
       expect(await count()).toEqual({ members: 0, credentials: 0, enrolments: 0, settings: 0 });
-      expect((await cell.identity.member(T, P.owner))?.role).toBe("owner");           // other workspaces untouched
+      expect((await cell.identity.member(T, P.owner))?.role).toBe("superuser");           // other workspaces untouched
     } finally { await owner.end(); }
   });
 });

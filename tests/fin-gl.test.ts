@@ -42,7 +42,7 @@ async function planCommit(book: string, op: string, input: unknown, preparer: st
 beforeAll(async () => {
   const f = await startCell(clock);
   cell = f.cell; stop = f.stop; ownerUrl = f.db.ownerUrl;
-  await enrol(cell, T, [OWNER, CONTROLLER, PREPARER, APPROVER]);
+  await enrol(cell, T, [OWNER, CONTROLLER, PREPARER, APPROVER, "treasurer:fin"]);
 });
 afterAll(async () => { await stop?.(); });
 
@@ -113,7 +113,7 @@ describe("FIN-GL-01: journal lifecycle and posting controls", () => {
     expect(noParty.json()).toMatchObject({ error: "control_needs_party" });
     // the ledger itself refuses the flag from anyone but an owner or controller
     await expect(cell.gl.execute(T, B, { kind: "PostJournal", journalId: uuid(), txnDate: "2026-10-12", narration: "x", entry: "manual",
-      controlledAdjustment: { reason: "write-back" }, lines: [L("DEBTORS", 500n, { partyId: "p.acme" }), L("FEES", -500n)] }, { principal: PREPARER })).rejects.toThrow(/only an owner or controller/);
+      controlledAdjustment: { reason: "write-back" }, lines: [L("DEBTORS", 500n, { partyId: "p.acme" }), L("FEES", -500n)] }, { principal: PREPARER })).rejects.toThrow(/owner or controller/);
     const good = await journal({ txnDate: "2026-10-12", narration: "Adjustment", lines: lines("p.acme"), controlledAdjustment: { reason: "invoice missed by billing" } }, CONTROLLER);
     expect(good.statusCode).toBe(201);
     const ev = (await posted(B)).at(-1)!.data as EventData<"JournalPosted">;
@@ -132,7 +132,8 @@ describe("FIN-GL-01: journal lifecycle and posting controls", () => {
     const p = await cell.ops.plan(T, B, CONTROLLER, "record", { ...base, controlledAdjustment: { reason: "unapplied receipt", partyId: "p.acme" } });
     expect(p.blocked).toBe(false);
     // committing it also needs an owner or controller
-    await expect(cell.ops.commit(T, p.planId, APPROVER, p.hash)).rejects.toThrow(/owner or controller/);
+    // (a treasurer may approve a record plan, but not a controlled adjustment; approver principals are superusers since role model v2)
+    await expect(cell.ops.commit(T, p.planId, "treasurer:fin", p.hash)).rejects.toThrow(/owner or controller/);
     expect((await cell.ops.commit(T, p.planId, OWNER, p.hash)).status).toBe("committed");
     const ev = (await posted(B)).at(-1)!.data as EventData<"JournalPosted">;
     expect(ev.lines.find((l) => l.accountId === "DEBTORS")).toMatchObject({ partyId: "p.acme", amount: "-25000" });

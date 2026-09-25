@@ -243,7 +243,9 @@ describe("FIN-MDM-03 party master", () => {
   });
 
   it("FIN-MDM-03 creating, verifying and releasing a bank change are separate rights, and never the same person as the maker", async () => {
-    await expect(cell.parties.register(T, P.member, { partyId: "V-X", entityId: "ent-a", kind: "vendor", name: "X" })).rejects.toThrow(/may not party.manage/);
+    // Role model v2: member principals are staff, the makers of party changes; auditors may not.
+    await enrol(cell, T, ["auditor:ina"]);
+    await expect(cell.parties.register(T, "auditor:ina", { partyId: "V-X", entityId: "ent-a", kind: "vendor", name: "X" })).rejects.toThrow(/may not party.manage/);
     await expect(cell.parties.register(T, P.agent, { partyId: "V-X", entityId: "ent-a", kind: "vendor", name: "X" })).rejects.toThrow(/agent may not/);
     await cell.parties.register(T, P.preparer, { partyId: "V-RIGHTS", entityId: "ent-a", kind: "vendor", name: "Rights Co" });
     const { changeId } = await cell.parties.requestBankChange(T, P.controller, "V-RIGHTS", { bank: BANK2, source: "email from accounts@rights.example" });

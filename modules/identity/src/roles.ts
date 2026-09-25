@@ -135,10 +135,10 @@ export const prefixMatchesRole = (principal: string, role: string) => {
   const p = prefixOf(principal);
   return p === role || (isLegacyAlias(p) && LEGACY_ALIASES[p] === role);
 };
-/** The denial message: "<prefix> may not <action>", naming the role when the prefix is a legacy alias. */
-export const mayNot = (principal: string, role: string, action: string) => {
-  const p = prefixOf(principal);
-  return p && p !== role ? `${p} may not ${action} (role ${role})` : `${role} may not ${action}`;
-};
+/**
+ * The denial message: "<prefix> may not <action>". A legacy prefix is named as written (a
+ * preparer:* principal is Staff, and "preparer may not plan.approve" says which principal was refused).
+ */
+export const mayNot = (principal: string, role: string, _action: string) => `${prefixOf(principal) || role} may not ${_action}`;
 /** The permission table, for display and table-driven tests. */
 export const permissionTable = () => Object.fromEntries(ROLES.map((r) => [r, [...PERMISSIONS[r]]])) as Record<Role, Action[]>;

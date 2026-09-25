@@ -106,7 +106,7 @@ describe("FIN-MDM-04 authority matrix", () => {
   it("FIN-MDM-04: amount bands from POL-002 apply per action, book and role once the matrix is on", async () => {
     expect((await as(T, P.asha, "PUT", "/authority", { enabled: true })).statusCode).toBe(403);           // settings.manage: owners
     const m = (await as(T, P.owner, "PUT", "/authority", { enabled: true })).json();
-    expect(m).toMatchObject({ enabled: true, defaults: { "plan.approve": { owner: null, controller: "20000000", approver: "2500000" } } });
+    expect(m).toMatchObject({ enabled: true, defaults: { "plan.approve": { superuser: null, controller: "20000000", treasurer: "20000000", approver: "2500000" } } });
     expect((await identityEvents(T)).some((e) => e.type === "AuthorityMatrixChanged" && e.meta.principal === P.owner)).toBe(true);
 
     await approve(await prep(P.dev, "20,000"), P.meena);                                                     // approver: up to ₹25,000
@@ -132,7 +132,8 @@ describe("FIN-MDM-04 authority matrix", () => {
     await approve(fifty, P.dev);                                                                             // a preparer, by delegation
     await expect(approve(await prep(P.pia, "1,50,000"), P.dev)).rejects.toThrow(/preparer may not plan.approve/);   // above the delegated ₹1,00,000
     await expect(delegate(P.asha, { grantee: P.pia, maxPaise: "50000000" })).rejects.toThrow(/exceeds the grantor's own authority of ₹2,00,000/);
-    await expect(delegate(P.meena, { grantee: P.pia, action: "plan.approve.period", maxPaise: "100" })).rejects.toThrow(/approver may not plan.approve.period, so cannot delegate it/);
+    // (Role model v2: approver principals are superusers and hold plan.approve.period; a preparer (staff) does not.)
+    await expect(delegate(P.dev, { grantee: P.pia, action: "plan.approve.period", maxPaise: "100" })).rejects.toThrow(/preparer may not plan.approve.period, so cannot delegate it/);
     await expect(delegate(P.dev, { grantee: P.pia, maxPaise: "100" })).rejects.toThrow(/preparer may not plan.approve, so cannot delegate/);
     // At use, too: when the grantor's own band drops below the amount, the delegation no longer covers it.
     await cell.identity.authority.setBand(T, P.owner, { action: "plan.approve", book: null, role: "controller", maxPaise: "3000000" });   // ₹30,000
@@ -222,7 +223,7 @@ describe("FIN-MDM-04 authority matrix", () => {
       await cell.parties.register(T, P.asha, { partyId, entityId: T, kind: "vendor", name });
     }
     expect((await as(T, P.asha, "POST", "/conflicts", { principal: P.neel, partyId: "p.unknown", note: "not in the master" })).statusCode).toBe(404);
-    expect((await as(T, P.meena, "POST", "/conflicts", { principal: P.neel, partyId: "p.acme", note: "brother-in-law runs Acme" })).statusCode).toBe(403);
+    expect((await as(T, P.dev, "POST", "/conflicts", { principal: P.neel, partyId: "p.acme", note: "brother-in-law runs Acme" })).statusCode).toBe(403);
     expect((await as(T, P.asha, "POST", "/conflicts", { principal: P.neel, partyId: "p.acme", note: "brother-in-law runs Acme" })).statusCode).toBe(204);
     expect((await as(T, P.auditor, "GET", "/conflicts")).json()).toEqual([expect.objectContaining({ principal: P.neel, partyId: "p.acme", note: "brother-in-law runs Acme" })]);
     const acme = await prep(P.dev, "10,000", { party: "p.acme" });
@@ -387,7 +388,7 @@ describe("FIN-OPS-03 autonomy kill switch", () => {
 
   beforeAll(async () => {
     clock.value = "2026-10-25";
-    await enrol(cell, T, [OWNER, CTRL, APPROVER]);
+    await enrol(cell, T, [OWNER, CTRL, APPROVER, "preparer:pam"]);
     await enrol(cell, T, [AGENT], [B]);
     await cell.gl.openBook(T, B, "laksh", "freelancer", OWNER);
     for (const [acc, amt] of [["BANK", 12500000n], ["LOANS", -240000000n]] as const) {
@@ -408,7 +409,7 @@ describe("FIN-OPS-03 autonomy kill switch", () => {
   afterAll(() => { clock.value = "2026-11-25"; });
 
   it("FIN-OPS-03: the kill switch immediately sends all autonomous posting to human review, recorded with actor and reason", async () => {
-    expect((await as(T, APPROVER, "POST", "/autonomy/halt", { reason: "suspicious postings" })).statusCode).toBe(403);   // owner/controller only
+    expect((await as(T, "preparer:pam", "POST", "/autonomy/halt", { reason: "suspicious postings" })).statusCode).toBe(403);   // superuser/controller only
     const r = await as(T, OWNER, "POST", "/autonomy/halt", { reason: "classifier drift under investigation" });
     expect(r.statusCode).toBe(200);
     expect(r.json()).toEqual([expect.objectContaining({ book: null, halted: true, reason: "classifier drift under investigation", setBy: OWNER })]);
@@ -484,7 +485,7 @@ describe("FIN-OPS-02 financial incident register", () => {
   beforeAll(async () => { await enrol(cell, T, Object.values(P)); });
 
   it("FIN-OPS-02: an incident records tenant, books, periods, possible loss or duplication, owner, containment and corrections", async () => {
-    expect((await as(T, P.meena, "POST", "/incidents", body)).statusCode).toBe(403);                         // incident.manage: owner/controller
+    expect((await as(T, P.auditor, "POST", "/incidents", body)).statusCode).toBe(403);                       // incident.manage: superuser/controller
     expect((await as(T, P.asha, "POST", "/incidents", { ...body, possibleLossPaise: "118000.00" })).statusCode).toBe(400);   // integer paise
     const opened = await as(T, P.asha, "POST", "/incidents", body);
     expect(opened.statusCode).toBe(201);
