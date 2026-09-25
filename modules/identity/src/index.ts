@@ -33,6 +33,7 @@ import {
 import { Principal } from "@kuber/contracts";
 import { isToken, type TenantKeys } from "@kuber/crypto";
 import { tenantRlsFor, type EventStore, type GuardScope, type Migration, type ModuleGuard, type NewEvent } from "@kuber/eventstore";
+import type { CommandSignature, Envelope } from "@kuber/contracts";
 import type { OpsGuard, OpsGuardQuery, Plan } from "@kuber/ops";
 import type { PolicyEngine } from "@kuber/policy";
 import { ReplayCache } from "@kuber/auth";
@@ -41,12 +42,17 @@ import { Authority, type AuthorityChange, type AuthorityChangeHook, type Identit
 import { AutonomySwitch } from "./autonomy.ts";
 import { AccessReview } from "./access-review.ts";
 import { IDENTITY_FIN_MIGRATIONS } from "./fin-migrations.ts";
+import { DEV_STEP_UP_NOTE, SIGNED_EVENT_TYPES, SIGNING_MIGRATIONS, SignedCommands, SigningError, TWO_AUTHENTICATOR_ROLES, expectedBinding,
+  verifyCommandSignature, type SignatureReport, type SigningIntent } from "./signing.ts";
+import { STEP_UP_MAX_AGE_MS, stepUpFresh } from "@kuber/auth";
 
 export * from "./roles.ts";
 export { Authority, DELEGABLE, DOA_DEFAULTS, DOA_SOURCE, type AuthorityBasis, type AuthorityChange, type AuthorityChangeHook, type Delegation } from "./authority.ts";
 export { AutonomySwitch, type AutonomySwitchState } from "./autonomy.ts";
 export { AccessReview, REVIEW_DECISIONS, type AccessReviewReport, type ReviewDecision, type ReviewItem } from "./access-review.ts";
 export { IDENTITY_FIN_MIGRATIONS, accessReviewNoteCtx, autonomyReasonCtx, relatedPartyNoteCtx, rlsForTables } from "./fin-migrations.ts";
+export { DEV_STEP_UP_NOTE, SIGNED_EVENT_TYPES, SIGNING_TTL_MS, SigningError, TWO_AUTHENTICATOR_ROLES, commandDigest, expectedBinding, lockSubjectHash,
+  summaryHash, verifyCommandSignature, type SignatureReport, type SigningIntent } from "./signing.ts";
 
 export const IDENTITY_MIGRATIONS: Migration[] = [{
   id: "identity-001",
@@ -97,7 +103,7 @@ CREATE POLICY system_scope ON identity.sessions TO kuber_system_scope USING (tru
   // successor, so maker-checker still recognizes the person. (Passkey revocation columns: identity-002.)
   id: "identity-004-member-succession",
   sql: `ALTER TABLE identity.members ADD COLUMN succeeded_by TEXT;`,
-}, ...IDENTITY_FIN_MIGRATIONS];
+}, ...IDENTITY_FIN_MIGRATIONS, ...SIGNING_MIGRATIONS];
 
 /**
  * Data migration (run once by the cell after the SQL migrations, recorded in schema_migrations):
@@ -124,7 +130,11 @@ export interface Member {
   tenant: string; principal: string; role: Role | "agent"; books: string[] | null;
   displayName: string; status: "active" | "revoked"; source: string;
 }
-export interface Separation { soloOwner: boolean; sodLimitPaise: string | null }
+/**
+ * Separation-of-duties settings. `requireTwoAuthenticators` (off by default, design 16.4): owners
+ * and controllers with fewer than two active passkeys may not sign step-up-class approvals.
+ */
+export interface Separation { soloOwner: boolean; sodLimitPaise: string | null; requireTwoAuthenticators?: boolean }
 /** A member's passkey, as listed for management (never the key material). */
 export interface Credential { credentialId: string; principal: string; transports: string[]; createdAt: string; lastUsedAt: string | null; revokedAt: string | null }
 export interface MemberChange { role?: Role; books?: string[] | null }
@@ -148,7 +158,7 @@ export const slug = (s: string) => s.toLowerCase().trim().replace(/[^a-z0-9]+/g,
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 const denied = (m: string) => new AccessDenied(m);
 /** Ceremony kinds bound into a challenge; step-up challenges are also bound to the principal. */
-type Ceremony = "reg" | "auth" | "stepup";
+type Ceremony = "reg" | "auth" | "stepup" | "addkey";
 
 type Row = { tenant_id: string; principal: string; role: string; books: string[] | null; display_name: string; status: string; source: string };
 /** Rows written before names were sealed are plaintext until the sealing migration has run. */
@@ -188,8 +198,12 @@ export class Identity implements OpsGuard, ModuleGuard {
   /** FIN-MDM-05: periodic access and master-change review. */
   readonly accessReview: AccessReview;
   private readonly authorityHooks: AuthorityChangeHook[] = [];
+  /** Design 14.4/16.4: device-signed high-risk commands. */
+  private readonly signing: SignedCommands;
   constructor(private store: EventStore, private policies: PolicyEngine, private o: IdentityOptions) {
     this.now = o.now ?? Date.now;
+    this.signing = new SignedCommands({ store, rpId: o.rpId, origins: o.origins, now: () => this.now(),
+      requireSecondPasskey: (t, p, tx) => this.requireSecondPasskey(t, p, tx) });
     const host: IdentityHost = {
       member: (t, p, tx) => this.member(t, p, tx), authorize: (t, p, a, sc, tx) => this.authorize(t, p, a, sc, tx),
       now: () => this.now(), denied: (m) => denied(m), error: (c, m, st) => new IdentityError(c, m, st),
@@ -349,7 +363,7 @@ export class Identity implements OpsGuard, ModuleGuard {
     await this.store.tenantTx(tenant, async (tx) => {
       await this.lockTenant(tx, tenant);
       const [exists] = await tx`SELECT 1 FROM identity.members WHERE tenant_id = ${tenant} AND principal = ${principal} AND status = 'active'`;
-      if (exists) throw new IdentityError("member_exists", `${principal} is already a member`, 409);
+      if (exists) throw new IdentityError("member_exists", `${principal} is already a member (to restore access for someone who lost their passkeys, an operator runs identity-cli recover)`, 409);
       await tx`INSERT INTO identity.enrolments (tenant_id, token_hash, principal, role, books, display_name, created_by, expires_at)
         VALUES (${tenant}, ${hash}, ${principal}, ${i.role}, ${i.books ?? null}, ${keys.seal(i.displayName, enrolmentNameCtx(hash))}, ${by}, ${expiresAt})`;
       await this.audit(tx, tenant, by, [{ type: "InvitationIssued", data: { invitation: hash, principal, role: i.role, books: i.books ?? null, expiresAt: expiresAt.toISOString() } }]);
@@ -357,23 +371,56 @@ export class Identity implements OpsGuard, ModuleGuard {
     return { token, principal, role: i.role, books: i.books ?? null, expiresAt: expiresAt.toISOString() };
   }
 
-  async settings(tenant: string): Promise<Separation> {
-    const [r] = await this.store.tenantTx(tenant, (tx) => tx<{ solo_owner: boolean; sod_limit_paise: string | null }[]>`
-      SELECT solo_owner, sod_limit_paise::text FROM identity.settings WHERE tenant_id = ${tenant}`);
-    return { soloOwner: r?.solo_owner ?? false, sodLimitPaise: r?.sod_limit_paise ?? null };
+  /**
+   * Account recovery (design 16.4), operator tooling only: a one-time code with which an EXISTING
+   * active member who lost access registers a new passkey for the same principal (same role, books
+   * and maker-checker history). Audited: RecoveryIssued now, RecoveryCompleted when redeemed. With
+   * `revokeExisting` (the default) redeeming it revokes the member's other passkeys, and so the
+   * sessions bound to them. Only the code's hash is stored.
+   */
+  async recover(tenant: string, by: string, principal: string, i: { reason: string; ttlHours?: number; revokeExisting?: boolean }) {
+    const reason = i.reason.trim();
+    if (reason.length < 3) throw new IdentityError("bad_reason", "say why access is being recovered");
+    const token = randomBytes(24).toString("base64url"), hash = sha(token);
+    const expiresAt = new Date(this.now() + (i.ttlHours ?? 24) * 3600_000);
+    const revokeExisting = i.revokeExisting ?? true;
+    const keys = await this.store.keys(tenant);
+    await this.store.tenantTx(tenant, async (tx) => {
+      await this.lockTenant(tx, tenant);
+      const [m] = await tx<Row[]>`SELECT tenant_id, principal, role, books, display_name, status, source FROM identity.members
+        WHERE tenant_id = ${tenant} AND principal = ${principal} AND status = 'active'`;
+      if (!m || m.role === "agent") throw new IdentityError("not_found", `no active member ${principal} to recover (invite new people instead)`, 404);
+      const name = openName(keys, m.display_name, memberNameCtx(principal));
+      // Outstanding recovery codes for this principal stop working: only the newest one counts.
+      await tx`UPDATE identity.enrolments SET used_at = now() WHERE tenant_id = ${tenant} AND principal = ${principal} AND purpose = 'recovery' AND used_at IS NULL`;
+      await tx`INSERT INTO identity.enrolments (tenant_id, token_hash, principal, role, books, display_name, created_by, expires_at, purpose, revoke_existing)
+        VALUES (${tenant}, ${hash}, ${principal}, ${m.role}, ${m.books}, ${keys.seal(name, enrolmentNameCtx(hash))}, ${by}, ${expiresAt}, 'recovery', ${revokeExisting})`;
+      await this.audit(tx, tenant, by, [{ type: "RecoveryIssued", data: { invitation: hash, principal, reason, revokeExisting, expiresAt: expiresAt.toISOString() } }]);
+    });
+    return { token, principal, revokeExisting, expiresAt: expiresAt.toISOString() };
   }
 
+  async settings(tenant: string, tx?: TransactionSql): Promise<Separation & { requireTwoAuthenticators: boolean }> {
+    const q = (t: TransactionSql) => t<{ solo_owner: boolean; sod_limit_paise: string | null; require_two_authenticators: boolean }[]>`
+      SELECT solo_owner, sod_limit_paise::text, require_two_authenticators FROM identity.settings WHERE tenant_id = ${tenant}`;
+    const [r] = tx ? await q(tx) : await this.store.tenantTx(tenant, q);
+    return { soloOwner: r?.solo_owner ?? false, sodLimitPaise: r?.sod_limit_paise ?? null, requireTwoAuthenticators: r?.require_two_authenticators ?? false };
+  }
+
+  /** `requireTwoAuthenticators` left out keeps its current value. */
   async setSettings(tenant: string, by: string, s: Separation) {
     if (s.sodLimitPaise !== null && !/^\d+$/.test(s.sodLimitPaise)) throw new IdentityError("bad_limit", "limit must be whole paise");
     await this.store.tenantTx(tenant, async (tx) => {
       await this.lockTenant(tx, tenant);
-      const [prev] = await tx<{ solo_owner: boolean; sod_limit_paise: string | null }[]>`
-        SELECT solo_owner, sod_limit_paise::text FROM identity.settings WHERE tenant_id = ${tenant}`;
+      const [prev] = await tx<{ solo_owner: boolean; sod_limit_paise: string | null; require_two_authenticators: boolean }[]>`
+        SELECT solo_owner, sod_limit_paise::text, require_two_authenticators FROM identity.settings WHERE tenant_id = ${tenant}`;
+      const two = s.requireTwoAuthenticators ?? prev?.require_two_authenticators ?? false;
       await tx`
-        INSERT INTO identity.settings (tenant_id, solo_owner, sod_limit_paise, updated_by) VALUES (${tenant}, ${s.soloOwner}, ${s.sodLimitPaise}, ${by})
-        ON CONFLICT (tenant_id) DO UPDATE SET solo_owner = EXCLUDED.solo_owner, sod_limit_paise = EXCLUDED.sod_limit_paise, updated_by = EXCLUDED.updated_by, updated_at = now()`;
-      await this.audit(tx, tenant, by, [{ type: "SettingsChanged", data: { soloOwner: s.soloOwner, sodLimitPaise: s.sodLimitPaise,
-        previous: prev ? { soloOwner: prev.solo_owner, sodLimitPaise: prev.sod_limit_paise } : null } }]);
+        INSERT INTO identity.settings (tenant_id, solo_owner, sod_limit_paise, require_two_authenticators, updated_by) VALUES (${tenant}, ${s.soloOwner}, ${s.sodLimitPaise}, ${two}, ${by})
+        ON CONFLICT (tenant_id) DO UPDATE SET solo_owner = EXCLUDED.solo_owner, sod_limit_paise = EXCLUDED.sod_limit_paise,
+          require_two_authenticators = EXCLUDED.require_two_authenticators, updated_by = EXCLUDED.updated_by, updated_at = now()`;
+      await this.audit(tx, tenant, by, [{ type: "SettingsChanged", data: { soloOwner: s.soloOwner, sodLimitPaise: s.sodLimitPaise, requireTwoAuthenticators: two,
+        previous: prev ? { soloOwner: prev.solo_owner, sodLimitPaise: prev.sod_limit_paise, requireTwoAuthenticators: prev.require_two_authenticators } : null } }]);
     });
     return this.settings(tenant);
   }
@@ -573,12 +620,13 @@ export class Identity implements OpsGuard, ModuleGuard {
   }
 
   private async enrolment(tx: TransactionSql, tenant: string, code: string, lock = false) {
+    type E = { principal: string; role: string; books: string[] | null; display_name: string; purpose: "enrol" | "recovery"; revoke_existing: boolean };
     const [r] = lock
-      ? await tx<{ principal: string; role: string; books: string[] | null; display_name: string }[]>`
-          SELECT principal, role, books, display_name FROM identity.enrolments
+      ? await tx<E[]>`
+          SELECT principal, role, books, display_name, purpose, revoke_existing FROM identity.enrolments
           WHERE tenant_id = ${tenant} AND token_hash = ${sha(code)} AND used_at IS NULL AND expires_at > now() FOR UPDATE`
-      : await tx<{ principal: string; role: string; books: string[] | null; display_name: string }[]>`
-          SELECT principal, role, books, display_name FROM identity.enrolments
+      : await tx<E[]>`
+          SELECT principal, role, books, display_name, purpose, revoke_existing FROM identity.enrolments
           WHERE tenant_id = ${tenant} AND token_hash = ${sha(code)} AND used_at IS NULL AND expires_at > now()`;
     if (!r) throw new IdentityError("bad_code", "that invitation code is not valid (used, expired or for another workspace)", 403);
     return r;
@@ -617,7 +665,25 @@ export class Identity implements OpsGuard, ModuleGuard {
       await this.lockTenant(tx, tenant);
       let member: Member;
       const events: NewEvent[] = [];
-      if (i.enrolment) {
+      let revokedOnRecovery: string[] = [];
+      if (i.enrolment && (await this.enrolment(tx, tenant, i.enrolment, true)).purpose === "recovery") {
+        // Recovery: the same member keeps role, books and history; only the passkeys change.
+        const e = await this.enrolment(tx, tenant, i.enrolment, true);
+        const hash = sha(i.enrolment);
+        const [r] = await tx<Row[]>`SELECT tenant_id, principal, role, books, display_name, status, source FROM identity.members
+          WHERE tenant_id = ${tenant} AND principal = ${e.principal} AND status = 'active'`;
+        if (!r) throw new IdentityError("bad_code", "that recovery code is for someone who is no longer an active member", 403);
+        await tx`UPDATE identity.enrolments SET used_at = now() WHERE tenant_id = ${tenant} AND token_hash = ${hash}`;
+        member = toMember(r, keys);
+        if (e.revoke_existing) {
+          revokedOnRecovery = (await tx<{ credential_id: string }[]>`
+            UPDATE identity.credentials SET revoked_at = now(), revoked_by = ${"system:recovery"}
+            WHERE tenant_id = ${tenant} AND principal = ${member.principal} AND revoked_at IS NULL RETURNING credential_id`).map((c) => c.credential_id);
+        }
+        events.push({ type: "InvitationRedeemed", data: { invitation: hash, principal: member.principal, credentialId: cred.id } },
+          ...revokedOnRecovery.map((id) => ({ type: "CredentialRevoked" as const, data: { principal: member.principal, credentialId: id } })),
+          { type: "RecoveryCompleted", data: { invitation: hash, principal: member.principal, credentialId: cred.id, revokedCredentials: revokedOnRecovery } });
+      } else if (i.enrolment) {
         const e = await this.enrolment(tx, tenant, i.enrolment, true);
         const hash = sha(i.enrolment);
         await tx`UPDATE identity.enrolments SET used_at = now() WHERE tenant_id = ${tenant} AND token_hash = ${hash}`;
@@ -688,6 +754,54 @@ export class Identity implements OpsGuard, ModuleGuard {
     const m = await this.member(tenant, c.principal);
     if (!m) throw fail();
     return m;
+  }
+
+  // ------------------------------------------------------------------ another passkey for a signed-in member
+  /**
+   * Options for a signed-in member to register another passkey (design 16.4: owners and controllers
+   * keep two authenticators). Their existing passkeys are excluded, so the same authenticator is not
+   * registered twice.
+   */
+  async addPasskeyOptions(tenant: string, principal: string): Promise<PublicKeyCredentialCreationOptionsJSON> {
+    this.validTenant(tenant);
+    const m = await this.member(tenant, principal);
+    if (!m || m.role === "agent") throw denied(`${principal} is not a member of workspace ${tenant}`);
+    const creds = await this.credentials(tenant, principal);
+    return generateRegistrationOptions({
+      rpName: this.o.rpName ?? "Kuber", rpID: this.o.rpId, userName: `${principal.split(":")[1]}@${tenant}`, userDisplayName: m.displayName,
+      userID: new Uint8Array(randomBytes(32)), challenge: this.challenge("addkey", `${tenant}|${principal}`), attestationType: "none",
+      authenticatorSelection: { residentKey: "required", userVerification: "required" },
+      excludeCredentials: creds.filter((c) => !c.revokedAt).map((c) => ({ id: c.credentialId, transports: c.transports as never })),
+    });
+  }
+
+  /**
+   * Register another passkey for a signed-in member. Adding a key to an account is itself sensitive:
+   * a member who already has a passkey must have confirmed with it within the step-up window
+   * (`stepUpAt`, the `su` claim), so a stolen session alone cannot add an attacker's key.
+   */
+  async addPasskey(tenant: string, principal: string, i: { response: RegistrationResponseJSON; stepUpAt?: number }): Promise<Credential> {
+    this.validTenant(tenant);
+    if ((await this.passkeyCount(tenant, principal)) > 0 && !stepUpFresh({ principal, su: i.stepUpAt }, this.now(), STEP_UP_MAX_AGE_MS))
+      throw new IdentityError("step_up_required", "confirm with one of your existing passkeys first, then register the new one", 403);
+    let v;
+    try {
+      v = await verifyRegistrationResponse({ response: i.response, expectedChallenge: this.checkChallenge("addkey", `${tenant}|${principal}`),
+        expectedOrigin: this.o.origins, expectedRPID: this.o.rpId, requireUserVerification: true });
+    } catch (e) { throw new IdentityError("passkey_rejected", `passkey registration failed: ${e instanceof Error ? e.message : String(e)}`, 401); }
+    if (!v.verified) throw new IdentityError("passkey_rejected", "passkey registration could not be verified", 401);
+    const cred = v.registrationInfo.credential;
+    await this.store.tenantTx(tenant, async (tx) => {
+      await this.lockTenant(tx, tenant);
+      const [m] = await tx`SELECT 1 FROM identity.members WHERE tenant_id = ${tenant} AND principal = ${principal} AND status = 'active' AND role <> 'agent'`;
+      if (!m) throw denied(`${principal} is not a member of workspace ${tenant}`);
+      const [dup] = await tx`SELECT 1 FROM identity.credentials WHERE tenant_id = ${tenant} AND credential_id = ${cred.id}`;
+      if (dup) throw new IdentityError("passkey_exists", "that passkey is already registered", 409);
+      await tx`INSERT INTO identity.credentials (tenant_id, credential_id, principal, public_key, counter, transports)
+        VALUES (${tenant}, ${cred.id}, ${principal}, ${Buffer.from(cred.publicKey)}, ${cred.counter}, ${cred.transports ?? []})`;
+      await this.audit(tx, tenant, principal, [{ type: "CredentialRegistered", data: { principal, credentialId: cred.id } }]);
+    });
+    return (await this.credentials(tenant, principal)).find((c) => c.credentialId === cred.id)!;
   }
 
   // ------------------------------------------------------------------ step-up (sensitive approvals)
@@ -829,4 +943,135 @@ export class Identity implements OpsGuard, ModuleGuard {
     if (!r) return true;
     return !r.revoked && !r.credential_revoked && (r.principal === null || r.principal === principal);
   }
+
+  // ------------------------------------------------------------------ signed commands (design 14.4, 16.4)
+  /** Active passkeys of a member. */
+  async passkeyCount(tenant: string, principal: string, tx?: TransactionSql): Promise<number> {
+    const q = (t: TransactionSql) => t<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM identity.credentials WHERE tenant_id = ${tenant} AND principal = ${principal} AND revoked_at IS NULL`;
+    const [r] = tx ? await q(tx) : await this.store.tenantTx(tenant, q);
+    return r!.n;
+  }
+
+  /**
+   * Owners and controllers with exactly one active passkey (design 16.4: they must register two).
+   * Members with none (operator-added, development sign-in) have nothing to sign with yet and are
+   * not listed; with `requireTwoAuthenticators` on they cannot sign either.
+   */
+  async singlePasskeyPeople(tenant: string): Promise<string[]> {
+    const rows = await this.store.tenantTx(tenant, (tx) => tx<{ principal: string }[]>`
+      SELECT m.principal FROM identity.members m
+      JOIN identity.credentials c ON c.tenant_id = m.tenant_id AND c.principal = m.principal AND c.revoked_at IS NULL
+      WHERE m.tenant_id = ${tenant} AND m.status = 'active' AND m.role IN ${tx([...TWO_AUTHENTICATOR_ROLES])}
+      GROUP BY m.principal HAVING count(*) = 1 ORDER BY m.principal`);
+    return rows.map((r) => r.principal);
+  }
+
+  /** For /me: how many passkeys the member has and, for an owner or controller with one, the warning. */
+  async passkeyStatus(tenant: string, principal: string): Promise<{ passkeys: number; requireTwoAuthenticators: boolean; warnings: { code: string; message: string }[] }> {
+    const [n, s] = await Promise.all([this.passkeyCount(tenant, principal), this.settings(tenant)]);
+    const warnings: { code: string; message: string }[] = [];
+    if (TWO_AUTHENTICATOR_ROLES.has(roleOf(principal)) && n === 1) {
+      warnings.push({ code: "single_passkey", message: s.requireTwoAuthenticators
+        ? "You have one passkey. This workspace requires owners and controllers to register a second one before approving high-risk commands."
+        : "You have only one passkey. Register a second one (another device or security key) so losing it does not lock you out of approving." });
+    }
+    return { passkeys: n, requireTwoAuthenticators: s.requireTwoAuthenticators, warnings };
+  }
+
+  /** Refuse when the tenant requires two authenticators and this owner or controller has fewer. */
+  async requireSecondPasskey(tenant: string, principal: string, tx?: TransactionSql): Promise<void> {
+    if (!TWO_AUTHENTICATOR_ROLES.has(roleOf(principal))) return;
+    if (!(await this.settings(tenant, tx)).requireTwoAuthenticators) return;
+    const n = await this.passkeyCount(tenant, principal, tx);
+    if (n < 2) throw new IdentityError("second_passkey_required",
+      `this workspace requires owners and controllers to register a second passkey before approving high-risk commands (you have ${n})`, 403);
+  }
+
+  /**
+   * Step 1 of a signed command: WebAuthn options whose challenge is the digest of exactly `intent`
+   * (built by the caller from the command itself), for the principal's own active passkeys.
+   */
+  async signingOptions(tenant: string, principal: string, intent: SigningIntent) {
+    this.validTenant(tenant);
+    try { return await this.signing.options(tenant, principal, intent); } catch (e) { throw asIdentityError(e); }
+  }
+
+  /**
+   * Step 2: a verifier for the command's transaction. Pass the returned function as the command's
+   * `attest`: it checks `response` is `principal`'s user-verified passkey signature over exactly
+   * `intent`, consumes the single-use request and returns what the command's event stores.
+   */
+  signedCommand(tenant: string, principal: string, intent: SigningIntent, response: AuthenticationResponseJSON): (tx: TransactionSql) => Promise<CommandSignature> {
+    return async (tx) => {
+      try { return await this.signing.verify(tx, tenant, principal, intent, response); } catch (e) { throw asIdentityError(e); }
+    };
+  }
+
+  /**
+   * DEVELOPMENT SIGN-IN ONLY: the legacy `su` freshness path, as a fallback for a member who has no
+   * passkey while development sign-in is enabled. Returns a record labelled "dev-step-up" (not a
+   * signature), or null when the fallback does not apply (production, a member with a passkey, no
+   * or stale step-up claim). Two-authenticator enforcement still applies.
+   */
+  async devAttestation(tenant: string, principal: string, stepUpAt: number | undefined): Promise<CommandSignature | null> {
+    if (!this.o.devSignIn) return null;
+    if (!stepUpFresh({ principal, su: stepUpAt }, this.now(), STEP_UP_MAX_AGE_MS)) return null;
+    if ((await this.passkeyCount(tenant, principal)) > 0) return null;
+    await this.requireSecondPasskey(tenant, principal);
+    return { kind: "dev-step-up", note: DEV_STEP_UP_NOTE, stepUpAt: stepUpAt!, principal };
+  }
+
+  /**
+   * Offline verification of every stored command signature in a tenant (`ops verify-signatures`,
+   * evidence): each webauthn record is re-checked against the event it is stored in and the stored
+   * public key of its credential (revoked keys still verify what they signed). Also lists
+   * development confirmations and period operations committed without a signature.
+   */
+  async verifySignatures(tenant: string): Promise<SignatureReport> {
+    const report: SignatureReport = { tenant, checked: 0, valid: 0, failures: [], devStepUps: [], unsignedPeriodOps: [] };
+    const keys = new Map<string, { publicKey: Uint8Array; principal: string } | null>();
+    let after = "0";
+    for (;;) {
+      const events = await this.store.tenantTx(tenant, (tx) => this.store.readEvents({ tenantId: tenant, types: [...SIGNED_EVENT_TYPES], after, limit: 500 }, tx));
+      if (!events.length) break;
+      after = events.at(-1)!.globalPosition;
+      for (const env of events) {
+        const sig = (env.data as { signature?: CommandSignature }).signature;
+        if (!sig) {
+          const d = env.data as { gate?: string; planId?: string; approvedBy?: string };
+          if (env.type === "PlanApproved" && d.gate === "human" && !d.approvedBy && !/^(agent|system):/.test(env.meta.principal))
+            report.unsignedPeriodOps.push({ eventId: env.eventId, planId: d.planId!, principal: env.meta.principal });
+          continue;
+        }
+        if (sig.kind === "dev-step-up") { report.devStepUps.push({ eventId: env.eventId, type: env.type, principal: env.meta.principal }); continue; }
+        report.checked++;
+        const problems = await this.verifyStoredSignature(tenant, env, sig, keys);
+        if (problems.length) report.failures.push({ eventId: env.eventId, type: env.type, streamId: env.streamId, problems });
+        else report.valid++;
+      }
+    }
+    return report;
+  }
+
+  /** Re-check one stored signature against its event (evidence records call this too). */
+  async verifyStoredSignature(tenant: string, env: Pick<Envelope, "type" | "data" | "meta">, sig: CommandSignature,
+                              cache = new Map<string, { publicKey: Uint8Array; principal: string } | null>()): Promise<string[]> {
+    if (sig.kind !== "webauthn") return ["not a signature: development step-up"];
+    const binding = expectedBinding(env);
+    if (!binding) return [`${env.type} does not carry command signatures`];
+    let key = cache.get(sig.credentialId);
+    if (key === undefined) {
+      const [c] = await this.store.tenantTx(tenant, (tx) => tx<{ public_key: Buffer; principal: string }[]>`
+        SELECT public_key, principal FROM identity.credentials WHERE tenant_id = ${tenant} AND credential_id = ${sig.credentialId}`);
+      key = c ? { publicKey: new Uint8Array(c.public_key), principal: c.principal } : null;
+      cache.set(sig.credentialId, key);
+    }
+    const problems = await verifyCommandSignature(sig, binding, key?.publicKey ?? null);
+    // The passkey belonged to the signer (or moved to their successor on a role change).
+    if (key && !(await this.samePerson(tenant, sig.inputs.principal, key.principal))) problems.push(`credential ${sig.credentialId} belongs to ${key.principal}, not the signer ${sig.inputs.principal}`);
+    return problems;
+  }
 }
+
+const asIdentityError = (e: unknown) => (e instanceof SigningError ? new IdentityError(e.code, e.message, e.statusCode) : e);

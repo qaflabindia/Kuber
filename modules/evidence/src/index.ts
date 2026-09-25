@@ -12,7 +12,7 @@
  * id, statement content hash, transaction id, draft id, event id, or the record hash itself.
  */
 import type { TransactionSql } from "postgres";
-import { canonical, sha256, stableId, type Envelope, type EventData, type EventType, type Line } from "@kuber/contracts";
+import { canonical, sha256, stableId, type CommandSignature, type Envelope, type EventData, type EventType, type Line } from "@kuber/contracts";
 import { once, tenantRlsFor, type EventStore, type Migration, type Projection } from "@kuber/eventstore";
 
 export const EVIDENCE_MIGRATIONS: Migration[] = [{
@@ -52,9 +52,19 @@ export interface EvidenceRecord {
 
 export interface Evidence {
   evidenceId: string; recordHash: string; recordedAt: string; record: EvidenceRecord;
-  /** The record still hashes to recordHash, and every cited event is still in its stream. */
-  verified: { recordHash: boolean; citations: boolean };
+  /**
+   * The record still hashes to recordHash, and every cited event is still in its stream.
+   * `signature`: the approval's device signature (design 14.4/16.4) re-verified offline against the
+   * stored public key and the event it is stored in; null when the approval carries none.
+   */
+  verified: { recordHash: boolean; citations: boolean; signature: boolean | null };
 }
+
+/**
+ * Re-checks a stored command signature against the event it is stored in (the identity module's
+ * offline verifier); returns the problems found. Without one, signatures are recorded unverified.
+ */
+export type SignatureVerifier = (tenant: string, env: Pick<Envelope, "type" | "data" | "meta">, sig: CommandSignature) => Promise<string[]>;
 
 const SUSPENSE = "SUSPENSE";
 const cite = (e: Envelope): Citation => ({ eventId: e.eventId, type: e.type, streamId: e.streamId, streamVersion: e.streamVersion });
@@ -63,7 +73,15 @@ const last = <T extends EventType>(evs: Envelope[], type: T, pred: (d: EventData
   [...evs].reverse().find((e) => e.type === type && pred(e.data as EventData<T>)) as Envelope<T> | undefined;
 
 export class EvidenceService {
-  constructor(private store: EventStore) {}
+  constructor(private store: EventStore, private verifySignature?: SignatureVerifier) {}
+
+  /** The approval's signature: stored in the approving event, with the offline verification result (and what it is bound to). */
+  private async signatureOf(t: string, env: Envelope | undefined): Promise<Record<string, unknown> | null> {
+    const sig = (env?.data as { signature?: CommandSignature } | undefined)?.signature;
+    if (!env || !sig) return null;
+    const problems = sig.kind !== "webauthn" ? ["not a signature: development step-up"] : this.verifySignature ? await this.verifySignature(t, env, sig) : ["no verifier configured"];
+    return { ...sig, event: { eventId: env.eventId, type: env.type }, verified: problems.length === 0, ...(problems.length ? { problems } : {}) };
+  }
 
   handler = async (env: Envelope): Promise<void> => {
     if (env.type !== "JournalPosted" && env.type !== "PeriodLocked") return;
@@ -96,7 +114,16 @@ export class EvidenceService {
           authority: planEvt.data.policy ? { policyIds: planEvt.data.policy.ids, level: planEvt.data.policy.level } : null,
           sod: { preparedBy: planEvt.data.preparedBy, approvedBy: planEvt.meta.principal, separate: planEvt.data.preparedBy !== planEvt.meta.principal } }
       : { kind: "statement", by: env.meta.principal, role: roleOf(env.meta.principal), at: env.meta.occurredAt };
-    approval.signature = (planEvt ?? env).meta.signature ?? null;             // signed commands arrive in phase 1
+    // Design 14.4/16.4: the device signature over the approved command, re-verified here. When this
+    // execution carries out someone else's recorded approval, that approval (and its signature) is cited.
+    let signed: Envelope | undefined = planEvt?.data.signature ? planEvt : undefined;
+    if (planEvt?.data.approvedBy) {
+      const rec = last(await read(`${t}/plan/${planEvt.data.planId}`), "PlanApprovalRecorded", (d) => d.hash === planEvt.data.hash);
+      const byApprover = rec && rec.meta.principal === planEvt.data.approvedBy ? rec : undefined;
+      if (byApprover) { cites.push(cite(byApprover)); if (byApprover.data.signature) signed = byApprover; }
+    }
+    if (!planEvt && env.type === "PeriodLocked" && (env.data as EventData<"PeriodLocked">).signature) signed = env;
+    approval.signature = await this.signatureOf(t, signed);
     if (planEvt?.data.policy) decision = { ...decision, policyIds: planEvt.data.policy.ids, autonomy: planEvt.data.policy.level, reasons: planEvt.data.policy.reasons };
     const exceptions: EvidenceRecord["exceptions"] = [];
     const exception = (issue: string, owner: string, dueBy?: string) =>
@@ -143,7 +170,8 @@ export class EvidenceService {
         if (draft) draftId = draft.data.draftId;
         if (!planEvt) {
           if (approved) approval = { ...approval, kind: "draft", by: approved.meta.principal, role: roleOf(approved.meta.principal),
-            at: approved.meta.occurredAt, draftId: approved.data.draftId, accountChosen: approved.data.accountId };
+            at: approved.meta.occurredAt, draftId: approved.data.draftId, accountChosen: approved.data.accountId,
+            signature: await this.signatureOf(t, approved.data.signature ? approved : undefined) };
           else if (d.autonomy && d.autonomy !== "human") approval = { ...approval, kind: "policy", by: "policy", role: "policy",
             at: env.meta.occurredAt, authority: { policyIds: pol?.data.decision.policyIds ?? [], level: d.autonomy } };
         }
@@ -253,6 +281,7 @@ export class EvidenceService {
     if (!e || e.type !== "EvidenceRecorded") return null;
     const d = e.data as EventData<"EvidenceRecorded">;
     const record = d.record as unknown as EvidenceRecord;
+    const signature = await this.recheckSignature(tenantId, record);
     const citations = await this.store.tenantTx(tenantId, async (tx) => {
       const ids = record.cites.map((c) => c.eventId);
       const found = await tx<{ event_id: string; stream_id: string; stream_version: number }[]>`
@@ -261,6 +290,19 @@ export class EvidenceService {
       return record.cites.every((c) => at.get(c.eventId) === `${c.streamId}#${c.streamVersion}`);
     });
     return { evidenceId, recordHash: d.recordHash, recordedAt: e.recordedAt, record,
-      verified: { recordHash: sha256(canonical(record)) === d.recordHash && d.recordHash === r.record_hash, citations } };
+      verified: { recordHash: sha256(canonical(record)) === d.recordHash && d.recordHash === r.record_hash, citations, signature } };
+  }
+
+  /** Verify the recorded approval signature again, from the event it cites (not from the copy in the record). */
+  private async recheckSignature(tenantId: string, record: EvidenceRecord): Promise<boolean | null> {
+    const s = record.approval.signature as { event?: { eventId: string }; kind?: string } | null | undefined;
+    if (!s?.event) return null;
+    if (s.kind !== "webauthn" || !this.verifySignature) return false;
+    const c = record.cites.find((x) => x.eventId === s.event!.eventId);
+    if (!c) return false;
+    const [e] = await this.store.readStream(tenantId, c.streamId, c.streamVersion - 1);
+    const sig = (e?.data as { signature?: CommandSignature } | undefined)?.signature;
+    if (!e || e.eventId !== c.eventId || !sig) return false;
+    return (await this.verifySignature(tenantId, e, sig)).length === 0;
   }
 }

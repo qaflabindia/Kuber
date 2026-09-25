@@ -4,6 +4,14 @@
  *   invite <tenant> <role:name> [--books a,b] [--hours 72]   one-time enrolment code for a passkey
  *   members <tenant>                                          list members
  *   revoke <tenant> <role:name>                               revoke a member
+ *   recover <tenant> <role:name> --reason "…" [--hours 24] [--keep-passkeys]
+ *                                                             account recovery for an EXISTING member who lost access:
+ *                                                             a one-time code to register a new passkey for the same
+ *                                                             principal (role, books, history kept). Audited in the
+ *                                                             identity stream (RecoveryIssued, then RecoveryCompleted);
+ *                                                             redeeming it revokes their other passkeys unless
+ *                                                             --keep-passkeys. Owners and controllers should then
+ *                                                             register a second passkey (design 16.4).
  *
  * Existing installations: workspaces created before passkeys have data but no members, so nobody
  * can claim them by signing up. Issue the owner an invitation that keeps their principal, e.g.
@@ -24,7 +32,7 @@ const [cmd, tenant, principal, ...rest] = process.argv.slice(2);
 const flag = (k: string) => { const i = rest.indexOf(`--${k}`); return i >= 0 ? rest[i + 1] : undefined; };
 const url = process.env.DATABASE_URL, keyFile = process.env.KUBER_MASTER_KEY_FILE;
 if (!url || !keyFile || !cmd || !tenant) {
-  console.error("usage: identity-cli invite <tenant> <role:name> [--books a,b] [--hours 72] | members <tenant> | revoke <tenant> <role:name>   (needs DATABASE_URL and KUBER_MASTER_KEY_FILE)");
+  console.error("usage: identity-cli invite <tenant> <role:name> [--books a,b] [--hours 72] | members <tenant> | revoke <tenant> <role:name> | recover <tenant> <role:name> --reason \"…\" [--hours 24] [--keep-passkeys]   (needs DATABASE_URL and KUBER_MASTER_KEY_FILE)");
   process.exit(2);
 }
 const sql = postgres(url, { max: 1, onnotice: () => undefined });
@@ -36,6 +44,13 @@ id.onAuthorityChange((t, change, tx) => invalidateApprovals(store, t, change, tx
 try {
   if (cmd === "members") console.table(await id.members(tenant));
   else if (cmd === "revoke" && principal) { await id.revoke(tenant, "operator:cli", principal); console.log(`revoked ${principal}`); }
+  else if (cmd === "recover" && principal) {
+    const reason = flag("reason");
+    if (!reason) throw new Error('recover needs --reason "why this member lost access" (it is recorded in the identity audit stream)');
+    const r = await id.recover(tenant, "operator:cli", principal, { reason, ttlHours: Number(flag("hours") ?? 24), revokeExisting: !rest.includes("--keep-passkeys") });
+    console.log(`workspace: ${tenant}\nprincipal: ${r.principal}\ncode:      ${r.token}\nexpires:   ${r.expiresAt}\n${r.revokeExisting ? "redeeming it revokes their current passkeys" : "their current passkeys stay active"}`);
+    console.log("They enter it on the sign-in page under \"Create a passkey\" -> \"Invitation code\". Recorded as RecoveryIssued in the identity stream.");
+  }
   else if (cmd === "invite" && principal) {
     const role = principal.split(":")[0]!;
     if (!isRole(role)) throw new Error(`unknown role ${role}`);

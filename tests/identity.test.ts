@@ -7,7 +7,7 @@
  *     operations and amounts above the policy limit; MCP grants bounded to their book
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createHash, createHmac, createSign, generateKeyPairSync, randomBytes, type KeyObject } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { uuid } from "@kuber/contracts";
 import postgres from "postgres";
@@ -17,7 +17,7 @@ import { KeyAdmin, buildServer, kuberTools, Copilot, type Cell } from "@kuber/co
 import { AUDIENCE, AUTH_HEADER, ISSUER, ReplayCache, STEP_UP_MAX_AGE_MS, authKey, bodyHash, signRequest, stepUpFresh, verifyRequest } from "@kuber/auth";
 import { ACTIONS, Identity, ROLES, can, identityStream, permissionTable, type Action, type Role } from "@kuber/identity";
 import type { Plan } from "@kuber/ops";
-import { CORE_AUTH_SECRET, enrol, newSession, signedInject, startCell, type SignedRequest } from "./helpers.ts";
+import { CORE_AUTH_SECRET, ORIGIN, RP_ID, SoftAuthenticator, b64u, enrol, newSession, signedInject, startCell, type SignedRequest } from "./helpers.ts";
 
 // ---------------------------------------------------------------- request signing (unit)
 describe("service assertions (BFF → core)", () => {
@@ -219,9 +219,11 @@ describe("F02: roles, book scope and maker-checker", () => {
     expect(p.blocked).toBe(false);
     await expect(cell.ops.commit(T, p.planId, P.controller, p.hash)).rejects.toThrow(/period operation: it needs approval by someone other than its preparer/);
     await expect(cell.ops.commit(T, p.planId, P.approver, p.hash)).rejects.toThrow(/approver may not plan.approve.period/);
+    // Over HTTP a period operation is a signed command (tests/signed-commands.test.ts): a step-up claim alone is refused.
     const r = await as(P.controller2, "POST", `/v1/tenants/${T}/plans/${p.planId}/commit`, { hash: p.hash }, T, Date.now());
-    expect(r.statusCode).toBe(200);
-    expect(r.json().status).toBe("committed");
+    expect(r.statusCode).toBe(403);
+    expect(r.json().error).toBe("step_up_required");
+    expect((await cell.ops.commit(T, p.planId, P.controller2, p.hash)).status).toBe("committed");
   });
 
   it("maker-checker: above the policy's amount limit the preparer cannot approve; below it they can", async () => {
@@ -301,31 +303,34 @@ describe("F02: roles, book scope and maker-checker", () => {
     const commit = (who: string, p: { planId: string; hash: string }, stepUpAt?: number) =>
       as(who, "POST", `/v1/tenants/${T}/plans/${p.planId}/commit`, { hash: p.hash }, T, stepUpAt);
 
-    it("a period operation is refused without a step-up claim, and with a stale one; a fresh one commits", async () => {
+    // Signed commands (design 14.4/16.4): the positive path, with real passkey signatures over the
+    // command digest, is in tests/signed-commands.test.ts. A step-up claim alone is only the
+    // development sign-in fallback, and development sign-in is off here.
+    it("a period operation is refused without a signature; a step-up claim alone (stale, future or fresh) does not commit it", async () => {
       const p = await cell.ops.plan(T, B, P.controller, "rebalance", rebalance(60));
       const before = await seq();
       const none = await commit(P.controller2, p);
       expect(none.statusCode).toBe(403);
       expect(p).toMatchObject({ gate: "human", status: "proposed", blocked: false });
-      expect(none.json()).toMatchObject({ error: "step_up_required", reason: "this is a period operation" });
+      expect(none.json()).toMatchObject({ error: "step_up_required", reason: "this is a period operation", signing: { action: "plan.commit" } });
       const stale = await commit(P.controller2, p, Date.now() - STEP_UP_MAX_AGE_MS - 60_000);
       expect(stale.statusCode).toBe(403);
       expect(stale.json().error).toBe("step_up_required");
       expect((await commit(P.controller2, p, Date.now() + 10 * 60_000)).json().error).toBe("step_up_required");   // future-dated
+      expect((await commit(P.controller2, p, Date.now() - 60_000)).json().error).toBe("step_up_required");        // fresh: still not a signature
       expect((await cell.ops.get(T, p.planId)).status).toBe("proposed");
       expect(await seq()).toBe(before);
-      const ok = await commit(P.controller2, p, Date.now() - 60_000);
-      expect(ok.statusCode).toBe(200);
-      expect(ok.json().status).toBe("committed");
+      await cell.ops.discard(T, p.planId, P.controller);
     });
 
-    it("an amount above the approval limit needs a step-up; below it the path is unchanged", async () => {
+    it("an amount above the approval limit needs a signature; below it the path is unchanged", async () => {
       await cell.identity.setSettings(T, P.owner, { soloOwner: false, sodLimitPaise: "5000000" });     // ₹50,000
       try {
         const big = await cell.ops.plan(T, B, P.controller, "record", recordInput("60,000"));
         expect((await commit(P.approver, big)).json().error).toBe("step_up_required");
         expect((await commit(P.approver, big, Date.now() - STEP_UP_MAX_AGE_MS - 1000)).json().error).toBe("step_up_required");
-        expect((await commit(P.approver, big, Date.now())).json().status).toBe("committed");
+        expect((await commit(P.approver, big, Date.now())).json()).toMatchObject({ error: "step_up_required", reason: expect.stringMatching(/above the approval limit/) });
+        await cell.ops.discard(T, big.planId, P.controller);
         const small = await cell.ops.plan(T, B, P.controller, "record", recordInput(500));
         const r = await commit(P.approver, small);
         expect(r.statusCode).toBe(200);
@@ -401,48 +406,7 @@ describe("F02: roles, book scope and maker-checker", () => {
   });
 });
 
-// ---------------------------------------------------------------- passkeys with a software authenticator
-const ORIGIN = "http://localhost:3000", RP_ID = "localhost";
-const b64u = (b: Uint8Array | Buffer | string) => Buffer.from(b as Uint8Array).toString("base64url");
-function cbor(v: unknown): Buffer {
-  const head = (major: number, n: number) => n < 24 ? Buffer.from([(major << 5) | n]) : n < 256 ? Buffer.from([(major << 5) | 24, n])
-    : n < 65536 ? Buffer.from([(major << 5) | 25, n >> 8, n & 255]) : (() => { const b = Buffer.alloc(5); b[0] = (major << 5) | 26; b.writeUInt32BE(n, 1); return b; })();
-  if (typeof v === "number") return v >= 0 ? head(0, v) : head(1, -1 - v);
-  if (typeof v === "string") { const b = Buffer.from(v, "utf8"); return Buffer.concat([head(3, b.length), b]); }
-  if (v instanceof Uint8Array) return Buffer.concat([head(2, v.length), Buffer.from(v)]);
-  if (v instanceof Map) return Buffer.concat([head(5, v.size), ...[...v].flatMap(([k, x]) => [cbor(k), cbor(x)])]);
-  const o = v as Record<string, unknown>;
-  return Buffer.concat([head(5, Object.keys(o).length), ...Object.entries(o).flatMap(([k, x]) => [cbor(k), cbor(x)])]);
-}
-class SoftAuthenticator {
-  private key: KeyObject; readonly credId = randomBytes(32); private count = 0; readonly cose: Buffer;
-  constructor(private origin = ORIGIN) {
-    const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
-    this.key = privateKey;
-    const jwk = publicKey.export({ format: "jwk" });
-    this.cose = cbor(new Map<number, unknown>([[1, 2], [3, -7], [-1, 1], [-2, Buffer.from(jwk.x!, "base64url")], [-3, Buffer.from(jwk.y!, "base64url")]]));
-  }
-  private authData(flags: number, attested?: Buffer) {
-    const c = Buffer.alloc(4); c.writeUInt32BE(this.count);
-    return Buffer.concat([createHash("sha256").update(RP_ID).digest(), Buffer.from([flags]), c, ...(attested ? [attested] : [])]);
-  }
-  create(options: { challenge: string }) {
-    const len = Buffer.alloc(2); len.writeUInt16BE(this.credId.length);
-    const authData = this.authData(0x45, Buffer.concat([Buffer.alloc(16), len, this.credId, this.cose]));
-    const clientDataJSON = Buffer.from(JSON.stringify({ type: "webauthn.create", challenge: options.challenge, origin: this.origin, crossOrigin: false }));
-    return { id: b64u(this.credId), rawId: b64u(this.credId), type: "public-key", clientExtensionResults: {},
-      response: { clientDataJSON: b64u(clientDataJSON), attestationObject: b64u(cbor({ fmt: "none", attStmt: {}, authData })), transports: ["internal"] } };
-  }
-  get(options: { challenge: string }) {
-    this.count++;
-    const authData = this.authData(0x05);
-    const clientDataJSON = Buffer.from(JSON.stringify({ type: "webauthn.get", challenge: options.challenge, origin: this.origin, crossOrigin: false }));
-    const signature = createSign("sha256").update(Buffer.concat([authData, createHash("sha256").update(clientDataJSON).digest()])).sign(this.key);
-    return { id: b64u(this.credId), rawId: b64u(this.credId), type: "public-key", clientExtensionResults: {},
-      response: { clientDataJSON: b64u(clientDataJSON), authenticatorData: b64u(authData), signature: b64u(signature) } };
-  }
-}
-
+// ---------------------------------------------------------------- passkeys with a software authenticator (helpers.ts)
 describe("passkeys", () => {
   const W = "newco";
   const ceremony = (tenant: string, path: string, payload: unknown = {}) => as(null, "POST", `/v1/tenants/${tenant}/identity/${path}`, payload, tenant);

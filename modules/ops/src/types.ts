@@ -19,7 +19,9 @@ export type OpName = "record" | "post" | "balance" | "reconcile" | "allocate" | 
 
 export interface Services { gl: GeneralLedger; reporting: Reporting; agent: Agent; policies: PolicyEngine;
   /** Party master payment holds (FIN-MDM-03). Without it, no party is treated as held. */
-  parties?: Pick<PartyMaster, "holds"> & Partial<Pick<PartyMaster, "entities">> }
+  parties?: Pick<PartyMaster, "holds"> & Partial<Pick<PartyMaster, "entities">>;
+  /** Design 16.4: owners and controllers who have only one active passkey (the books-in-order check warns). */
+  singlePasskeyPeople?: (tenant: string) => Promise<string[]> }
 
 export interface OpContext {
   tenant: string; book: string; principal: string; today: string;

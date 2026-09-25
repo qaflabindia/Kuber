@@ -58,9 +58,48 @@ export const Meta = z.object({
   occurredAt: z.string(),
   commandId: z.string().optional(),
   policyIds: z.array(z.string()).optional(),
-  signature: z.string().optional(),     // passkey assertion over the command hash (phase 1)
+  /** Unused: meta is not sealed. Signed commands carry their assertion in the (sealed) event data: see CommandSignature. */
+  signature: z.string().optional(),
 });
 export type Meta = z.infer<typeof Meta>;
+
+// ------------------------------------------------------------------ Signed commands (design 14.4, 16.4)
+/**
+ * High-risk commands a person signs on their device: the WebAuthn challenge is the SHA-256 of the
+ * canonical `CommandDigestInputs` (tenant, book, action, subject, subject hash, principal, a
+ * single-use server nonce and its expiry, and the hash of the summary the person was shown).
+ */
+export const SIGNED_ACTIONS = ["plan.commit", "plan.approve", "draft.approve", "journal.ratify", "period.lock"] as const;
+export type SignedAction = (typeof SIGNED_ACTIONS)[number];
+const Hex64 = z.string().regex(/^[0-9a-f]{64}$/);
+const B64u = z.string().regex(/^[A-Za-z0-9_-]*$/).max(20_000);
+export const CommandDigestInputs = z.object({
+  v: z.literal(1), tenant: z.string().min(1), book: z.string().min(1), action: z.enum(SIGNED_ACTIONS),
+  subject: z.string().min(1), subjectHash: Hex64, principal: Principal, nonce: z.string().min(16).max(64), expiresAt: z.string(),
+  summaryHash: Hex64,
+});
+export type CommandDigestInputs = z.infer<typeof CommandDigestInputs>;
+/** What the person was shown before signing, rendered from the command itself. Amounts are paise. */
+export const CommandSummary = z.object({
+  action: z.enum(SIGNED_ACTIONS), title: z.string(), book: z.string(),
+  amountPaise: z.string().regex(/^\d+$/).nullable(),
+  payees: z.array(z.object({ partyId: z.string(), name: z.string().nullable() })),
+  accounts: z.array(z.object({ accountId: z.string(), name: z.string(), debitPaise: z.string(), creditPaise: z.string() })),
+  periods: z.array(z.object({ periodEnd: z.string(), level: z.string() })),
+  lines: z.array(z.string()),
+});
+export type CommandSummary = z.infer<typeof CommandSummary>;
+export const CommandSignature = z.discriminatedUnion("kind", [
+  /** A user-verified passkey assertion over the command digest, verifiable offline against the stored public key. */
+  z.object({
+    kind: z.literal("webauthn"), digest: Hex64, inputs: CommandDigestInputs, summary: CommandSummary,
+    credentialId: B64u, authenticatorData: B64u, clientDataJSON: B64u, signature: B64u, userHandle: B64u.optional(),
+    rpId: z.string(), origin: z.string(), verifiedAt: z.string(),
+  }),
+  /** DEVELOPMENT SIGN-IN ONLY: a member without a passkey confirmed with the `su` freshness claim. Not a signature. */
+  z.object({ kind: z.literal("dev-step-up"), note: z.string(), stepUpAt: z.number(), principal: Principal }),
+]);
+export type CommandSignature = z.infer<typeof CommandSignature>;
 
 // ------------------------------------------------------------------ Book configuration (FIN-MDM-01)
 export const BookPurpose = z.enum(["personal", "business"]);
@@ -123,7 +162,8 @@ export const GL = {
    */
   JournalConfirmed: z.object({ bookId: Id, journalId: Id, source: z.string(), basis: z.string().optional() }),
   PostingRejected: z.object({ bookId: Id, requestId: Id, reason: z.string(), source: z.string().optional() }),
-  PeriodLocked: z.object({ bookId: Id, periodEnd: IsoDate, level: z.enum(["soft", "hard"]) }),
+  /** `signature`: a lock asked for directly (POST …/locks) is a signed command (design 16.4); a close plan's signature is on its PlanApproved. */
+  PeriodLocked: z.object({ bookId: Id, periodEnd: IsoDate, level: z.enum(["soft", "hard"]), signature: CommandSignature.optional() }),
   /** FIN-MDM-02: no new ordinary entries; reversals and corrections of earlier journals still post. */
   AccountClosed: z.object({ bookId: Id, accountId: Id, reason: z.string().min(1) }),
   /**
@@ -224,10 +264,12 @@ export const AGENT = {
   DraftQueued: z.object({ txnId: Id, draftId: Id, bookId: Id, status: z.enum(["queued", "awaiting_approval"]),
     proposal: z.object({ txnDate: IsoDate, narration: z.string(), voucherType: z.string(), lines: z.array(Line), provisional: z.boolean() }),
     accountId: Id, confidence: z.number(), partyName: z.string().optional(), amount: MinorString, direction: z.enum(["in", "out"]) }),
-  DraftApproved: z.object({ draftId: Id, accountId: Id }),
+  /** `signature`: approving a draft above the approval limit over HTTP is a signed command. */
+  DraftApproved: z.object({ draftId: Id, accountId: Id, signature: CommandSignature.optional() }),
   DraftRejected: z.object({ draftId: Id, reason: z.string() }),
   RatificationRequested: z.object({ requestId: Id, dueBy: IsoDate }),
-  Ratified: z.object({ journalId: Id }),
+  /** `signature`: ratifying an automatic posting above the approval limit is a signed command. */
+  Ratified: z.object({ journalId: Id, signature: CommandSignature.optional() }),
   CorrectionRequested: z.object({ requestId: Id, bookId: Id, journalId: Id, fromAccount: Id, toAccount: Id }),
   RuleLearned: z.object({ pattern: z.string(), accountId: Id }),
   AutonomyLimited: z.object({ key: z.string(), maxLevel: AutonomyLevel, until: IsoDate, reason: z.string() }),
@@ -250,9 +292,13 @@ export const OPS = {
     policy: z.object({ ids: z.array(z.string()), level: AutonomyLevel, approver: z.string(), reasons: z.array(z.string()) }).nullable(),
     /** FIN-MDM-04: the person whose recorded approval this execution carries out (their authority re-checked now). */
     approvedBy: Principal.optional(),
+    /** Design 14.4/16.4: the committer's signature over this command (step-up-class plans), verified and stored in the same transaction. */
+    signature: CommandSignature.optional(),
   }),
   /** FIN-MDM-04: a person approved exactly this plan hash; someone may execute it later (authority re-checked then). */
-  PlanApprovalRecorded: z.object({ planId: Id, bookId: Id, hash: z.string().length(64), preparedBy: Principal, amountPaise: z.string().regex(/^\d+$/) }),
+  PlanApprovalRecorded: z.object({ planId: Id, bookId: Id, hash: z.string().length(64), preparedBy: Principal, amountPaise: z.string().regex(/^\d+$/),
+    /** The approver's signature over this command (step-up-class plans). */
+    signature: CommandSignature.optional() }),
   /** FIN-MDM-04: an approval no longer stands (the approver's authority or delegation changed); the plan needs re-approval. */
   PlanApprovalInvalidated: z.object({ planId: Id, bookId: Id, approver: Principal, reason: z.string() }),
   /** FIN-MDM-04: a saved plan can no longer be executed as prepared (its preparer's authority changed). */
@@ -306,8 +352,16 @@ export const IDENTITY = {
   InvitationRedeemed: z.object({ invitation: z.string(), principal: Principal, credentialId: z.string() }),
   CredentialRegistered: z.object({ principal: Principal, credentialId: z.string() }),
   CredentialRevoked: z.object({ principal: Principal, credentialId: z.string() }),
-  SettingsChanged: z.object({ soloOwner: z.boolean(), sodLimitPaise: z.string().nullable(),
-    previous: z.object({ soloOwner: z.boolean(), sodLimitPaise: z.string().nullable() }).nullable() }),
+  SettingsChanged: z.object({ soloOwner: z.boolean(), sodLimitPaise: z.string().nullable(), requireTwoAuthenticators: z.boolean().optional(),
+    previous: z.object({ soloOwner: z.boolean(), sodLimitPaise: z.string().nullable(), requireTwoAuthenticators: z.boolean().optional() }).nullable() }),
+  /**
+   * Account recovery (design 16.4): an operator issued a one-time code for an EXISTING member who
+   * lost access. `invitation` is the SHA-256 of the code; `reason` why; `revokeExisting` whether
+   * redeeming it revokes the member's other passkeys.
+   */
+  RecoveryIssued: z.object({ invitation: z.string(), principal: Principal, reason: z.string(), revokeExisting: z.boolean(), expiresAt: z.string() }),
+  /** The recovery code was redeemed: a new passkey for the same principal, and the passkeys it revoked. */
+  RecoveryCompleted: z.object({ invitation: z.string(), principal: Principal, credentialId: z.string(), revokedCredentials: z.array(z.string()) }),
   /** `session` is the SHA-256 of the session id. */
   SessionRevoked: z.object({ session: z.string(), principal: Principal.nullable() }),
   /** FIN-MDM-04: the tenant's authority matrix (amount bands per action, book and role) was switched on or off. */

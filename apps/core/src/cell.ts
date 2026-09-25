@@ -135,8 +135,9 @@ export class Cell {
     const reporting = new Reporting(sql, store);
     // Payments to a party with an unreleased bank-detail change are held (POL-501), in plans and in drafts.
     agent.paymentHolds = (t, ids, tx) => parties.holds(t, ids, tx);
-    const ops = new Operations(sql, store, { gl, reporting, agent, policies, parties }, o.clock, identity);
-    const evidence = new EvidenceService(store);
+    const ops = new Operations(sql, store, { gl, reporting, agent, policies, parties, singlePasskeyPeople: (t) => identity.singlePasskeyPeople(t) }, o.clock, identity);
+    // Evidence records re-verify the approval's device signature offline (design 14.4/16.4).
+    const evidence = new EvidenceService(store, (t, env, sig) => identity.verifyStoredSignature(t, env, sig));
     // FIN-MDM-04: an authority change invalidates approvals that relied on it, in the same transaction.
     identity.onAuthorityChange((t, change, tx) => ops.invalidateApprovals(t, change, tx).then(() => undefined));
 

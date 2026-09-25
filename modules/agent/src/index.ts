@@ -21,7 +21,7 @@
 import type { Sql, TransactionSql } from "postgres";
 import {
   addDays, draftLifecycle, journalIdForRequest, stableId, uuid,
-  type Decision, type Envelope, type EventData, type Line, type RawTxn,
+  type CommandSignature, type Decision, type Envelope, type EventData, type Line, type RawTxn,
 } from "@kuber/contracts";
 import { DENY_ALL_GUARD, once, type EventStore, type MetaInput, type ModuleGuard, type NewEvent, type Projection } from "@kuber/eventstore";
 import { isToken, type TenantKeys } from "@kuber/crypto";
@@ -327,7 +327,12 @@ export class Agent {
    * `commandId` is the ops plan id when the approval comes from a committed plan; `inTx` lets that
    * plan approve its drafts atomically with its own commit.
    */
-  async approveDraft(tenantId: string, draftId: string, principal: string, accountId?: string, commandId?: string, inTx?: TransactionSql) {
+  /**
+   * `opts.attest` (signed commands, design 16.4): verifies the person's signature over this approval
+   * inside the transaction, just before the approval is recorded, and returns it for DraftApproved.
+   */
+  async approveDraft(tenantId: string, draftId: string, principal: string, accountId?: string, commandId?: string, inTx?: TransactionSql,
+                     opts: { attest?: (tx: TransactionSql) => Promise<CommandSignature> } = {}) {
     const run = async (tx: TransactionSql) => {
       const keys = await this.store.keys(tenantId);
       const [row] = await tx<{ txn_id: string; book_id: string; status: string; proposal: unknown }[]>`
@@ -346,8 +351,9 @@ export class Agent {
       }
       // Same request id on a retry after a GL rejection: the journal id stays deterministic.
       const requestId = `req-${d.txn_id}`, journalId = journalIdForRequest(tenantId, requestId);
+      const signature = opts.attest ? await opts.attest(tx) : undefined;
       const events: NewEvent[] = [
-        { type: "DraftApproved", data: { draftId, accountId: final } },
+        { type: "DraftApproved", data: { draftId, accountId: final, ...(signature ? { signature } : {}) } },
         { type: "PostingRequested", data: { requestId, bookId: d.book_id, txnDate: d.proposal.txnDate, narration: d.proposal.narration,
           voucherType: d.proposal.voucherType, lines, provisional: d.proposal.provisional, autonomy: "human",
           confidence: d.proposal.confidence, sourceStream: `${tenantId}/txn/${d.txn_id}` } },
@@ -358,6 +364,21 @@ export class Agent {
       return { requestId, journalId, status: "approved" as const };
     };
     return inTx ? run(inTx) : this.store.tenantTx(tenantId, run);
+  }
+
+  /** One draft, decrypted (signed commands render what an approval would post from it). */
+  async draft(tenantId: string, draftId: string): Promise<{ draftId: string; bookId: string; status: string; proposal: Proposal } | null> {
+    const [row] = await this.store.tenantTx(tenantId, (tx) => tx<{ book_id: string; status: string; proposal: unknown }[]>`
+      SELECT book_id, status, proposal FROM agent.drafts WHERE tenant_id = ${tenantId} AND draft_id = ${draftId}`);
+    if (!row) return null;
+    return { draftId, bookId: row.book_id, status: row.status, proposal: openProposal(await this.store.keys(tenantId), draftId, row.proposal) };
+  }
+
+  /** The book of a posted journal, from the journal index (null until it is projected). */
+  async journalBook(tenantId: string, journalId: string): Promise<string | null> {
+    const [r] = await this.store.tenantTx(tenantId, (tx) => tx<{ book_id: string }[]>`
+      SELECT book_id FROM agent.journal_index WHERE tenant_id = ${tenantId} AND journal_id = ${journalId}`);
+    return r?.book_id ?? null;
   }
 
   async rejectDraft(tenantId: string, draftId: string, principal: string, reason: string) {
@@ -470,15 +491,17 @@ export class Agent {
     });
   }
 
-  async ratify(tenantId: string, journalId: string, principal: string) {
+  /** `opts.attest`: as for approveDraft, the person's signature over this ratification (above the approval limit). */
+  async ratify(tenantId: string, journalId: string, principal: string, opts: { attest?: (tx: TransactionSql) => Promise<CommandSignature> } = {}) {
     return this.store.tenantTx(tenantId, async (tx) => {
       await this.guard.permit(tenantId, principal, "journal.ratify", { allBooks: true }, tx);
       const [r] = await tx<{ txn_id: string }[]>`
         UPDATE agent.ratifications SET status = 'ratified', resolved_by = ${principal}, resolved_at = now()
         WHERE tenant_id = ${tenantId} AND journal_id = ${journalId} AND status = 'open' RETURNING txn_id`;
       if (!r) throw new AgentError("not_open", `no open ratification for ${journalId}`);
+      const signature = opts.attest ? await opts.attest(tx) : undefined;
       await this.store.append("agent", tenantId, { streamId: `${tenantId}/txn/${r.txn_id}`, expected: "any",
-        events: [{ type: "Ratified", data: { journalId } }] }, { principal }, tx);
+        events: [{ type: "Ratified", data: { journalId, ...(signature ? { signature } : {}) } }] }, { principal }, tx);
     });
   }
 
