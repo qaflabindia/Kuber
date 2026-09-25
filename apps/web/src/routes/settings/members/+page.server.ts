@@ -1,26 +1,30 @@
 /**
  * Members and access: who is in this workspace, with which role, over which books, with how many
  * passkeys; invitations; and the separation-of-duties settings. Every change goes to the core,
- * which authorizes it against the signed-in member's role (members.manage, settings.manage); the
+ * which authorizes it against the signed-in member's role (members.manage, authority.manage); the
  * page only hides controls the core would refuse.
  */
 import { error, fail } from "@sveltejs/kit";
 import { api, ApiError, members, type Invitation } from "$lib/server/api";
 import type { Actions, PageServerLoad } from "./$types";
 
-const ROLES = ["owner", "controller", "preparer", "approver", "auditor", "member"] as const;
+/** Role model v2 (design 6.3): the roles a person can be invited to. Customers and suppliers are bound to a party. */
+const ROLES = ["superuser", "admin", "system_owner", "controller", "treasurer", "staff", "auditor", "customer", "supplier", "investor", "guest"] as const;
+const PARTY_BOUND = new Set(["customer", "supplier"]);
+const NO_SEPARATION = { soloSuperuser: false, soloOwner: false, sodLimitPaise: null, requireTwoAuthenticators: false };
 
 export const load: PageServerLoad = async ({ locals }) => {
   const s = locals.session!;
   const m = members(s);
   const me = await m.me().catch((e) => { throw e instanceof ApiError ? error(e.status, e.message) : error(502, "Kuber's ledger service isn't reachable."); });
   if (!me.permissions.includes("members.read")) throw error(403, "Your role does not include seeing the workspace's members.");
-  const [list, credentials, separation, books] = await Promise.all([m.list(), m.credentials(), m.separation(), api(s).books().catch(() => [])]);
+  // An admin manages members without reading the books or the separation settings (role model v2).
+  const [list, credentials, separation, books] = await Promise.all([m.list(), m.credentials(), m.separation().catch(() => NO_SEPARATION), api(s).books().catch(() => [])]);
   return {
     // Design 16.4: an owner or controller with one passkey is told to register a second.
     me: { principal: me.principal, role: me.role, passkeys: me.passkeys ?? 0, warnings: me.warnings ?? [] },
     canManage: me.permissions.includes("members.manage"),
-    canSettings: me.permissions.includes("settings.manage"),
+    canSettings: me.permissions.includes("authority.manage"),
     roles: [...ROLES],
     books: books.map((b) => b.book_id),
     separation,
@@ -52,12 +56,15 @@ export const actions: Actions = {
     const f = await request.formData();
     const displayName = String(f.get("displayName") ?? "").trim(), role = String(f.get("role") ?? "");
     const ttlHours = Number(f.get("ttlHours") ?? 72);
+    const partyId = String(f.get("partyId") ?? "").trim();
     const books = scopeOf(f);
     if (displayName.length < 2) return fail(400, { action: "invite", message: "Enter the person's name." });
     if (!(ROLES as readonly string[]).includes(role)) return fail(400, { action: "invite", message: "Choose a role." });
     if (books === "empty") return fail(400, { action: "invite", message: "Tick at least one book, or choose every book." });
+    if (PARTY_BOUND.has(role) && !partyId) return fail(400, { action: "invite", message: "Enter the party id this customer or supplier is bound to." });
     try {
-      const invitation: Invitation = await members(locals.session!).invite({ role, displayName, books, ttlHours: Number.isFinite(ttlHours) ? ttlHours : 72 });
+      const invitation: Invitation = await members(locals.session!).invite({ role, displayName, books, ttlHours: Number.isFinite(ttlHours) ? ttlHours : 72,
+        ...(PARTY_BOUND.has(role) ? { partyId } : {}) });
       return { ok: true, action: "invite", invitation, displayName };
     } catch (e) { return problem("invite", e); }
   },
@@ -93,11 +100,11 @@ export const actions: Actions = {
 
   separation: async ({ request, locals }) => {
     const f = await request.formData();
-    const soloOwner = f.get("soloOwner") === "on", requireTwoAuthenticators = f.get("requireTwoAuthenticators") === "on";
+    const soloSuperuser = f.get("soloSuperuser") === "on", requireTwoAuthenticators = f.get("requireTwoAuthenticators") === "on";
     const sodLimitPaise = paiseOf(String(f.get("sodLimit") ?? ""));
     if (sodLimitPaise === undefined) return fail(400, { action: "separation", message: "Enter the limit in rupees, e.g. 50,000, or leave it empty." });
     try {
-      await members(locals.session!).setSeparation({ soloOwner, sodLimitPaise, requireTwoAuthenticators });
+      await members(locals.session!).setSeparation({ soloSuperuser, sodLimitPaise, requireTwoAuthenticators });
       return { ok: true, action: "separation", message: "Separation settings saved." };
     } catch (e) { return problem("separation", e); }
   },

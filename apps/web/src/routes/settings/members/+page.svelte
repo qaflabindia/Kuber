@@ -8,15 +8,24 @@
 
   let { data, form } = $props();
 
-  const ROLE_LABEL: Record<string, string> = { owner: "Owner", controller: "Controller", preparer: "Preparer", approver: "Approver", auditor: "Auditor", member: "Member", agent: "Agent" };
+  // Role model v2 (design 6.3). Memberships from before it show their new role.
+  const ROLE_LABEL: Record<string, string> = { superuser: "Superuser", admin: "Admin", system_owner: "System owner", controller: "Controller", treasurer: "Treasurer",
+    staff: "Staff", auditor: "Auditor", customer: "Customer", supplier: "Supplier", investor: "Investor", guest: "Guest", agent: "Agent" };
   const ROLE_HINT: Record<string, string> = {
-    owner: "Everything, including members and separation settings.",
-    controller: "Posts, closes periods and approves plans; cannot manage members.",
-    preparer: "Captures statements and prepares plans for someone else to approve.",
-    approver: "Reviews drafts and approves plans (not period operations).",
+    superuser: "Top authority: approves every plan within its band, period operations, authority changes.",
+    admin: "Invites and changes members and non-financial settings; no financial authority.",
+    system_owner: "Accountable for the AI system: tool register, prompt approvals, copilot halt.",
+    controller: "Posts, prepares period operations and approves plans prepared by others.",
+    treasurer: "Prepares and approves treasury plans; verifies bank-detail changes.",
+    staff: "Captures statements, prepares plans and creates parties for someone else to approve.",
     auditor: "Reads the books and the member list; changes nothing.",
-    member: "Reads, captures and prepares plans.",
+    customer: "Sees their own invoices, statement and payments; raises a query.",
+    supplier: "Sees their own bills and payment status; requests a bank-detail change.",
+    investor: "Reads certified reports published to investors.",
+    guest: "Reads items shared with them until the share expires.",
   };
+  const PARTY_BOUND = new Set(["customer", "supplier"]);
+  let invRole = $state("staff");
 
   let busy = $state<string | null>(null);
   let editing = $state<string | null>(null);
@@ -49,7 +58,7 @@
     try { await navigator.clipboard.writeText(code); copied = true; setTimeout(() => (copied = false), 2500); } catch { copied = false; }
   }
   /** Owners and controllers keep two authenticators (design 16.4): one passkey is a warning. */
-  const needsSecond = (m: { role: string; credentials: unknown[] }) => (m.role === "owner" || m.role === "controller") && m.credentials.length === 1;
+  const needsSecond = (m: { role: string; credentials: unknown[] }) => (m.role === "superuser" || m.role === "controller") && m.credentials.length === 1;
   let adding = $state(false), addMsg = $state<{ text: string; ok: boolean } | null>(null);
   /** Register another passkey for yourself: confirm with a current one first (if you have one), then create the new one. */
   async function addPasskey() {
@@ -84,7 +93,7 @@
   <div class="eyebrow">Workspace · {data.members[0]?.tenant ?? ""}</div>
   <h1>Members and access</h1>
   <p class="muted">Who can see and change these books, over which books, and how they sign in. Every change is checked by Kuber's core against your own role.</p>
-  {#if !data.canManage}<p class="pill note"><Icon name="shield" size={13} /> Read-only: only an owner changes members.</p>{/if}
+  {#if !data.canManage}<p class="pill note"><Icon name="shield" size={13} /> Read-only: only a superuser or admin changes members.</p>{/if}
   {#each data.me.warnings as w}
     <div class="warn" role="status"><Icon name="alert" size={15} /><span>{w.message}</span>
       <button type="button" class="btn sm" onclick={addPasskey} disabled={adding}><Icon name="key" size={13} /> {adding ? "Waiting for your passkey…" : "Add a passkey"}</button></div>
@@ -116,11 +125,18 @@
         </div>
         <div class="field">
           <label for="inv-role">Role</label>
-          <select id="inv-role" name="role" required aria-describedby="inv-role-hint">
-            {#each data.roles as r}<option value={r} selected={r === "preparer"}>{ROLE_LABEL[r]}</option>{/each}
+          <select id="inv-role" name="role" required aria-describedby="inv-role-hint" bind:value={invRole}>
+            {#each data.roles as r}<option value={r}>{ROLE_LABEL[r]}</option>{/each}
           </select>
-          <span id="inv-role-hint" class="hint faint">Owners manage members; controllers and approvers approve; preparers and members prepare; auditors only read.</span>
+          <span id="inv-role-hint" class="hint faint">{ROLE_HINT[invRole] ?? ""}</span>
         </div>
+        {#if PARTY_BOUND.has(invRole)}
+          <div class="field">
+            <label for="inv-party">Party id</label>
+            <input id="inv-party" name="partyId" required maxlength="200" autocomplete="off" placeholder="C-ACME" aria-describedby="inv-party-hint" />
+            <span id="inv-party-hint" class="hint faint">The party-master record they are bound to: they see only its records.</span>
+          </div>
+        {/if}
         <div class="field">
           <label for="inv-ttl">Code expires in</label>
           <select id="inv-ttl" name="ttlHours">
@@ -159,7 +175,7 @@
           </div>
         </div>
         <div class="pills">
-          <span class="pill" class:brass={m.role === "owner"}>{ROLE_LABEL[m.role] ?? m.role}</span>
+          <span class="pill" class:brass={m.role === "superuser"}>{ROLE_LABEL[m.role] ?? m.role}</span>
           <span class="pill"><Icon name="book" size={12} /> {scopeText(m.books)}</span>
           <span class="pill sage"><span class="dot"></span>Active</span>
           {#if m.role !== "agent"}
@@ -176,7 +192,7 @@
             <div class="field">
               <label for="role-{m.principal}">Role</label>
               <select id="role-{m.principal}" name="role" bind:value={editRole} aria-describedby="role-hint-{m.principal}">
-                {#each data.roles as r}<option value={r}>{ROLE_LABEL[r]}</option>{/each}
+                {#each data.roles.filter((r) => !PARTY_BOUND.has(r) || r === m.role) as r}<option value={r}>{ROLE_LABEL[r]}</option>{/each}
               </select>
               <span id="role-hint-{m.principal}" class="hint faint">{ROLE_HINT[editRole] ?? ""}{editRole !== m.role ? " A role change gives them a new principal; they sign in again with the same passkey." : ""}</span>
             </div>
@@ -263,11 +279,11 @@
         </div>
         <label class="opt solo">
           <input type="checkbox" name="requireTwoAuthenticators" checked={!!data.separation.requireTwoAuthenticators} aria-describedby="two-hint" />
-          <span>Require two passkeys for owners and controllers<span id="two-hint" class="hint faint block-hint">Their approvals of period operations and large amounts are refused until they register a second passkey, so losing one device never locks the books.</span></span>
+          <span>Require two passkeys for superusers and controllers<span id="two-hint" class="hint faint block-hint">Their approvals of period operations and large amounts are refused until they register a second passkey, so losing one device never locks the books.</span></span>
         </label>
         <label class="opt solo">
-          <input type="checkbox" name="soloOwner" checked={data.separation.soloOwner} aria-describedby="solo-hint" />
-          <span>Single-owner exception<span id="solo-hint" class="hint faint block-hint">While the owner is the only person in the workspace, they may approve their own plans. It lapses as soon as someone else joins.</span></span>
+          <input type="checkbox" name="soloSuperuser" checked={data.separation.soloSuperuser ?? data.separation.soloOwner} aria-describedby="solo-hint" />
+          <span>Single-superuser exception<span id="solo-hint" class="hint faint block-hint">While the superuser is the only person in the workspace, they may approve their own plans. It lapses as soon as someone else joins.</span></span>
         </label>
         <div class="row-end">
           {#if msgFor("separation")}{@const msg = msgFor("separation")!}<p class="small" class:error={!msg.ok} role={msg.ok ? "status" : "alert"}>{msg.text}</p>{/if}
@@ -277,7 +293,7 @@
     {:else}
       <dl class="kv">
         <dt>Approval limit</dt><dd class="num">{limitRupees ? `₹${limitRupees}` : "Policy default"}</dd>
-        <dt>Single-owner exception</dt><dd>{data.separation.soloOwner ? "On" : "Off"}</dd>
+        <dt>Single-superuser exception</dt><dd>{(data.separation.soloSuperuser ?? data.separation.soloOwner) ? "On" : "Off"}</dd>
         <dt>Two passkeys required</dt><dd>{data.separation.requireTwoAuthenticators ? "On" : "Off"}</dd>
       </dl>
     {/if}

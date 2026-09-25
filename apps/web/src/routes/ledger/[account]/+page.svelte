@@ -14,7 +14,7 @@
     });
   });
   const totals = $derived(rows.reduce((t, r) => ({ dr: t.dr + r.dr, cr: t.cr + r.cr }), { dr: 0n, cr: 0n }));
-  const by = (p: string) => (p.startsWith("agent:") ? "Kuber" : p.startsWith("owner:") ? "You" : p.split(":")[0]);
+  const by = (p: string) => (p.startsWith("agent:") ? "Kuber" : /^(owner|superuser):/.test(p) ? "You" : p.split(":")[0]);
 </script>
 
 <svelte:head><title>{data.account.name} · Ledger · Kuber</title></svelte:head>

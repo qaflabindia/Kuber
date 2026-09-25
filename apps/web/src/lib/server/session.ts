@@ -20,8 +20,8 @@ import { env } from "$env/dynamic/private";
 
 export interface Session {
   tenant: string;        // workspace id, e.g. "laksh"
-  principal: string;     // "owner:laksh", from the membership the core returned
-  role: string;          // owner | controller | preparer | approver | auditor | member
+  principal: string;     // "superuser:laksh" (or a legacy "owner:laksh"), from the membership the core returned
+  role: string;          // role model v2: superuser | admin | system_owner | controller | treasurer | staff | auditor | customer | supplier | investor | guest
   books: string[] | null; // book scope; null = every book
   name: string;          // display name
   book: string | null;   // selected book

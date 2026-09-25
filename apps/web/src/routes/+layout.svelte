@@ -13,7 +13,10 @@
   const waiting = $derived(rail.state === "items" ? rail.items : []);
   const onCanvas = $derived(page.url.pathname === "/");
 
-  const ROLE: Record<string, string> = { owner: "Owner", controller: "Controller", preparer: "Preparer", approver: "Approver", auditor: "Auditor", member: "Member" };
+  // Role model v2 (design 6.3); legacy names label memberships not yet migrated.
+  const ROLE: Record<string, string> = { superuser: "Superuser", admin: "Admin", system_owner: "System owner", controller: "Controller", treasurer: "Treasurer",
+    staff: "Staff", auditor: "Auditor", customer: "Customer", supplier: "Supplier", investor: "Investor", guest: "Guest",
+    owner: "Superuser", approver: "Superuser", preparer: "Staff", member: "Staff" };
   const roleLabel = $derived(ROLE[data.shell?.role ?? data.session?.role ?? ""] ?? data.session?.role ?? "");
 
   function focusAsk() { if (onCanvas) document.getElementById("ask")?.focus(); else goto("/?ask"); }

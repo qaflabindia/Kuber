@@ -138,7 +138,8 @@ export interface Me extends Member {
 }
 export interface Credential { credentialId: string; principal: string; transports: string[]; createdAt: string; lastUsedAt: string | null; revokedAt: string | null }
 export interface Invitation { token: string; principal: string; role: string; books: string[] | null; expiresAt: string }
-export interface Separation { soloOwner: boolean; sodLimitPaise: string | null; requireTwoAuthenticators?: boolean }
+/** `soloSuperuser`: the single-superuser exception (role model v2); `soloOwner` is its earlier name, still returned. */
+export interface Separation { soloSuperuser?: boolean; soloOwner?: boolean; sodLimitPaise: string | null; requireTwoAuthenticators?: boolean }
 
 // ---------------------------------------------------------------- signed commands (design 14.4, 16.4)
 export type SignedAction = "plan.commit" | "plan.approve" | "draft.approve" | "journal.ratify" | "period.lock";
@@ -166,7 +167,7 @@ export const members = (s: Pick<Session, "tenant" | "principal" | "sid"> & { ste
     me: () => call<Me>(s, "GET", "/me"),
     list: () => call<Member[]>(s, "GET", "/members"),
     credentials: () => call<Credential[]>(s, "GET", "/credentials"),
-    invite: (i: { role: string; displayName: string; books: string[] | null; ttlHours?: number }) => call<Invitation>(s, "POST", "/members/invitations", i),
+    invite: (i: { role: string; displayName: string; books: string[] | null; ttlHours?: number; partyId?: string }) => call<Invitation>(s, "POST", "/members/invitations", i),
     change: (principal: string, c: { role?: string; books?: string[] | null }) => call<Member>(s, "PATCH", m(principal), c),
     revoke: (principal: string) => call<void>(s, "POST", `${m(principal)}/revoke`, {}),
     revokeCredential: (id: string) => call<void>(s, "POST", `/credentials/${encodeURIComponent(id)}/revoke`, {}),
@@ -181,3 +182,26 @@ export const members = (s: Pick<Session, "tenant" | "principal" | "sid"> & { ste
     addPasskey: (response: unknown) => call<Credential>(s, "POST", "/identity/passkeys/verify", { response }),
   };
 };
+
+// ---------------------------------------------------------------- external roles (role model v2)
+export interface PortalLine { bookId: string; journalId: string; date: string; voucherType: string; accountId: string; amount: string }
+export interface PortalItem extends PortalLine { open: string; status: "open" | "partly_paid" | "paid" }
+export interface PortalStatement { partyId: string; name: string | null; balance: string; lines: (PortalLine & { balance: string })[] }
+export interface CustomerView { statement: PortalStatement; openItems: PortalItem[]; paymentsReceived: PortalLine[] }
+export interface SupplierView { statement: PortalStatement; bills: PortalItem[]; payments: PortalLine[];
+  bankChange: { changeId: string; status: string; effectiveFrom: string } | null; paymentsHeld: boolean }
+export interface PortalQuery { queryId: string; subject: string; message: string; reference: string | null; openedAt: string }
+export interface InvestorSnapshot { snapshotId: string; bookId: string; kind: string; seq: number; contentHash: string; takenAt: string }
+export interface GuestShare { shareId: string; itemType: "snapshot" | "report"; itemId: string; expiresAt: string; grantedBy: string }
+
+/** Customers, suppliers, investors and guests: the core filters every call to the member's own party, published snapshots or shares. */
+export const portal = (s: Pick<Session, "tenant" | "principal" | "sid">) => ({
+  customer: () => call<CustomerView>(s, "GET", "/portal/customer"),
+  queries: () => call<PortalQuery[]>(s, "GET", "/portal/customer/queries"),
+  query: (q: { subject: string; message: string; reference?: string }) => call<{ queryId: string }>(s, "POST", "/portal/customer/queries", q),
+  supplier: () => call<SupplierView>(s, "GET", "/portal/supplier"),
+  bankChange: (b: { bank: { accountNumber: string; ifsc: string; holderName: string }; effectiveFrom?: string }) =>
+    call<{ changeId: string; status: string; hold: boolean }>(s, "POST", "/portal/supplier/bank-change", b),
+  snapshots: () => call<InvestorSnapshot[]>(s, "GET", "/portal/investor/snapshots"),
+  shares: () => call<GuestShare[]>(s, "GET", "/shares/mine"),
+});

@@ -11,6 +11,10 @@ export async function startSession(cookies: Cookies, m: Member, next: string | n
   const books = await api({ tenant: m.tenant, principal: m.principal, sid }).books().catch(() => []);
   const book = books[0]?.book_id ?? null;
   cookies.set(COOKIE, encode({ tenant: m.tenant, principal: m.principal, role: m.role, books: m.books, name: m.displayName, book, sid, issuedAt: Date.now() }), cookieOptions);
+  // Role model v2: external roles land on their own pages (they hold no book).
+  if (m.role === "customer" || m.role === "supplier") return "/portal";
+  if (m.role === "investor" || m.role === "guest") return "/investor";
+  if (m.role === "admin") return "/settings/members";            // no book access: members only
   if (!book) return "/setup";
   return next && next.startsWith("/") && !next.startsWith("//") ? next : "/";
 }
