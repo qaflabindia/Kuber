@@ -223,6 +223,10 @@ export const balance: OpDef<{ asOf?: string }> = {
     const unmapped = [...s.accounts.values()].filter((a) => !a.taxonomyTag?.trim()).map((a) => a.accountId).sort();
     checks.push({ label: "Every account maps to a statement line", ok: unmapped.length === 0, blocking: false,
       detail: unmapped.length ? `unmapped: ${unmapped.join(", ")}` : undefined });
+    // Design 16.4: owners and controllers sign high-risk commands with a passkey; a second one keeps them able to.
+    const single = ctx.svc.singlePasskeyPeople ? await ctx.svc.singlePasskeyPeople(ctx.tenant) : [];
+    if (single.length) checks.push({ label: "Owners and controllers have a second passkey", ok: false, blocking: false,
+      detail: `only one passkey: ${single.join(", ")}; register a second authenticator so losing one does not lock them out of signing` });
     const allOk = checks.every((c) => c.ok);
     return {
       title: allOk ? "Books are in order" : checks.some((c) => !c.ok && c.blocking) ? "Books are out of balance" : "Books balance; some items are open",

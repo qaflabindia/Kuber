@@ -9,7 +9,7 @@
  * periods accept only owner or controller; every journal extends the book's hash chain.
  */
 import {
-  GENESIS_HASH, bookConfigOf, canonical, isIsoDate, sha256, type Account, type BookConfig, type Envelope, type EventData, type Line,
+  GENESIS_HASH, bookConfigOf, canonical, isIsoDate, sha256, type Account, type BookConfig, type CommandSignature, type Envelope, type EventData, type Line,
 } from "@kuber/contracts";
 import type { NewEvent } from "@kuber/eventstore";
 import { JournalMap } from "./journals.ts";
@@ -75,7 +75,8 @@ export type BookCommand =
       entry?: "manual"; controlledAdjustment?: { reason: string } }
   | { kind: "ReverseJournal"; journalId: string; reversalJournalId: string; reason: string; onDate?: string }
   | { kind: "CorrectJournal"; journalId: string; fromAccount: string; toAccount: string; reversalJournalId: string; newJournalId: string }
-  | { kind: "LockPeriod"; periodEnd: string; level: "soft" | "hard" }
+  /** `signature`: the person's signature over a directly requested lock (design 16.4), recorded on PeriodLocked. */
+  | { kind: "LockPeriod"; periodEnd: string; level: "soft" | "hard"; signature?: CommandSignature }
   | { kind: "ConfirmJournal"; journalId: string; source: string; basis?: string }
   | { kind: "CloseAccount"; accountId: string; reason: string }
   | { kind: "ChangeAccountControls"; accountId: string; taxonomyTag?: string; requiredDims?: string[]; reason?: string }
@@ -237,7 +238,7 @@ export function decide(s: BookState, c: BookCommand, principal: string, ctx: Dec
     case "LockPeriod": {
       if (!isIsoDate(c.periodEnd)) throw new DomainError("bad_date", `bad period end ${c.periodEnd}`);
       if (!PRIVILEGED.has(roleOf(principal))) throw new DomainError("forbidden", "only an owner or controller can lock a period");
-      return [{ type: "PeriodLocked", data: { bookId: s.bookId, periodEnd: c.periodEnd, level: c.level } }];
+      return [{ type: "PeriodLocked", data: { bookId: s.bookId, periodEnd: c.periodEnd, level: c.level, ...(c.signature ? { signature: c.signature } : {}) } }];
     }
     case "CloseAccount": {
       if (!PRIVILEGED.has(roleOf(principal))) throw new DomainError("forbidden", "only an owner or controller can close an account");

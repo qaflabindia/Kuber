@@ -85,7 +85,7 @@ export const RETENTION: Record<string, "purge" | "sealed" | "keys" | "tombstone"
   // Identity (members, passkeys, invitation codes, separation settings): personal data with no
   // value once the tenant's books are unreadable. Credentials before members (foreign key).
   "identity.credentials": "purge", "identity.enrolments": "purge", "identity.members": "purge", "identity.settings": "purge",
-  "identity.sessions": "purge",
+  "identity.sessions": "purge", "identity.signing_requests": "purge",
   // Finance controls: authority matrix, delegations, conflicts, access reviews, kill switch, plan
   // approvals and the incident register. Their history is in the sealed event streams.
   "identity.authority_settings": "purge", "identity.authority_bands": "purge", "identity.delegations": "purge",

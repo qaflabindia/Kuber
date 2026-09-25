@@ -20,6 +20,10 @@
  *                                                 (databases from before propagation); idempotent
  *   ops verify [--full] [--tenant t]              link chains and digests from each stream's verified checkpoint
  *                                                 (--full: from the first event); moves checkpoints of clean streams
+ *   ops verify-signatures [--tenant t]          re-verify every stored command signature (design 14.4/16.4) offline against
+ *                                                 the stored public key and its event's command digest; lists development
+ *                                                 confirmations (not signatures) and period operations committed unsigned;
+ *                                                 exit 1 when any signature fails (also: keys ops verify-signatures)
  *   ops run-schedules [--as-of d] [--tenant t]    post approved recurring / recognition schedule occurrences due on or
  *                                                 before d (default today) once each, as system:scheduler; locked periods
  *                                                 become exception cases (FIN-GL-02/03); idempotent and safe to run concurrently
@@ -157,6 +161,14 @@ try {
       print(v); process.exitCode = v.problems.length ? 1 : 0;
       break;
     }
+    case "verify-signatures": {
+      const r = await ops.verifySignatures(flag("--tenant"));
+      print(r);
+      const n = r.tenants.reduce((a, t) => a + t.checked, 0), bad = r.tenants.reduce((a, t) => a + t.failures.length, 0);
+      console.log(bad ? `SIGNATURE FAILURES: ${bad} of ${n} stored signature(s) do not verify` : `${n} stored signature(s) verified offline`);
+      process.exitCode = r.ok ? 0 : 1;
+      break;
+    }
     // ---------------------------------------------------------------- finance controls
     case "access-review": {
       if (positional[0] === "dispose") {
@@ -208,7 +220,7 @@ try {
       break;
     }
     default:
-      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify, bus-consumers, backfill-confirmations, run-schedules, access-review, autonomy, incident, drill-compare");
+      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify, verify-signatures, bus-consumers, backfill-confirmations, run-schedules, access-review, autonomy, incident, drill-compare");
       process.exitCode = 2;
   }
 } finally {

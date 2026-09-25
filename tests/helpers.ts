@@ -1,5 +1,5 @@
 import postgres from "postgres";
-import { randomBytes } from "node:crypto";
+import { createHash, createSign, generateKeyPairSync, randomBytes, type KeyObject } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { Cell } from "@kuber/core";
@@ -110,3 +110,51 @@ export function signed(r: { method: string; url: string; headers?: Record<string
     session: principal ? newSession() : null });
   return { method: r.method, url: r.url, headers: out, ...(body !== undefined ? { payload: body } : {}) } as InjectOptions;
 }
+
+// ---------------------------------------------------------------- passkeys with a software authenticator
+/**
+ * A software WebAuthn authenticator: an ES256 (P-256) key pair, authenticatorData and
+ * clientDataJSON built by hand, "none" attestation. `get` signs whatever challenge the options
+ * carry (for signed commands: the command digest), with user presence and verification set.
+ */
+export const ORIGIN = "http://localhost:3000", RP_ID = "localhost";
+export const b64u = (b: Uint8Array | Buffer | string) => Buffer.from(b as Uint8Array).toString("base64url");
+export function cbor(v: unknown): Buffer {
+  const head = (major: number, n: number) => n < 24 ? Buffer.from([(major << 5) | n]) : n < 256 ? Buffer.from([(major << 5) | 24, n])
+    : n < 65536 ? Buffer.from([(major << 5) | 25, n >> 8, n & 255]) : (() => { const b = Buffer.alloc(5); b[0] = (major << 5) | 26; b.writeUInt32BE(n, 1); return b; })();
+  if (typeof v === "number") return v >= 0 ? head(0, v) : head(1, -1 - v);
+  if (typeof v === "string") { const b = Buffer.from(v, "utf8"); return Buffer.concat([head(3, b.length), b]); }
+  if (v instanceof Uint8Array) return Buffer.concat([head(2, v.length), Buffer.from(v)]);
+  if (v instanceof Map) return Buffer.concat([head(5, v.size), ...[...v].flatMap(([k, x]) => [cbor(k), cbor(x)])]);
+  const o = v as Record<string, unknown>;
+  return Buffer.concat([head(5, Object.keys(o).length), ...Object.entries(o).flatMap(([k, x]) => [cbor(k), cbor(x)])]);
+}
+export class SoftAuthenticator {
+  private key: KeyObject; readonly credId = randomBytes(32); private count = 0; readonly cose: Buffer;
+  constructor(private origin = ORIGIN) {
+    const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+    this.key = privateKey;
+    const jwk = publicKey.export({ format: "jwk" });
+    this.cose = cbor(new Map<number, unknown>([[1, 2], [3, -7], [-1, 1], [-2, Buffer.from(jwk.x!, "base64url")], [-3, Buffer.from(jwk.y!, "base64url")]]));
+  }
+  private authData(flags: number, attested?: Buffer) {
+    const c = Buffer.alloc(4); c.writeUInt32BE(this.count);
+    return Buffer.concat([createHash("sha256").update(RP_ID).digest(), Buffer.from([flags]), c, ...(attested ? [attested] : [])]);
+  }
+  create(options: { challenge: string }) {
+    const len = Buffer.alloc(2); len.writeUInt16BE(this.credId.length);
+    const authData = this.authData(0x45, Buffer.concat([Buffer.alloc(16), len, this.credId, this.cose]));
+    const clientDataJSON = Buffer.from(JSON.stringify({ type: "webauthn.create", challenge: options.challenge, origin: this.origin, crossOrigin: false }));
+    return { id: b64u(this.credId), rawId: b64u(this.credId), type: "public-key", clientExtensionResults: {},
+      response: { clientDataJSON: b64u(clientDataJSON), attestationObject: b64u(cbor({ fmt: "none", attStmt: {}, authData })), transports: ["internal"] } };
+  }
+  get(options: { challenge: string }) {
+    this.count++;
+    const authData = this.authData(0x05);
+    const clientDataJSON = Buffer.from(JSON.stringify({ type: "webauthn.get", challenge: options.challenge, origin: this.origin, crossOrigin: false }));
+    const signature = createSign("sha256").update(Buffer.concat([authData, createHash("sha256").update(clientDataJSON).digest()])).sign(this.key);
+    return { id: b64u(this.credId), rawId: b64u(this.credId), type: "public-key", clientExtensionResults: {},
+      response: { clientDataJSON: b64u(clientDataJSON), authenticatorData: b64u(authData), signature: b64u(signature) } };
+  }
+}
+

@@ -140,6 +140,15 @@ The core creates `kuber_system` on start with `SYSTEM_DB_PASSWORD`; `./kuber` an
 - **Every request is authorized** against the tenant's membership, re-read each time (revocation is immediate): roles owner, controller, preparer, approver, auditor, member, each optionally limited to some books. Auditors are read-only. The same check guards every plan, commit and discard, whether it came from the web, the copilot or MCP.
 - **Maker-checker.** Period operations, and plans above the policy's amount limit (or a tenant limit), need an approver other than their preparer; a plan the copilot prepared counts as prepared by the person who asked. A single-owner exception must be switched on by the owner and lapses when a second person joins.
 - **MCP tokens are limited to their book**, at commit as well as when planning.
+- **High-risk commands are signed on the device** (design 14.4, 16.4). Committing or approving a period operation or a plan above the approval limit, approving a draft or ratifying an automatic posting above the tenant limit, and locking a period directly:
+  - the browser asks `POST /v1/tenants/:t/signing/options`; the core renders a summary from the command itself (amount, payees, accounts, book, periods) and returns WebAuthn options whose challenge is the SHA-256 of the canonical digest inputs (tenant, book, action, subject, subject hash, principal, a single-use server nonce valid 5 minutes, the summary's hash);
+  - the web tier shows that summary, then the passkey signs (user verification required); the core verifies the assertion inside the command's own transaction (the member's own active passkey, request unused, unexpired and for exactly this command) and stores it in the resulting event (`PlanApproved`, `PlanApprovalRecorded`, `DraftApproved`, `Ratified`, `PeriodLocked`: field `signature`);
+  - an assertion for one plan cannot approve another, and cannot be reused;
+  - `ops verify-signatures [--tenant t]` re-checks every stored signature offline against the stored public key and its event; evidence records carry the signature and its verification;
+  - only development sign-in (a member without a passkey, `KUBER_DEV_SIGNIN=true`) falls back to the step-up claim, recorded as `kind: "dev-step-up"`, which is not a signature.
+  - Not a single HTTP command today, so not signed: publishing a policy (policies are files loaded at start-up) and paying at a bank (Kuber records payments as plans, which are signed above the limit).
+- **Two authenticators.** Owners and controllers with one passkey are warned (`/me`, the members page, the books-in-order check); members add a passkey from the members page after confirming with a current one. The separation setting `requireTwoAuthenticators` (off by default) refuses their signatures until they have two.
+- **Recovery** of an existing member who lost access is an operator action: `identity-cli recover <workspace> <role:name> --reason "…"` issues a one-time code for the same principal, recorded as `RecoveryIssued` and `RecoveryCompleted` in the identity stream; redeeming it revokes their other passkeys unless `--keep-passkeys`.
 
 **Encryption at rest (application-level, AES-256-GCM)**
 - **Envelope encryption.** A master key in a key-management service (KMS) unlocks per-tenant data keys; those keys encrypt the data.
@@ -338,7 +347,8 @@ Tests are in `tests/fin-gl.test.ts`, named by requirement.
 
 - Evidence covers committed journals and period locks. Not yet: a plan that fails part-way (its `PlanApproved` is recorded, the failure only in `ops.plans`), later ratification of an auto-posted journal (its own event, not appended to the record), MCP tool-call traces, and control tests over `control_refs`.
 - Evidence is built as events arrive. A database with journals from before `evidence-001` needs a backfill replay (`readAll` through the handler) before its history has records.
-- `approval.signature` is null until passkeys and signed commands (phase 1).
+- `approval.signature` is the device signature of the approval when the command was signed (null for commands that need none, and for plans committed before signed commands). Ratification signatures are on `Ratified`, not in the journal's record.
+- Signed commands are enforced at the HTTP boundary, the only surface people use to approve; `cell.ops.commit` called in-process (tests, tooling) does not require one, and `ops verify-signatures` lists period operations committed without a signature. Drafts and ratifications use the tenant's SoD limit only (not policy limits). WebAuthn authenticators do not display the summary; the web tier shows it before asking the passkey.
 - `kuber.tenant` is still set by the application for each request, so tenant scoping relies on the core choosing the right tenant; the database stops any role but `kuber_system` from seeing more than one.
 - Book state is cached in memory and caught up from the store; persistent snapshots (`es.snapshots`) are the next step for very large books.
 - JetStream consumers use `max_ack_pending = 1` for ordering; scale-out needs partitioned subjects (for example by tenant hash) per consumer.
@@ -349,6 +359,6 @@ Tests are in `tests/fin-gl.test.ts`, named by requirement.
 - Plans are computed from the book state at one version and refused if it moves; a posting between the commit check and the last action of a multi-step plan (for example a year-end close) is narrowed by soft-locking first, not eliminated.
 - `carry_forward` verifies and signs off; the ledger is continuous, so balances are not re-posted and pending drafts dated in a closed year must be decided before the close.
 - The rules router covers common phrasings only; open-ended requests need the model.
-- Passkeys, command signing, Temporal timers, ClickHouse cube and Centrifugo live updates arrive in phase 1.
+- Temporal timers, ClickHouse cube and Centrifugo live updates arrive in phase 1.
 - Foreign currency (FIN-GL-04) is deferred: books are INR only and other currencies are refused.
 - Schedules are monthly only; `ops run-schedules` must be run by an external timer (cron) until Temporal timers arrive. A schedule exception can be dismissed but not retried; a cancelled schedule's unreleased balance stays on its account.

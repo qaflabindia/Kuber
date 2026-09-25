@@ -80,7 +80,7 @@ describe("evidence record", () => {
       const r = e.record;
       for (const part of [r.source, r.decision, r.execution, r.result, r.approval]) expect(Object.keys(part).length).toBeGreaterThan(0);
       expect(Array.isArray(r.exceptions)).toBe(true);
-      expect(e.verified).toEqual({ recordHash: true, citations: true });
+      expect(e.verified).toEqual({ recordHash: true, citations: true, signature: null });
       expect(r.cites.length).toBeGreaterThan(0);
     }
   });

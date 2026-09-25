@@ -84,10 +84,11 @@ export const api = (s: Pick<Session, "tenant" | "principal" | "sid"> & { stepUpA
   journals: (book: string, limit = 20) => call<Journal[]>(s, "GET", `/books/${book}/journals?limit=${limit}`),
   // A book-scoped member lists the drafts of one book (the core refuses a tenant-wide list for them).
   drafts: (book?: string) => call<Draft[]>(s, "GET", book ? `/drafts?book=${encodeURIComponent(book)}` : "/drafts"),
-  approve: (id: string, accountId?: string) => call(s, "POST", `/drafts/${id}/approve`, accountId ? { accountId } : {}),
+  /** `assertion`: the passkey signature over this approval, when it is above the approval limit (signed commands). */
+  approve: (id: string, accountId?: string, assertion?: unknown) => call(s, "POST", `/drafts/${id}/approve`, { ...(accountId ? { accountId } : {}), ...(assertion ? { assertion } : {}) }),
   reject: (id: string, reason: string) => call(s, "POST", `/drafts/${id}/reject`, { reason }),
   ratifications: () => call<Ratification[]>(s, "GET", "/ratifications"),
-  ratify: (journalId: string) => call(s, "POST", `/journals/${journalId}/ratify`, {}),
+  ratify: (journalId: string, assertion?: unknown) => call(s, "POST", `/journals/${journalId}/ratify`, assertion ? { assertion } : {}),
   correct: (journalId: string, toAccount: string, learn: boolean) => call(s, "POST", `/journals/${journalId}/correct`, { toAccount, learn }),
   chat: (book: string, text: string) => call<{ accepted: number; duplicate: boolean }>(s, "POST", `/books/${book}/chat`, { text }),
   statement: (book: string, csv: string, instrument: string) =>
@@ -102,7 +103,9 @@ export const api = (s: Pick<Session, "tenant" | "principal" | "sid"> & { stepUpA
   plan: (book: string, op: string, input: unknown = {}) => call<Plan>(s, "POST", `/books/${book}/ops/${op}`, input),
   plans: (book: string) => call<Plan[]>(s, "GET", `/books/${book}/plans`),
   attention: (book: string) => call<{ drafts: number; awaitingApproval: number; ratifications: number; plans: number }>(s, "GET", `/books/${book}/attention`),
-  commit: (id: string, hash: string) => call<{ planId: string; status: string; steps?: string[]; message?: string }>(s, "POST", `/plans/${id}/commit`, { hash }),
+  /** `assertion`: the passkey signature over this plan (step-up-class plans; see signing options). */
+  commit: (id: string, hash: string, assertion?: unknown) =>
+    call<{ planId: string; status: string; steps?: string[]; message?: string }>(s, "POST", `/plans/${id}/commit`, { hash, ...(assertion ? { assertion } : {}) }),
   discard: (id: string) => call(s, "POST", `/plans/${id}/discard`, {}),
   verify: (book: string) => call<{ intact: boolean; firstBrokenJournal: string | null }>(s, "GET", `/books/${book}/verify`),
 });
@@ -128,13 +131,36 @@ export const identity = (tenant: string, sid: string | null = null) => {
 };
 
 // ---------------------------------------------------------------- member management and step-up
-export interface Me extends Member { permissions: string[] }
+export interface Me extends Member {
+  permissions: string[];
+  /** Active passkeys, and warnings such as an owner or controller with only one (design 16.4). */
+  passkeys: number; requireTwoAuthenticators: boolean; warnings: { code: string; message: string }[];
+}
 export interface Credential { credentialId: string; principal: string; transports: string[]; createdAt: string; lastUsedAt: string | null; revokedAt: string | null }
 export interface Invitation { token: string; principal: string; role: string; books: string[] | null; expiresAt: string }
-export interface Separation { soloOwner: boolean; sodLimitPaise: string | null }
+export interface Separation { soloOwner: boolean; sodLimitPaise: string | null; requireTwoAuthenticators?: boolean }
 
-/** Signed-in calls for the members page and passkey step-up; the core authorizes each one. */
-export const members = (s: Pick<Session, "tenant" | "principal" | "sid">) => {
+// ---------------------------------------------------------------- signed commands (design 14.4, 16.4)
+export type SignedAction = "plan.commit" | "plan.approve" | "draft.approve" | "journal.ratify" | "period.lock";
+/** The command to sign, as the browser names it; the core derives everything else from the command itself. */
+export type SigningRequest =
+  | { action: "plan.commit" | "plan.approve"; planId: string; hash: string }
+  | { action: "draft.approve"; draftId: string; accountId?: string }
+  | { action: "journal.ratify"; journalId: string }
+  | { action: "period.lock"; book: string; periodEnd: string; level: "soft" | "hard" };
+/** What the person is shown before their passkey signs: rendered by the core from the command. Amounts are paise. */
+export interface CommandSummary {
+  action: SignedAction; title: string; book: string; amountPaise: string | null;
+  payees: { partyId: string; name: string | null }[];
+  accounts: { accountId: string; name: string; debitPaise: string; creditPaise: string }[];
+  periods: { periodEnd: string; level: string }[];
+  lines: string[];
+}
+export type SigningOptions = { required: false; reason: string | null }
+  | { required: true; reason: string | null; digest: string; expiresAt: string; summary: CommandSummary; options: CeremonyOptions };
+
+/** Signed-in calls for the members page and passkey step-up; the core authorizes each one. `stepUpAt`: see stepup.ts. */
+export const members = (s: Pick<Session, "tenant" | "principal" | "sid"> & { stepUpAt?: number }) => {
   const m = (p: string) => `/members/${encodeURIComponent(p)}`;
   return {
     me: () => call<Me>(s, "GET", "/me"),
@@ -148,5 +174,10 @@ export const members = (s: Pick<Session, "tenant" | "principal" | "sid">) => {
     setSeparation: (v: Separation) => call<Separation>(s, "PUT", "/settings/separation", v),
     stepUpOptions: () => call<CeremonyOptions>(s, "POST", "/identity/stepup/options", {}),
     stepUp: (body: { response: unknown } | { dev: true }) => call<{ principal: string; at: number }>(s, "POST", "/identity/stepup/verify", body),
+    /** Signed commands, step 1: WebAuthn options whose challenge is the command digest, and the summary to show. */
+    signingOptions: (body: SigningRequest) => call<SigningOptions>(s, "POST", "/signing/options", body),
+    /** Another passkey for the signed-in member (needs a fresh step-up when they already have one). */
+    addPasskeyOptions: () => call<CeremonyOptions>(s, "POST", "/identity/passkeys/options", {}),
+    addPasskey: (response: unknown) => call<Credential>(s, "POST", "/identity/passkeys/verify", { response }),
   };
 };

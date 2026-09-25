@@ -289,6 +289,16 @@ export class OpsAdmin {
     return out;
   }
 
+  /**
+   * Design 14.4/16.4: re-verify every stored command signature offline (against the stored public
+   * key and the event's own command digest), per tenant. `ok` is false on any failed signature.
+   */
+  async verifySignatures(tenant?: string) {
+    const out = [];
+    for (const t of tenant ? [tenant] : await this.tenants()) out.push(await this.cell.identity.verifySignatures(t));
+    return { ok: out.every((r) => r.failures.length === 0), tenants: out };
+  }
+
   /** FIN-OPS-01: compare a restored database with its source (owner URLs); see fin-ops.ts. */
   static compareCells(sourceUrl: string, restoredUrl: string) { return compareCells(sourceUrl, restoredUrl); }
 }

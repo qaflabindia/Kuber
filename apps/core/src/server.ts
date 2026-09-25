@@ -17,8 +17,10 @@
  */
 import { Readable } from "node:stream";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
-import { AUTH_HEADER, AuthError, ReplayCache, ReplayStoreUnavailable, STEP_UP_MAX_AGE_MS, authKey, stepUpFresh, verifyRequestAsync, type Claims, type ReplayStore } from "@kuber/auth";
-import { ACTIONS, AccessDenied, IdentityError, ROLES, can, inScope, type Action, type Member } from "@kuber/identity";
+import { AUTH_HEADER, AuthError, ReplayCache, ReplayStoreUnavailable, authKey, verifyRequestAsync, type Claims, type ReplayStore } from "@kuber/auth";
+import { ACTIONS, AccessDenied, IdentityError, ROLES, can, inScope, type Action, type Member, type SigningIntent } from "@kuber/identity";
+import type { CommandSignature, SignedAction } from "@kuber/contracts";
+import type { TransactionSql } from "postgres";
 import { z, ZodError } from "zod";
 import { Account, BankDetails, BookPurpose, Id, IsoDate, JOURNAL_STATES, PartyKind, PartyTerms, Principal, TaxStatus, parseAmount, uuid, type Line } from "@kuber/contracts";
 import { CommandConflict, ConcurrencyError, GuardDenied } from "@kuber/eventstore";
@@ -32,6 +34,7 @@ import { Copilot } from "./copilot/index.ts";
 import { HELP } from "./copilot/router.ts";
 import { registerMcp } from "./mcp.ts";
 import { registerFinRoutes } from "./fin-routes.ts";
+import { SigningRequest, actionLabel, amountReason, draftIntent, lockIntent, planIntent, ratifyIntent } from "./signing.ts";
 import type { Who } from "./tools.ts";
 
 export interface ServerOptions {
@@ -112,6 +115,24 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     const member = await cell.identity.authorize(c.tenant, principal, action, { ...scope, ...(book !== undefined ? { book } : {}) });
     return { tenant: c.tenant, principal, member };
   };
+
+  // ---------------------------------------------------------------- signed commands (design 14.4, 16.4)
+  /**
+   * How a high-risk command is confirmed. With `assertion` (the device's passkey signature over the
+   * command digest, from POST …/signing/options): a verifier the command runs in its own
+   * transaction, which consumes the signing request and returns what the command's event stores.
+   * Without one: only the DEVELOPMENT SIGN-IN fallback (a member with no passkey and a fresh `su`
+   * claim, dev sign-in enabled), recorded as "dev-step-up", not a signature. Otherwise null: refuse.
+   */
+  type Attest = (tx: TransactionSql) => Promise<CommandSignature>;
+  const attestFor = async (req: FastifyRequest, tenant: string, principal: string, assertion: unknown, intent: () => Promise<SigningIntent>): Promise<Attest | null> => {
+    if (assertion) return cell.identity.signedCommand(tenant, principal, await intent(), assertion as never);
+    const dev = await cell.identity.devAttestation(tenant, principal, claimsOf.get(req)?.su);
+    return dev ? async () => dev : null;
+  };
+  const signatureRequired = (reply: FastifyReply, action: SignedAction, reason: string) => reply.code(403).send({ error: "step_up_required", reason, signing: { action },
+    message: `Sign with your passkey to ${actionLabel[action]} (${reason}): Kuber shows exactly what you are signing first.` });
+  const Assertion = z.record(z.string(), z.unknown()).optional();
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof AuthError) return reply.code(401).send({ error: err.code, message: err.message });
@@ -276,11 +297,18 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
       lines: [{ accountId: b.accountId, amount: signed.toString(), dimensions: {} }, { accountId: "OPENING", amount: (-signed).toString(), dimensions: {} }] });
   });
 
+  // A direct period lock is a signed command (design 16.4); the signature is stored on PeriodLocked.
   app.post<P>("/v1/tenants/:tenant/books/:book/locks", async (req, reply) => {
     const { tenant, principal } = await who(req, "period.lock");
-    const b = z.object({ periodEnd: IsoDate, level: z.enum(["soft", "hard"]) }).parse(req.body);
-    await cell.gl.execute(tenant, req.params.book, { kind: "LockPeriod", ...b }, { principal });
-    return reply.code(201).send({ locked: b });
+    const b = z.object({ periodEnd: IsoDate, level: z.enum(["soft", "hard"]), assertion: Assertion }).parse(req.body);
+    const book = req.params.book;
+    const attest = await attestFor(req, tenant, principal, b.assertion, async () => lockIntent(book, b.periodEnd, b.level));
+    if (!attest) return signatureRequired(reply, "period.lock", "locking a period");
+    await cell.gl.transact(tenant, book, async (bk) => {
+      const signature = await attest(bk.tx);
+      await bk.execute({ kind: "LockPeriod", periodEnd: b.periodEnd, level: b.level, signature }, { principal });
+    });
+    return reply.code(201).send({ locked: { periodEnd: b.periodEnd, level: b.level } });
   });
 
   app.post<P>("/v1/tenants/:tenant/books/:book/statements", async (req, reply) => {
@@ -338,8 +366,16 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   app.post<T>("/v1/tenants/:tenant/drafts/:id/approve", async (req, reply) => {
     const { tenant, principal, member } = await who(req, "draft.decide");
     await draftInScope(tenant, member, req.params.id);
-    const b = z.object({ accountId: z.string().optional() }).parse(req.body ?? {});
-    return reply.code(202).send(await cell.agent.approveDraft(tenant, req.params.id, principal, b.accountId));
+    const b = z.object({ accountId: z.string().optional(), assertion: Assertion }).parse(req.body ?? {});
+    // Above the approval limit, approving a draft is a signed command (design 16.4).
+    const intent = await draftIntent(cell, tenant, req.params.id, b.accountId);
+    const reason = await amountReason(cell, tenant, intent.amount);
+    let attest: Attest | null = null;
+    if (reason) {
+      attest = await attestFor(req, tenant, principal, b.assertion, async () => intent);
+      if (!attest) return signatureRequired(reply, "draft.approve", reason);
+    }
+    return reply.code(202).send(await cell.agent.approveDraft(tenant, req.params.id, principal, b.accountId, undefined, undefined, attest ? { attest } : {}));
   });
   app.post<T>("/v1/tenants/:tenant/drafts/:id/reject", async (req, reply) => {
     const { tenant, principal, member } = await who(req, "draft.decide");
@@ -390,7 +426,19 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   });
   app.post<T>("/v1/tenants/:tenant/journals/:id/ratify", async (req, reply) => {
     const { tenant, principal } = await who(req, "journal.ratify", { allBooks: true });
-    await cell.agent.ratify(tenant, req.params.id, principal);
+    const b = z.object({ assertion: Assertion }).parse(req.body ?? {});
+    // Above the approval limit, confirming an automatic posting is a signed command (design 16.4).
+    const intent = await ratifyIntent(cell, tenant, req.params.id);
+    // Fail closed: with a limit set, a posting whose amount cannot be read yet (not projected) is not ratified unsigned.
+    if (!intent && (await cell.identity.settings(tenant)).sodLimitPaise !== null && (await cell.agent.openRatifications(tenant)).some((r) => r.journal_id === req.params.id))
+      return reply.code(409).send({ error: "not_ready", message: "This posting is still being recorded; try again in a moment." });
+    const reason = intent ? await amountReason(cell, tenant, intent.amount) : null;
+    let attest: Attest | null = null;
+    if (reason) {
+      attest = await attestFor(req, tenant, principal, b.assertion, async () => intent!);
+      if (!attest) return signatureRequired(reply, "journal.ratify", reason);
+    }
+    await cell.agent.ratify(tenant, req.params.id, principal, attest ? { attest } : {});
     return reply.code(204).send();
   });
   app.post<T>("/v1/tenants/:tenant/journals/:id/correct", async (req, reply) => {
@@ -497,9 +545,10 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     return reply.code(204).send();
   });
   // The member and what their role allows, so surfaces show only what the core would accept.
+  // `passkeys` and `warnings`: an owner or controller with a single passkey is told to register a second (design 16.4).
   app.get<P>("/v1/tenants/:tenant/me", async (req) => {
-    const { member } = await who(req, "read");
-    return { ...member, permissions: ACTIONS.filter((a) => can(member.role, a)) };
+    const { tenant, principal, member } = await who(req, "read");
+    return { ...member, permissions: ACTIONS.filter((a) => can(member.role, a)), ...(await cell.identity.passkeyStatus(tenant, principal)) };
   });
   app.get<P>("/v1/tenants/:tenant/members", async (req) => { const { tenant } = await who(req, "members.read", { allBooks: true }); return cell.identity.members(tenant); });
   app.post<P>("/v1/tenants/:tenant/members/invitations", async (req, reply) => {
@@ -534,11 +583,62 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     const b = z.union([z.object({ response: Json }), z.object({ dev: z.literal(true) })]).parse(req.body);
     return "dev" in b ? cell.identity.devStepUp(tenant, principal) : cell.identity.stepUp(tenant, principal, { response: b.response as never });
   });
+  // Another passkey for the signed-in member (design 16.4: owners and controllers keep two). A member
+  // who has a passkey confirms with it first (step-up, claim `su`).
+  app.post<P>("/v1/tenants/:tenant/identity/passkeys/options", async (req) => {
+    const { tenant, principal } = await who(req, "read");
+    return cell.identity.addPasskeyOptions(tenant, principal);
+  });
+  app.post<P>("/v1/tenants/:tenant/identity/passkeys/verify", async (req, reply) => {
+    const { tenant, principal } = await who(req, "read");
+    const b = z.object({ response: Json }).parse(req.body);
+    return reply.code(201).send(await cell.identity.addPasskey(tenant, principal, { response: b.response as never, stepUpAt: claimsOf.get(req)?.su }));
+  });
   app.get<P>("/v1/tenants/:tenant/settings/separation", async (req) => cell.identity.settings((await who(req, "read")).tenant));
   app.put<P>("/v1/tenants/:tenant/settings/separation", async (req) => {
     const { tenant, principal } = await who(req, "settings.manage", { allBooks: true });
-    const b = z.object({ soloOwner: z.boolean(), sodLimitPaise: z.string().regex(/^\d+$/).nullable() }).parse(req.body);
+    const b = z.object({ soloOwner: z.boolean(), sodLimitPaise: z.string().regex(/^\d+$/).nullable(), requireTwoAuthenticators: z.boolean().optional() }).parse(req.body);
     return cell.identity.setSettings(tenant, principal, b);
+  });
+
+  /**
+   * Signing a high-risk command, step 1 (design 14.4/16.4): the person asks to sign one command. The
+   * core checks they may carry it out at all, renders the summary from the command itself, and
+   * answers with WebAuthn options whose challenge is the command digest, the digest inputs and the
+   * summary to show before the passkey prompt. `required: false` when this command needs no signature.
+   */
+  app.post<P>("/v1/tenants/:tenant/signing/options", async (req) => {
+    const r = SigningRequest.parse(req.body);
+    let tenant: string, principal: string, intent: SigningIntent | null, reason: string | null;
+    if (r.action === "plan.commit" || r.action === "plan.approve") {
+      ({ tenant, principal } = await who(req, "read"));
+      const plan = await cell.ops.get(tenant, r.planId);
+      if (plan.status !== "proposed" || plan.kind !== "write") return { required: false, reason: null };
+      const approvedBy = r.action === "plan.commit" ? await cell.ops.activeApprover(tenant, plan.planId, r.hash, principal) : null;
+      if (approvedBy) return { required: false, reason: `carries out the approval by ${approvedBy}` };
+      await cell.identity.check({ step: r.action === "plan.commit" ? "commit" : "approve", tenant, book: plan.bookId, principal, op: { name: plan.op, kind: plan.kind, gate: plan.gate }, plan });
+      reason = await cell.identity.stepUpReason(tenant, plan);
+      intent = reason ? await planIntent(cell, tenant, r.planId, r.hash, r.action) : null;
+    } else if (r.action === "draft.approve") {
+      let member: Member;
+      ({ tenant, principal, member } = await who(req, "draft.decide"));
+      await draftInScope(tenant, member, r.draftId);
+      const d = await draftIntent(cell, tenant, r.draftId, r.accountId);
+      reason = await amountReason(cell, tenant, d.amount);
+      intent = reason ? d : null;
+    } else if (r.action === "journal.ratify") {
+      ({ tenant, principal } = await who(req, "journal.ratify", { allBooks: true }));
+      const d = await ratifyIntent(cell, tenant, r.journalId);
+      reason = d ? await amountReason(cell, tenant, d.amount) : null;
+      intent = reason ? d : null;
+    } else {
+      ({ tenant, principal } = await who(req, "period.lock", { book: r.book }));
+      reason = "locking a period";
+      intent = lockIntent(r.book, r.periodEnd, r.level);
+    }
+    if (!intent) return { required: false, reason: null };
+    const { amount: _amount, ...pure } = intent as SigningIntent & { amount?: bigint };
+    return { required: true, reason, ...(await cell.identity.signingOptions(tenant, principal, pure)) };
   });
 
   // ------------------------------------------------------------ operations: simulate, then commit
@@ -562,22 +662,25 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   });
   app.post<T>("/v1/tenants/:tenant/plans/:id/commit", async (req, reply) => {
     const { tenant, principal } = await who(req, "read");          // role, book and maker-checker: ops guard
-    const b = z.object({ hash: z.string().length(64) }).parse(req.body);
-    // Period operations and amounts above the approval limit need a fresh passkey step-up. The
-    // guard runs first, so nobody is asked for a passkey for a plan they could not approve anyway.
+    const b = z.object({ hash: z.string().length(64), assertion: Assertion }).parse(req.body);
+    // Period operations and amounts above the approval limit are signed commands (design 14.4/16.4):
+    // the committer's passkey signs this exact plan, and the signature is verified and stored with
+    // PlanApproved in the commit's transaction. The guard runs first, so nobody is asked to sign a
+    // plan they could not approve anyway.
     const plan = await cell.ops.get(tenant, req.params.id);
-    // FIN-MDM-04: carrying out someone else's recorded approval needs no step-up from the executor:
-    // the approver confirmed with their passkey when approving (POST …/approve), and ops.commit re-checks them.
+    // FIN-MDM-04: carrying out someone else's recorded approval needs no signature from the executor:
+    // the approver signed when approving (POST …/approve), and ops.commit re-checks their authority.
     const approvedBy = plan.status === "proposed" && !principal.startsWith("agent:") ? await cell.ops.activeApprover(tenant, plan.planId, b.hash, principal) : null;
+    let attest: Attest | null = null;
     if (plan.status === "proposed" && plan.kind === "write" && !principal.startsWith("agent:") && !approvedBy) {
       await cell.identity.check({ step: "commit", tenant, book: plan.bookId, principal, op: { name: plan.op, kind: plan.kind, gate: plan.gate }, plan });
       const reason = await cell.identity.stepUpReason(tenant, plan);
-      if (reason && !stepUpFresh(claimsOf.get(req)!)) {
-        return reply.code(403).send({ error: "step_up_required", reason,
-          message: `Confirm with your passkey to approve this (${reason}); a confirmation lasts ${STEP_UP_MAX_AGE_MS / 60_000} minutes.` });
+      if (reason) {
+        attest = await attestFor(req, tenant, principal, b.assertion, () => planIntent(cell, tenant, req.params.id, b.hash, "plan.commit"));
+        if (!attest) return signatureRequired(reply, "plan.commit", reason);
       }
     }
-    const r = await cell.ops.commit(tenant, req.params.id, principal, b.hash);
+    const r = await cell.ops.commit(tenant, req.params.id, principal, b.hash, attest ? { attest } : {});
     return reply.code(r.status === "committed" ? 200 : 202).send(r);
   });
   app.post<T>("/v1/tenants/:tenant/plans/:id/discard", async (req) => { const { tenant, principal } = await who(req, "read"); return cell.ops.discard(tenant, req.params.id, principal); });
@@ -661,7 +764,7 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   });
 
   // ------------------------------------------------------------ finance controls (FIN-MDM-04/05, FIN-OPS-02/03)
-  registerFinRoutes(app, cell, who, (req) => { const c = claimsOf.get(req); return !!c && stepUpFresh(c); });
+  registerFinRoutes(app, cell, who, attestFor, signatureRequired, Assertion);
 
   return app;
 }

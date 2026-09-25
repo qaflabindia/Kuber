@@ -19,7 +19,7 @@
  * module): membership, role, book scope and separation of duties. Without a guard, nothing passes.
  */
 import type { Sql, TransactionSql } from "postgres";
-import { canonical, planLifecycle, sha256, uuid, type EventData, type Line } from "@kuber/contracts";
+import { canonical, planLifecycle, sha256, uuid, type CommandSignature, type CommandSummary, type EventData, type Line } from "@kuber/contracts";
 import { tenantRlsFor, type EventStore, type Migration } from "@kuber/eventstore";
 import { DomainError, type BookState } from "@kuber/gl";
 import { AgentError } from "@kuber/agent";
@@ -67,6 +67,9 @@ CREATE INDEX plans_open ON ops.plans (tenant_id, book_id, created_at DESC) WHERE
 export class OpsError extends Error {
   constructor(public code: string, message: string, public status = 409) { super(message); }
 }
+
+/** Wraps an error from a commit's `attest` so the commit passes it through unchanged. */
+class AttestRefused extends Error { constructor(readonly inner: unknown) { super("signature refused"); } }
 
 const RANK: Record<string, number> = { L0: 0, L1: 1, L2: 2, L3: 3, L4: 4 };
 export const isAgent = (principal: string) => /^(agent|system):/.test(principal);
@@ -209,7 +212,13 @@ export class Operations {
    * that is already committed, with the same hash, returns its recorded outcome (a lost response
    * can be retried safely).
    */
-  async commit(tenant: string, planId: string, principal: string, hash: string) {
+  /**
+   * `opts.attest` (signed commands, design 14.4/16.4): run inside the commit transaction, after the
+   * plan is claimed and fenced and before anything is recorded; it verifies the committer's
+   * signature over this exact plan (and consumes its single-use nonce) and returns it, and the
+   * signature is stored in the PlanApproved event. If the commit fails, neither happens.
+   */
+  async commit(tenant: string, planId: string, principal: string, hash: string, opts: { attest?: (tx: TransactionSql) => Promise<CommandSignature> } = {}) {
     const [stored] = await this.store.tenantTx(tenant, (tx) => tx<{ plan: unknown; actions: unknown; status: string; hash: string; basis_seq: number; basis_version: number | null; book_id: string; result: { done?: string[] } | null }[]>`
       SELECT plan, actions, status, hash, basis_seq, basis_version, book_id, result FROM ops.plans WHERE tenant_id = ${tenant} AND plan_id = ${planId}`);
     if (!stored) throw new OpsError("no_plan", `no plan ${planId}`, 404);
@@ -261,6 +270,8 @@ export class Operations {
             AND hash = ${row.hash} AND status = 'active' FOR UPDATE`;
           if (!a) throw new OpsError("approval_invalidated", `the approval by ${approvedBy} no longer stands; the plan needs approval again`);
         }
+        // A refused signature is the caller's answer as it is, not a failed commit (nothing is recorded on the plan).
+        const signature = opts.attest ? await opts.attest(b.tx).catch((e: unknown) => { throw new AttestRefused(e); }) : undefined;
         await b.tx`UPDATE ops.plans SET status = 'committed', resolved_by = ${principal}, resolved_at = now()
           WHERE tenant_id = ${tenant} AND plan_id = ${planId}`;
         await b.tx`UPDATE ops.plan_approvals SET status = 'used' WHERE tenant_id = ${tenant} AND plan_id = ${planId} AND status = 'active'`;
@@ -269,7 +280,7 @@ export class Operations {
         await this.store.append("ops", tenant, { streamId: `${tenant}/plan/${planId}`, expected: "any", events: [{ type: "PlanApproved", data: {
           planId, bookId: row.book_id, op: p.op, hash: row.hash, basisSeq: row.basis_seq, ...(row.basis_version !== null ? { basisVersion: row.basis_version } : {}),
           gate: p.gate, needsPerson: p.needsPerson, actions: row.actions.length, preparedBy: p.createdBy, policy: p.policy as EventData<"PlanApproved">["policy"],
-          ...(approvedBy ? { approvedBy } : {}) } }] },
+          ...(approvedBy ? { approvedBy } : {}), ...(signature ? { signature } : {}) } }] },
           { principal, commandId: planId, policyIds: p.policy?.ids }, b.tx);
         const steps: string[] = [];
         for (const a of row.actions) {
@@ -299,6 +310,7 @@ export class Operations {
         return { steps };
       });
     } catch (e) {
+      if (e instanceof AttestRefused) throw e.inner;
       if (e instanceof OpsError && e.code === "stale") {
         await this.store.tenantTx(tenant, (tx) => tx`UPDATE ops.plans SET status = 'stale' WHERE tenant_id = ${tenant} AND plan_id = ${planId} AND status = 'proposed'`);
         throw e;
@@ -322,7 +334,7 @@ export class Operations {
    * approver's authority is checked again at that moment, and an authority change in between
    * invalidates the approval.
    */
-  async approve(tenant: string, planId: string, principal: string, hash: string) {
+  async approve(tenant: string, planId: string, principal: string, hash: string, opts: { attest?: (tx: TransactionSql) => Promise<CommandSignature> } = {}) {
     const [stored] = await this.store.tenantTx(tenant, (tx) => tx<{ plan: unknown; actions: unknown; status: string; hash: string; book_id: string }[]>`
       SELECT plan, actions, status, hash, book_id FROM ops.plans WHERE tenant_id = ${tenant} AND plan_id = ${planId}`);
     if (!stored) throw new OpsError("no_plan", `no plan ${planId}`, 404);
@@ -334,13 +346,30 @@ export class Operations {
     await this.store.tenantTx(tenant, async (tx) => {
       const [cur] = await tx<{ status: string }[]>`SELECT status FROM ops.plans WHERE tenant_id = ${tenant} AND plan_id = ${planId} FOR UPDATE`;
       if (cur!.status !== "proposed") throw new OpsError("not_open", `plan is ${cur!.status}`);
+      const signature = opts.attest ? await opts.attest(tx) : undefined;
       await tx`INSERT INTO ops.plan_approvals (tenant_id, plan_id, approver, book_id, hash) VALUES (${tenant}, ${planId}, ${principal}, ${stored.book_id}, ${hash})
         ON CONFLICT (tenant_id, plan_id, approver) DO UPDATE SET hash = EXCLUDED.hash, status = 'active', approved_at = now(), invalidated_at = NULL, invalidated_reason = NULL`;
       const amount = plan.journals.reduce((m, j) => { const d = j.lines.reduce((a, l) => (BigInt(l.amount) > 0n ? a + BigInt(l.amount) : a), 0n); return d > m ? d : m; }, 0n);
       await this.store.append("ops", tenant, { streamId: `${tenant}/plan/${planId}`, expected: "any", events: [{ type: "PlanApprovalRecorded",
-        data: { planId, bookId: stored.book_id, hash, preparedBy: plan.requestedBy ?? plan.createdBy, amountPaise: amount.toString() } }] }, { principal, commandId: planId }, tx);
+        data: { planId, bookId: stored.book_id, hash, preparedBy: plan.requestedBy ?? plan.createdBy, amountPaise: amount.toString(),
+          ...(signature ? { signature } : {}) } }] }, { principal, commandId: planId }, tx);
     });
     return { planId, status: "approved" as const, approvedBy: principal, hash };
+  }
+
+  /**
+   * What a person signing this plan is shown (design 16.4), rendered from the stored plan and its
+   * actions, not from anything the client sent: the largest amount, who is paid (party ids; the
+   * caller adds names), every account a journal touches with its debits and credits, periods locked.
+   * `action` is plan.commit or plan.approve.
+   */
+  async commandSummary(tenant: string, planId: string, action: "plan.commit" | "plan.approve"): Promise<CommandSummary> {
+    const [stored] = await this.store.tenantTx(tenant, (tx) => tx<{ plan: unknown; actions: unknown }[]>`
+      SELECT plan, actions FROM ops.plans WHERE tenant_id = ${tenant} AND plan_id = ${planId}`);
+    if (!stored) throw new OpsError("no_plan", `no plan ${planId}`, 404);
+    const keys = await this.store.keys(tenant);
+    const plan = open<Plan>(keys, planId, "plan", stored.plan), actions = open<Action[]>(keys, planId, "actions", stored.actions);
+    return summarizePlan(plan, actions, action);
   }
 
   /** Approvals recorded for a plan (active, used or invalidated with the reason). */
@@ -412,6 +441,38 @@ export function planParties(plan: Pick<Plan, "data">, actions: Action[]): string
   const drafts = (plan.data as { journalsFromDrafts?: { lines: Line[] }[] } | undefined)?.journalsFromDrafts ?? [];
   for (const j of drafts) for (const l of j.lines) if (l.partyId) out.add(l.partyId);
   return [...out].sort();
+}
+
+// ---------------------------------------------------------------- signing summary (design 16.4)
+const rupees = (p: bigint) => { const n = p < 0n ? -p : p; return `₹${(n / 100n).toLocaleString("en-IN")}${n % 100n ? "." + String(n % 100n).padStart(2, "0") : ""}`; };
+/** Deterministic: the same plan and actions always give the same summary (its hash is part of the signed digest). */
+export function summarizePlan(plan: Plan, actions: Action[], action: "plan.commit" | "plan.approve"): CommandSummary {
+  const accounts = new Map<string, { accountId: string; name: string; debit: bigint; credit: bigint }>();
+  let amount = 0n;
+  for (const j of plan.journals) {
+    let dr = 0n;
+    for (const l of j.lines) {
+      const a = accounts.get(l.accountId) ?? { accountId: l.accountId, name: l.name, debit: 0n, credit: 0n };
+      const v = BigInt(l.amount);
+      if (v > 0n) { a.debit += v; dr += v; } else a.credit -= v;
+      accounts.set(l.accountId, a);
+    }
+    if (dr > amount) amount = dr;
+  }
+  const approved = (plan.data as { approvedAmount?: string } | undefined)?.approvedAmount;
+  if (approved && /^\d+$/.test(approved) && BigInt(approved) > amount) amount = BigInt(approved);
+  const payees = planParties(plan, actions).map((partyId) => ({ partyId, name: null as string | null }));
+  const periods = actions.flatMap((a) => (a.type === "gl" && a.command.kind === "LockPeriod" ? [{ periodEnd: a.command.periodEnd, level: a.command.level }] : []));
+  const rows = [...accounts.values()].sort((a, b) => a.accountId.localeCompare(b.accountId));
+  const lines = [
+    `${action === "plan.approve" ? "Approve" : "Approve and carry out"}: ${plan.title}`,
+    `Book ${plan.bookId}`,
+    ...(amount > 0n ? [`Amount ${rupees(amount)}`] : []),
+    ...rows.map((a) => `${a.name} (${a.accountId}): ${a.debit ? `debit ${rupees(a.debit)}` : ""}${a.debit && a.credit ? ", " : ""}${a.credit ? `credit ${rupees(a.credit)}` : ""}`),
+    ...periods.map((p) => `Lock (${p.level}) everything up to ${p.periodEnd}`),
+  ];
+  return { action, title: plan.title, book: plan.bookId, amountPaise: amount > 0n ? amount.toString() : null, payees,
+    accounts: rows.map((a) => ({ accountId: a.accountId, name: a.name, debitPaise: a.debit.toString(), creditPaise: a.credit.toString() })), periods, lines };
 }
 
 // ---------------------------------------------------------------- derived views of a plan

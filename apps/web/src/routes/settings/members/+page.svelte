@@ -1,5 +1,8 @@
 <script lang="ts">
   import { enhance } from "$app/forms";
+  import { invalidateAll } from "$app/navigation";
+  import { browserSupportsWebAuthn, startRegistration } from "@simplewebauthn/browser";
+  import { confirmWithPasskey } from "$lib/stepup";
   import { date } from "$lib/format";
   import Icon from "$lib/components/Icon.svelte";
 
@@ -45,6 +48,27 @@
   async function copy(code: string) {
     try { await navigator.clipboard.writeText(code); copied = true; setTimeout(() => (copied = false), 2500); } catch { copied = false; }
   }
+  /** Owners and controllers keep two authenticators (design 16.4): one passkey is a warning. */
+  const needsSecond = (m: { role: string; credentials: unknown[] }) => (m.role === "owner" || m.role === "controller") && m.credentials.length === 1;
+  let adding = $state(false), addMsg = $state<{ text: string; ok: boolean } | null>(null);
+  /** Register another passkey for yourself: confirm with a current one first (if you have one), then create the new one. */
+  async function addPasskey() {
+    adding = true; addMsg = null;
+    try {
+      if (!browserSupportsWebAuthn()) throw new Error("This browser does not support passkeys.");
+      if (data.me.passkeys > 0) { const problem = await confirmWithPasskey(); if (problem) throw new Error(problem); }
+      const o = await fetch("/signin/passkey/add/options", { method: "POST" });
+      if (!o.ok) throw new Error(((await o.json().catch(() => null)) as { message?: string } | null)?.message ?? "Could not start registering a passkey.");
+      const { options } = await o.json();
+      const response = await startRegistration({ optionsJSON: options });
+      const v = await fetch("/signin/passkey/add/verify", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ response }) });
+      if (!v.ok) throw new Error(((await v.json().catch(() => null)) as { message?: string } | null)?.message ?? "That passkey was not accepted.");
+      addMsg = { text: "Passkey added. You can now sign with either one.", ok: true };
+      await invalidateAll();
+    } catch (e) {
+      addMsg = { text: e instanceof Error && e.name === "NotAllowedError" ? "Cancelled: no passkey was added." : e instanceof Error ? e.message : "Could not add a passkey.", ok: false };
+    } finally { adding = false; }
+  }
   const scopeText = (books: string[] | null) => (books === null ? "Every book" : books.join(", "));
   type Result = { action?: string; principal?: string; message?: string; ok?: boolean };
   /** The last action's message, when it was about this form (and member). */
@@ -61,6 +85,11 @@
   <h1>Members and access</h1>
   <p class="muted">Who can see and change these books, over which books, and how they sign in. Every change is checked by Kuber's core against your own role.</p>
   {#if !data.canManage}<p class="pill note"><Icon name="shield" size={13} /> Read-only: only an owner changes members.</p>{/if}
+  {#each data.me.warnings as w}
+    <div class="warn" role="status"><Icon name="alert" size={15} /><span>{w.message}</span>
+      <button type="button" class="btn sm" onclick={addPasskey} disabled={adding}><Icon name="key" size={13} /> {adding ? "Waiting for your passkey…" : "Add a passkey"}</button></div>
+  {/each}
+  {#if addMsg}<p class="small" class:error={!addMsg.ok} role={addMsg.ok ? "status" : "alert"}>{addMsg.text}</p>{/if}
 </header>
 
 {#if data.canManage}
@@ -134,7 +163,8 @@
           <span class="pill"><Icon name="book" size={12} /> {scopeText(m.books)}</span>
           <span class="pill sage"><span class="dot"></span>Active</span>
           {#if m.role !== "agent"}
-            <span class="pill" class:clay={!m.credentials.length}><Icon name="key" size={12} /> {m.credentials.length} {m.credentials.length === 1 ? "passkey" : "passkeys"}</span>
+            <span class="pill" class:clay={!m.credentials.length || needsSecond(m)} title={needsSecond(m) ? "Owners and controllers should register a second passkey" : undefined}><Icon name="key" size={12} /> {m.credentials.length} {m.credentials.length === 1 ? "passkey" : "passkeys"}</span>
+            {#if needsSecond(m)}<span class="pill clay"><Icon name="alert" size={12} /> {isMe ? "Register a second passkey" : "Needs a second passkey"}{data.separation.requireTwoAuthenticators ? ": cannot sign approvals" : ""}</span>{/if}
           {:else}
             <span class="pill">Granted by configuration</span>
           {/if}
@@ -179,6 +209,9 @@
           </div>
         {/if}
 
+        {#if isMe && m.role !== "agent" && !data.me.warnings.length}
+          <div class="acts"><button type="button" class="btn quiet sm" onclick={addPasskey} disabled={adding}><Icon name="key" size={13} /> {adding ? "Waiting for your passkey…" : "Add another passkey"}</button></div>
+        {/if}
         {#if m.credentials.length}
           <details class="keys">
             <summary><Icon name="key" size={13} /> Passkeys</summary>
@@ -220,7 +253,7 @@
 <section class="panel block" aria-labelledby="sod-h">
   <div class="panel-head"><h2 id="sod-h">Separation of duties</h2></div>
   <div class="panel-body">
-    <p class="muted small lead">Period operations, and amounts above the approval limit, need approval by someone other than their preparer, confirmed with a passkey.</p>
+    <p class="muted small lead">Period operations, and amounts above the approval limit, need approval by someone other than their preparer, signed with their passkey over exactly what is approved.</p>
     {#if data.canSettings}
       <form method="POST" action="?/separation" class="sod" use:enhance={act("separation")}>
         <div class="field">
@@ -228,6 +261,10 @@
           <input id="sod-limit" name="sodLimit" inputmode="decimal" autocomplete="off" value={limitRupees} placeholder="Policy default" aria-describedby="sod-limit-hint" />
           <span id="sod-limit-hint" class="hint faint">Leave empty to use each policy's own limit.</span>
         </div>
+        <label class="opt solo">
+          <input type="checkbox" name="requireTwoAuthenticators" checked={!!data.separation.requireTwoAuthenticators} aria-describedby="two-hint" />
+          <span>Require two passkeys for owners and controllers<span id="two-hint" class="hint faint block-hint">Their approvals of period operations and large amounts are refused until they register a second passkey, so losing one device never locks the books.</span></span>
+        </label>
         <label class="opt solo">
           <input type="checkbox" name="soloOwner" checked={data.separation.soloOwner} aria-describedby="solo-hint" />
           <span>Single-owner exception<span id="solo-hint" class="hint faint block-hint">While the owner is the only person in the workspace, they may approve their own plans. It lapses as soon as someone else joins.</span></span>
@@ -241,6 +278,7 @@
       <dl class="kv">
         <dt>Approval limit</dt><dd class="num">{limitRupees ? `₹${limitRupees}` : "Policy default"}</dd>
         <dt>Single-owner exception</dt><dd>{data.separation.soloOwner ? "On" : "Off"}</dd>
+        <dt>Two passkeys required</dt><dd>{data.separation.requireTwoAuthenticators ? "On" : "Off"}</dd>
       </dl>
     {/if}
   </div>
@@ -258,6 +296,8 @@
   .hint { font-size: 12px; }
   .block-hint { display: block; font-weight: 400; margin-top: 2px; }
   .lead { margin: 0 0 16px; max-width: 70ch; }
+  .warn { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 12px; padding: 10px 14px; border: 1px solid var(--clay); border-radius: 10px; font-size: 13.5px; }
+  .warn :global(svg) { color: var(--clay); flex: none; }
   .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; overflow-wrap: anywhere; }
   .error { color: var(--clay); margin: 0; }
   p[role="status"] { margin: 0; color: var(--text-2); }

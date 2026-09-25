@@ -8,15 +8,21 @@
  *   FIN-OPS-03  autonomy kill switch, autonomous error counts
  *   FIN-OPS-02  financial incident register
  */
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { TransactionSql } from "postgres";
+import type { CommandSignature, SignedAction } from "@kuber/contracts";
+import type { SigningIntent } from "@kuber/identity";
 import { z } from "zod";
 import { AccessDenied, DELEGABLE, REVIEW_DECISIONS, inScope, type Action, type Member } from "@kuber/identity";
 import { IsoDate } from "@kuber/contracts";
 import type { Cell } from "./cell.ts";
 import { autonomyErrors } from "./fin-ops.ts";
+import { planIntent } from "./signing.ts";
 
-/** Whether this request carries a fresh passkey step-up (webid, FIN step-up rule). */
-type StepUp = (req: FastifyRequest) => boolean;
+/** Signed commands (see buildServer): the verifier for a command's transaction, or null when it cannot be confirmed. */
+type AttestFor = (req: FastifyRequest, tenant: string, principal: string, assertion: unknown, intent: () => Promise<SigningIntent>) =>
+  Promise<((tx: TransactionSql) => Promise<CommandSignature>) | null>;
+type SignatureRequired = (reply: FastifyReply, action: SignedAction, reason: string) => unknown;
 type Who = (req: FastifyRequest, action: Action, scope?: { book?: string; allBooks?: boolean }) => Promise<{ tenant: string; principal: string; member: Member }>;
 type TP = { Params: { tenant: string } };
 type TI = { Params: { tenant: string; id: string } };
@@ -24,7 +30,8 @@ const Paise = z.string().regex(/^\d{1,18}$/, "whole paise");
 const Principal = z.string().regex(/^[a-z]+:[\w.@-]+$/);
 const When = z.string().refine((s) => !Number.isNaN(new Date(s).getTime()), "a date or timestamp");
 
-export function registerFinRoutes(app: FastifyInstance, cell: Cell, who: Who, stepUpFresh: StepUp = () => false) {
+export function registerFinRoutes(app: FastifyInstance, cell: Cell, who: Who, attestFor: AttestFor, signatureRequired: SignatureRequired,
+                                  Assertion: z.ZodType<Record<string, unknown> | undefined>) {
   // ------------------------------------------------------------ FIN-MDM-04 authority matrix
   app.get<TP>("/v1/tenants/:tenant/authority", async (req) => cell.identity.authority.matrix((await who(req, "members.read", { allBooks: true })).tenant));
   app.put<TP>("/v1/tenants/:tenant/authority", async (req) => {
@@ -70,16 +77,21 @@ export function registerFinRoutes(app: FastifyInstance, cell: Cell, who: Who, st
   // Approve now, execute later: role, band, delegation, conflicts and maker-checker in the ops guard.
   app.post<TI>("/v1/tenants/:tenant/plans/:id/approve", async (req, reply) => {
     const { tenant, principal } = await who(req, "read");
-    const hash = z.object({ hash: z.string().length(64) }).parse(req.body).hash;
-    // Approving is the decision: the same passkey step-up as committing (period operations, amounts
+    const { hash, assertion } = z.object({ hash: z.string().length(64), assertion: Assertion }).parse(req.body);
+    // Approving is the decision: the same signed command as committing (period operations, amounts
     // above the approval limit), asked only after the guard says this person may approve at all.
+    // The signature is verified and stored with PlanApprovalRecorded in the approval's transaction.
     const plan = await cell.ops.get(tenant, req.params.id);
+    let attest: ((tx: TransactionSql) => Promise<CommandSignature>) | null = null;
     if (plan.status === "proposed" && plan.kind === "write") {
       await cell.identity.check({ step: "approve", tenant, book: plan.bookId, principal, op: { name: plan.op, kind: plan.kind, gate: plan.gate }, plan });
       const reason = await cell.identity.stepUpReason(tenant, plan);
-      if (reason && !stepUpFresh(req)) return reply.code(403).send({ error: "step_up_required", reason, message: `Confirm with your passkey to approve this (${reason}).` });
+      if (reason) {
+        attest = await attestFor(req, tenant, principal, assertion, () => planIntent(cell, tenant, req.params.id, hash, "plan.approve"));
+        if (!attest) return signatureRequired(reply, "plan.approve", reason);
+      }
     }
-    return cell.ops.approve(tenant, req.params.id, principal, hash);
+    return cell.ops.approve(tenant, req.params.id, principal, hash, attest ? { attest } : {});
   });
   app.get<TI>("/v1/tenants/:tenant/plans/:id/approvals", async (req) => {
     const { tenant, member } = await who(req, "read");
