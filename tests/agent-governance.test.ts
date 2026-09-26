@@ -70,7 +70,7 @@ describe("PRM-01..03 prompt and artifact registry", () => {
         program: "NextStep", instructions: "…", demos: [], evaluation: { set: "copilot-eval-v1", score: 0.93 } };
       const pol = { kind: "routing_policy", id: "copilot.routing", version: "1.0.0", owner: "System Owner", approvedBy: "Pending — System Owner", approvedAt: "pending",
         params: { resolveThreshold: 0.8, fuzzyAccountMatch: 0.9, clarifyThreshold: 0.5 } };
-      mkdirSync(join(dir, "artifacts"));
+      mkdirSync(join(dir, "artifacts"), { recursive: true });   // agent/artifacts/ exists in the repo (.gitkeep)
       writeFileSync(join(dir, "artifacts/copilot.next_step.v1.json"), JSON.stringify(art));
       writeFileSync(join(dir, "artifacts/copilot.routing.v1.json"), JSON.stringify(pol));
       expect(checkLock(dir).join("\n")).toMatch(/copilot\.next_step\.v1\.json \(dspy_artifact copilot\.next_step\) is not in prompts\.lock\.json/);

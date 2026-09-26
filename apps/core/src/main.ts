@@ -7,6 +7,8 @@ import { Copilot } from "./copilot/index.ts";
 import { ExternalTools, parseServers } from "./copilot/external.ts";
 import { providerFromEnv } from "./copilot/provider.ts";
 import { PROCESSING_ENV, createGovernance, processingFromEnv } from "./copilot/governance/index.ts";
+import { reasonerFromEnv } from "./copilot/reasoner.ts";
+import { bridgeReasoner } from "./copilot/reasoner-bridge.ts";
 import { parseGrants } from "./mcp.ts";
 import { classifierFromEnv } from "./llm-classifier.ts";
 import { replayStoreFromEnv } from "@kuber/auth/valkey";
@@ -82,12 +84,16 @@ const cell = await Cell.start({
 const relay = cell.relay.run();
 const clock = () => new Date().toISOString().slice(0, 10);
 const external = new ExternalTools(parseServers(process.env.KUBER_MCP_SERVERS));
-const copilot = new Copilot(cell, providerFromEnv(), external, clock);
+
 const mcpGrants = parseGrants(process.env.KUBER_MCP_TOKENS);
 // Replay protection shared by every core instance (Valkey) when VALKEY_URL is set; otherwise in-process.
 const replay = replayStoreFromEnv();
 // The governance layer loads only hash-locked prompts, register and patterns (agent/prompts.lock.json): refuse to start otherwise.
 const governance = createGovernance(cell);
+// Model steps go to the Python DSPy middleware (AGENT_MW_URL); a direct provider only outside production (agent design 7.1).
+const mw = process.env[PROCESSING_ENV] ? reasonerFromEnv() : null;   // no recorded processing decision: rules only (TAGOF Domain 12)
+const copilot = new Copilot(cell, mw ? bridgeReasoner(mw) : null, external, clock, governance);
+console.log(`copilot: ${mw ? `reasoner ${mw.name}` : "rules only (no AGENT_MW_URL)"}`);
 const app = buildServer(cell, { copilot, mcpGrants, clock, https: httpsCfg, auth: { secret: coreAuthSecret, replay }, governance });
 console.log(`classifier: ${classifier ? classifier.name : "rules, history and keywords (set KUBER_LLM_CLASSIFY=on for the LLM step)"}`);
 console.log(`replay protection: ${replay.kind === "valkey" ? "shared (Valkey)" : "in-process (single instance)"}`);

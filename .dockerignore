@@ -4,3 +4,7 @@ node_modules
 *.log
 **/build
 **/.svelte-kit
+.venv
+**/__pycache__
+**/.pytest_cache
+**/*.egg-info
