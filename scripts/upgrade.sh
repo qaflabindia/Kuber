@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # Upgrade a running hardened installation to the current code (identity, single-transaction commits,
 # ingestion integrity, partitioned bus, lifecycle). Takes an encrypted backup first. Safe to re-run.
-#   bash ./scripts/upgrade.sh [--invite <name>]
+#   bash ./scripts/upgrade.sh [--invite <name> | --recover <role:name>]
+# With --recover, issues an audited one-time recovery code for an existing member who lost access
+# (their old passkeys are revoked when the code is redeemed).
 # With --invite, prints a one-time passkey enrolment code for superuser:<name> in the tenant (default acme).
 # Existing members keep their passkeys; role model v2 migrates their roles at core start (owner -> superuser).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DIR="${KUBER_HOME:-$HOME/.kuber}"
 TENANT="${KUBER_TENANT:-acme}"
-INVITE=""
+INVITE=""; RECOVER=""
 [ "${1:-}" = "--invite" ] && INVITE="${2:?--invite needs a name}"
+[ "${1:-}" = "--recover" ] && RECOVER="${2:?--recover needs a principal, e.g. owner:laksh}"
 chmod +x kuber scripts/*.sh deploy/*.sh 2>/dev/null || true
 
 echo "1/7 secrets (adds CORE_AUTH_SECRET if missing)"
@@ -39,7 +42,10 @@ echo "5/7 key and projection checks"
 "${OPS[@]}" status
 
 IDCLI=(./kuber run --rm -T --entrypoint "npx tsx apps/core/src/identity-cli.ts" tools)
-if [ -n "$INVITE" ]; then
+if [ -n "$RECOVER" ]; then
+  echo "6/7 account recovery for $RECOVER in tenant $TENANT"
+  "${IDCLI[@]}" recover "$TENANT" "$RECOVER" --reason "lost access to passkey (operator upgrade.sh --recover)" --hours 24
+elif [ -n "$INVITE" ]; then
   echo "6/7 passkey invitation for superuser:$INVITE in tenant $TENANT"
   "${IDCLI[@]}" invite "$TENANT" "superuser:$INVITE"
 else
