@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Upgrade a running hardened installation to the current code (identity, single-transaction commits,
 # ingestion integrity, partitioned bus, lifecycle). Takes an encrypted backup first. Safe to re-run.
-#   bash ./scripts/upgrade.sh [owner-name]
-# Prints a one-time passkey enrolment code for owner:<owner-name> in the first tenant (default acme).
+#   bash ./scripts/upgrade.sh [--invite <name>]
+# With --invite, prints a one-time passkey enrolment code for superuser:<name> in the tenant (default acme).
+# Existing members keep their passkeys; role model v2 migrates their roles at core start (owner -> superuser).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DIR="${KUBER_HOME:-$HOME/.kuber}"
 TENANT="${KUBER_TENANT:-acme}"
-OWNER="${1:-${USER:-owner}}"
+INVITE=""
+[ "${1:-}" = "--invite" ] && INVITE="${2:?--invite needs a name}"
 chmod +x kuber scripts/*.sh deploy/*.sh 2>/dev/null || true
 
 echo "1/7 secrets (adds CORE_AUTH_SECRET if missing)"
@@ -36,8 +38,14 @@ echo "5/7 key and projection checks"
 "${OPS[@]}" check agent
 "${OPS[@]}" status
 
-echo "6/7 owner passkey invitation for owner:$OWNER in tenant $TENANT"
-./kuber run --rm -T --entrypoint "npx tsx apps/core/src/identity-cli.ts" tools invite "$TENANT" "owner:$OWNER"
+IDCLI=(./kuber run --rm -T --entrypoint "npx tsx apps/core/src/identity-cli.ts" tools)
+if [ -n "$INVITE" ]; then
+  echo "6/7 passkey invitation for superuser:$INVITE in tenant $TENANT"
+  "${IDCLI[@]}" invite "$TENANT" "superuser:$INVITE"
+else
+  echo "6/7 members of $TENANT after the role migration (no invitation requested)"
+  "${IDCLI[@]}" members "$TENANT" || true
+fi
 
 echo "7/7 done"
 ./kuber ps
