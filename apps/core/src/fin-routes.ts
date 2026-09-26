@@ -13,7 +13,7 @@ import type { TransactionSql } from "postgres";
 import type { CommandSignature, SignedAction } from "@kuber/contracts";
 import type { SigningIntent } from "@kuber/identity";
 import { z } from "zod";
-import { AccessDenied, DELEGABLE, REVIEW_DECISIONS, inScope, type Action, type Member } from "@kuber/identity";
+import { AccessDenied, DELEGABLE, REVIEW_DECISIONS, SWITCH_SCOPES, inScope, type Action, type Member } from "@kuber/identity";
 import { IsoDate } from "@kuber/contracts";
 import type { Cell } from "./cell.ts";
 import { autonomyErrors } from "./fin-ops.ts";
@@ -30,8 +30,11 @@ const Paise = z.string().regex(/^\d{1,18}$/, "whole paise");
 const Principal = z.string().regex(/^[a-z_]+:[\w.@-]+$/);
 const When = z.string().refine((s) => !Number.isNaN(new Date(s).getTime()), "a date or timestamp");
 
+/** The authenticated person without an action check (the service checks the action itself). */
+type Authn = (req: FastifyRequest) => Promise<{ tenant: string; principal: string }>;
+
 export function registerFinRoutes(app: FastifyInstance, cell: Cell, who: Who, attestFor: AttestFor, signatureRequired: SignatureRequired,
-                                  Assertion: z.ZodType<Record<string, unknown> | undefined>) {
+                                  Assertion: z.ZodType<Record<string, unknown> | undefined>, authn?: Authn) {
   // ------------------------------------------------------------ FIN-MDM-04 authority matrix
   app.get<TP>("/v1/tenants/:tenant/authority", async (req) => cell.identity.authority.matrix((await who(req, "members.read", { allBooks: true })).tenant));
   app.put<TP>("/v1/tenants/:tenant/authority", async (req) => {
@@ -117,12 +120,14 @@ export function registerFinRoutes(app: FastifyInstance, cell: Cell, who: Who, at
     const { tenant } = await who(req, "read", { allBooks: true });
     return { switches: await cell.identity.autonomy.status(tenant), errors: await autonomyErrors(cell.store, tenant) };
   });
-  const Switch = z.object({ reason: z.string().min(3).max(500), book: z.string().min(1).nullable().default(null) });
+  // AGT-09: scope "copilot" halts only the model-driven copilot (System Owner, agent.system); the
+  // default scope "autonomy" is FIN-OPS-03. The switch service checks the scope's permission itself.
+  const Switch = z.object({ reason: z.string().min(3).max(500), book: z.string().min(1).nullable().default(null), scope: z.enum(SWITCH_SCOPES).default("autonomy") });
   for (const [path, halted] of [["halt", true], ["resume", false]] as const) {
     app.post<TP>(`/v1/tenants/:tenant/autonomy/${path}`, async (req) => {
       const b = Switch.parse(req.body);
-      const { tenant, principal } = await who(req, "autonomy.manage", b.book ? { book: b.book } : { allBooks: true });
-      return cell.identity.autonomy.set(tenant, principal, { book: b.book, halted, reason: b.reason });
+      const { tenant, principal } = b.scope === "autonomy" ? await who(req, "autonomy.manage", b.book ? { book: b.book } : { allBooks: true }) : authn ? await authn(req) : await who(req, "read", {});
+      return cell.identity.autonomy.set(tenant, principal, { book: b.book, halted, reason: b.reason, scope: b.scope });
     });
   }
 

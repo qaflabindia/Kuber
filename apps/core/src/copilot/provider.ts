@@ -3,6 +3,7 @@
  * The model only plans and explains; the accounting is done by deterministic tools.
  */
 import Anthropic from "@anthropic-ai/sdk";
+import { processingFromEnv } from "./governance/processing.ts";
 
 export interface LlmTool { name: string; description: string; input_schema: Record<string, unknown> }
 export type Block =
@@ -38,10 +39,16 @@ export class AnthropicProvider implements LlmProvider {
   }
 }
 
-/** Build the configured provider, or null (the copilot then uses its deterministic router). */
+/**
+ * Build the configured provider, or null (the copilot then uses its deterministic router).
+ * TAGOF Domain 12 / GEN-04: no model path without a recorded processing decision
+ * (KUBER_LLM_PROCESSING_APPROVED=<approver>:<date>:<data-location>, see governance/processing.ts).
+ */
 export function providerFromEnv(env = process.env): LlmProvider | null {
   const key = env.ANTHROPIC_API_KEY, model = env.KUBER_LLM_MODEL;
   if (!key) return null;
   if (!model) { console.warn("ANTHROPIC_API_KEY is set but KUBER_LLM_MODEL is not; copilot uses the rule-based router"); return null; }
+  const processing = processingFromEnv(env);
+  if (!processing.ok) { console.warn(`copilot uses the rule-based router: ${processing.reason}`); return null; }
   return new AnthropicProvider(key, model);
 }

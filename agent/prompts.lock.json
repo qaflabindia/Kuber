@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "kind": "prompt",
+      "id": "copilot.system",
+      "version": "1.0.0",
+      "sha256": "38d52468f052855c581d723a3833fe21520a23ff23c338427ade9cf30538ab57",
+      "approver": "Pending — System Owner",
+      "approvedAt": "pending",
+      "file": "prompts/copilot.system.v1.md"
+    },
+    {
+      "kind": "tool_register",
+      "id": "tool_register",
+      "version": "1.0.0",
+      "sha256": "96b89d6b523b63f0233fa65b149b73269253475d26911f539a9dc2d710d3f2c3",
+      "approver": "Pending — System Owner",
+      "approvedAt": "pending",
+      "file": "tools.register.json"
+    },
+    {
+      "kind": "injection_patterns",
+      "id": "injection_patterns",
+      "version": "1.0.0",
+      "sha256": "aefeec7e3566b406a7955cfb4c497daa2f3ecac44a74867d76209089a45eea09",
+      "approver": "Pending — Security",
+      "approvedAt": "pending",
+      "file": "injection-patterns.json"
+    }
+  ]
+}

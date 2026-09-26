@@ -27,7 +27,12 @@ describe("requirements register (requirements/register.md)", () => {
       ...Array.from({ length: 18 }, (_, i) => `F${String(i + 1).padStart(2, "0")}`),
       ...Array.from({ length: 8 }, (_, i) => `ROLE-0${i + 1}`),                    // role model v2 (design 6.3)
     ];
-    expect(rows.map((r) => r.id).sort()).toEqual(expected.sort());
+    // Agent-governance controls (TAGOF TOL/AGT/PRM/GEN/CBJ/LOG) are listed too; every G0 id above must be present.
+    const ids = rows.map((r) => r.id);
+    for (const id of expected) expect(ids).toContain(id);
+    expect(new Set(ids).size).toBe(ids.length);
+    const extra = ids.filter((id) => !expected.includes(id));
+    for (const id of extra) expect(id).toMatch(/^(TOL|AGT|PRM|GEN|CBJ|LOG|MON|FIN-GRP)-\d\d$/);
   });
 
   it("engineering has claimed nothing beyond verified, and nothing is signed off", () => {

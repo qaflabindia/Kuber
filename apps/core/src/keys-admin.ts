@@ -59,7 +59,7 @@ export const SEALED_COLUMNS: SealedColumn[] = [
   // Finance controls (FIN-MDM-04/05, FIN-OPS-02/03): free-text notes and reasons, incident details.
   { table: "identity.related_parties", column: "note", kind: "text", keyCols: ["principal", "party_id"], ctx: (r) => relatedPartyNoteCtx(r.principal!, r.party_id!) },
   { table: "identity.access_reviews", column: "note", kind: "text", keyCols: ["item_id"], ctx: (r) => accessReviewNoteCtx(r.item_id!) },
-  { table: "identity.autonomy_switches", column: "reason", kind: "text", keyCols: ["book_id"], ctx: (r) => autonomyReasonCtx(r.book_id!) },
+  { table: "identity.autonomy_switches", column: "reason", kind: "text", keyCols: ["book_id", "scope"], ctx: (r) => autonomyReasonCtx(r.book_id!, r.scope ?? "autonomy") },
   { table: "ops.incidents", column: "detail", kind: "text", keyCols: ["incident_id"], ctx: (r) => incidentDetailCtx(r.incident_id!) },
   // Party master (FIN-MDM-03): names, terms and tax status history; beneficiary bank details.
   { table: "mdm.parties", column: "detail", kind: "text", keyCols: ["party_id"], ctx: (r) => partyDetailCtx(r.party_id!) },
@@ -93,6 +93,9 @@ export const RETENTION: Record<string, "purge" | "sealed" | "keys" | "tombstone"
   "identity.authority_settings": "purge", "identity.authority_bands": "purge", "identity.delegations": "purge",
   "identity.related_parties": "purge", "identity.access_reviews": "purge", "identity.autonomy_switches": "purge",
   "ops.plan_approvals": "purge", "ops.incidents": "purge",
+  // Copilot turn index (ids, hashes, counts): the turn history itself is the sealed AgentTurnRecorded
+  // events in <tenant>/agent-turns/<book>, kept with es.events (TAGOF LOG-03, Tier 1 retention).
+  "agent.copilot_turns": "purge",
   "mdm.parties": "purge", "mdm.bank_changes": "purge", "mdm.reviews": "purge",
   "evidence.balances": "purge", "evidence.records": "purge", "evidence.lookup": "purge",
   "es.outbox": "purge", "es.snapshots": "purge", "es.dead_letters": "purge", "es.commands": "purge", "es.verify_checkpoints": "purge",

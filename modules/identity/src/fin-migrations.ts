@@ -8,7 +8,8 @@
  *   delegations         time-boxed, amount-capped grants of an approval authority from one member to another
  *   related_parties     conflict rules: a member may not approve plans that pay a flagged party
  *   access_reviews      dispositions of access-review items (latest per item; history in the identity stream)
- *   autonomy_switches   kill switch: autonomous posting halted for the tenant ('*') or one book
+ *   autonomy_switches   kill switch: autonomous posting (scope 'autonomy') or the model-driven copilot
+ *                       (scope 'copilot', AGT-09) halted for the tenant ('*') or one book
  */
 import type { Migration } from "@kuber/eventstore";
 
@@ -59,9 +60,21 @@ CREATE TABLE identity.autonomy_switches (
   set_by TEXT NOT NULL, set_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (tenant_id, book_id));
 ` + rlsForTables("identity", ["authority_settings", "authority_bands", "delegations", "related_parties", "access_reviews", "autonomy_switches"]),
+}, {
+  // AGT-09: the kill switch gets a scope. 'autonomy' (FIN-OPS-03, every existing row) halts autonomous
+  // posting; 'copilot' halts the model-driven copilot (it falls back to rules and read-only answers).
+  // The two are independent: either can be halted without the other.
+  id: "identity-fin-002-switch-scope",
+  sql: `
+ALTER TABLE identity.autonomy_switches ADD COLUMN scope TEXT NOT NULL DEFAULT 'autonomy' CHECK (scope IN ('autonomy','copilot'));
+ALTER TABLE identity.autonomy_switches DROP CONSTRAINT autonomy_switches_pkey;
+ALTER TABLE identity.autonomy_switches ADD PRIMARY KEY (tenant_id, book_id, scope);
+`,
 }];
 
 /** Contexts sealed identity finance-control columns are bound to (see SEALED_COLUMNS in the core). */
 export const relatedPartyNoteCtx = (principal: string, partyId: string) => `identity.related_parties.note|${principal}|${partyId}`;
 export const accessReviewNoteCtx = (itemId: string) => `identity.access_reviews.note|${itemId}`;
-export const autonomyReasonCtx = (book: string) => `identity.autonomy_switches.reason|${book}`;
+/** The autonomy scope keeps its original context, so reasons sealed before scopes existed still open. */
+export const autonomyReasonCtx = (book: string, scope: string = "autonomy") =>
+  scope === "autonomy" ? `identity.autonomy_switches.reason|${book}` : `identity.autonomy_switches.reason|${book}|${scope}`;

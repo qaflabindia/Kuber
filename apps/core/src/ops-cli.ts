@@ -33,7 +33,11 @@
  *                                                 role/scope changes and every identity change, with dispositions
  *   ops access-review dispose <tenant> <itemId> --decision appropriate|revoke|investigate|accepted --note "…" --as p
  *   ops autonomy [status] [--tenant t]            FIN-OPS-03: kill-switch state and autonomous errors per period
- *   ops autonomy halt|resume <tenant> [--book b] --reason "…" --as p   the kill switch (owner/controller)
+ *   ops autonomy halt|resume <tenant> [--book b] [--scope autonomy|copilot] --reason "…" --as p
+ *                                                 the kill switch: scope autonomy (default, FIN-OPS-03, owner/controller)
+ *                                                 or copilot (AGT-09: the model-driven copilot only; System Owner)
+ *   ops agent-turns [--tenant t] [--book b] [--since d] [--limit n]   TOL-05/AGT-07: recorded copilot turns (hashes, counts)
+ *   ops agent-signals [--tenant t] [--since d]     TAGOF Part VII: copilot monitoring signals per month (also in ops status)
  *   ops incident list <tenant> [--status s] | show <tenant> <id>        FIN-OPS-02: the incident register
  *   ops incident open <tenant> --title "…" --description "…" --books a,b --periods 2026-10 --loss <paise>
  *                    [--duplication] --owner p --as p
@@ -55,7 +59,7 @@ import { NatsConsumerAdmin, busPartitions, streamNameFor } from "@kuber/bus";
 import { renderText, type CertifiableKind } from "@kuber/reporting";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { REVIEW_DECISIONS, type ReviewDecision } from "@kuber/identity";
+import { REVIEW_DECISIONS, SWITCH_SCOPES, type ReviewDecision, type SwitchScope } from "@kuber/identity";
 import { Cell } from "./cell.ts";
 import { OpsAdmin } from "./ops-admin.ts";
 
@@ -186,8 +190,20 @@ try {
       const sub = positional[0] ?? "status";
       if (sub === "status") { print(await ops.autonomy(flag("--tenant"))); break; }
       const tenant = positional[1], reason = flag("--reason"), as = flag("--as");
-      if ((sub !== "halt" && sub !== "resume") || !tenant || !reason || !as) throw new Error('usage: ops autonomy halt|resume <tenant> [--book b] --reason "…" --as <principal>');
-      print(await cell.identity.autonomy.set(tenant, as, { book: flag("--book") ?? null, halted: sub === "halt", reason }));
+      const scope = (flag("--scope") ?? "autonomy") as SwitchScope;
+      if ((sub !== "halt" && sub !== "resume") || !tenant || !reason || !as || !SWITCH_SCOPES.includes(scope)) throw new Error('usage: ops autonomy halt|resume <tenant> [--book b] [--scope autonomy|copilot] --reason "…" --as <principal>');
+      print(await cell.identity.autonomy.set(tenant, as, { book: flag("--book") ?? null, halted: sub === "halt", reason, scope }));
+      break;
+    }
+    case "agent-turns": {
+      const limit = flag("--limit") ? Number(flag("--limit")) : undefined;
+      print(await ops.agentTurns({ tenant: flag("--tenant"), book: flag("--book"), since: flag("--since"), limit }));
+      break;
+    }
+    case "agent-signals": {
+      const r = await ops.agent(flag("--tenant"), flag("--since"));
+      print(r);
+      process.exitCode = r.some((t) => t.hitlBypass > 0) ? 1 : 0;           // MON-09: any HITL bypass is an incident
       break;
     }
     case "incident": {
@@ -220,7 +236,7 @@ try {
       break;
     }
     default:
-      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify, verify-signatures, bus-consumers, backfill-confirmations, run-schedules, access-review, autonomy, incident, drill-compare");
+      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify, verify-signatures, bus-consumers, backfill-confirmations, run-schedules, access-review, autonomy, agent-turns, agent-signals, incident, drill-compare");
       process.exitCode = 2;
   }
 } finally {
