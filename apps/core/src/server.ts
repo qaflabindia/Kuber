@@ -22,7 +22,7 @@ import { ACTIONS, AccessDenied, IdentityError, LEGACY_ALIASES, PERSON_ROLES, can
 import type { CommandSignature, SignedAction } from "@kuber/contracts";
 import type { TransactionSql } from "postgres";
 import { z, ZodError } from "zod";
-import { Account, BankDetails, BookPurpose, Id, IsoDate, JOURNAL_STATES, PartyKind, PartyTerms, Principal, TaxStatus, parseAmount, uuid, type Line } from "@kuber/contracts";
+import { Account, BankDetails, BookPurpose, Id, IsoDate, PartyKind, PartyTerms, Principal, TaxStatus, parseAmount, uuid, type Line } from "@kuber/contracts";
 import { CommandConflict, ConcurrencyError, GuardDenied } from "@kuber/eventstore";
 import { DomainError, type BookCommand } from "@kuber/gl";
 import { AgentError } from "@kuber/agent";
@@ -31,7 +31,8 @@ import { StaleReportError, type ReportBasis, type ReportOptions } from "@kuber/r
 import { IngestionError } from "@kuber/channels";
 import type { Cell } from "./cell.ts";
 import { Copilot } from "./copilot/index.ts";
-import { HELP } from "./copilot/router.ts";
+import { HELP, HELP_GROUPS } from "./copilot/router.ts";
+import { attentionCounts, journalLifecycle } from "./agent-tools.ts";
 import { registerMcp } from "./mcp.ts";
 import { registerFinRoutes } from "./fin-routes.ts";
 import { registerPortalRoutes } from "./portal-routes.ts";
@@ -354,10 +355,7 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   });
   app.get<P>("/v1/tenants/:tenant/books/:book/attention", async (req) => {
     const { tenant, member } = await who(req, "read");
-    const tenantWide = member.books === null;
-    const [d, ratifications, plans] = await Promise.all([cell.agent.queueCounts(tenant, tenantWide ? undefined : req.params.book),
-      tenantWide ? cell.agent.openRatificationCount(tenant) : Promise.resolve(0), cell.ops.pendingCount(tenant, req.params.book)]);
-    return { drafts: d.open, awaitingApproval: d.awaitingApproval, ratifications, plans };
+    return attentionCounts(cell, tenant, req.params.book, member.books === null);
   });
   // Decisions on one draft or match review: a book-scoped member only within their books.
   const itemInScope = async (tenant: string, member: Member, table: "drafts" | "match_reviews", id: string) => {
@@ -497,11 +495,13 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     return cell.reporting.recentJournals((await who(req, "read")).tenant, req.params.book, Number.isFinite(limit) ? limit : 20);
   });
   // ------------------------------------------------------------ copilot and MCP
-  app.get<P>("/v1/tenants/:tenant/copilot", async (req) => { await who(req, "read"); return { engine: copilot.engine, suggestions: HELP }; });
+  app.get<P>("/v1/tenants/:tenant/copilot", async (req) => { await who(req, "read"); return { engine: copilot.engine, suggestions: HELP, groups: HELP_GROUPS }; });
   app.post<P>("/v1/tenants/:tenant/books/:book/copilot", async (req) => {
     const { tenant, principal } = await who(req, "copilot");
-    const b = z.object({ text: z.string().min(1).max(2000), history: z.array(z.object({ role: z.enum(["user", "assistant"]), text: z.string().max(4000) })).max(20).default([]) }).parse(req.body);
-    return copilot.ask({ tenant, book: req.params.book, principal }, b.text, b.history);
+    const b = z.object({ text: z.string().min(1).max(2000), history: z.array(z.object({ role: z.enum(["user", "assistant"]), text: z.string().max(4000) })).max(20).default([]),
+      sessionId: z.string().max(200).optional() }).parse(req.body);
+    // Session memory only (AGT-04): the client's history, capped; the server keeps no conversation.
+    return copilot.ask({ tenant, book: req.params.book, principal }, b.text, b.history.slice(-8), { sessionId: b.sessionId ?? null });
   });
   if (opts.mcpGrants?.size) registerMcp(app, cell, opts.mcpGrants);
 
@@ -700,17 +700,7 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   // One vocabulary over every path an entry takes: draft, submitted, approved, posting, posted, failed.
   app.get<P>("/v1/tenants/:tenant/books/:book/journal-lifecycle", async (req) => {
     const { tenant } = await who(req, "read");
-    const book = req.params.book;
-    const [drafts, plans, rejections, exceptions] = await Promise.all([cell.agent.lifecycle(tenant, book), cell.ops.lifecycle(tenant, book),
-      cell.gl.rejections(tenant, book), cell.ops.schedules.exceptions(tenant, book)]);
-    const items = [
-      ...drafts, ...plans,
-      ...rejections.map((r) => ({ id: r.requestId, source: "ledger" as const, state: "failed" as const, reason: r.reason, origin: r.source, at: r.at, by: r.principal })),
-      ...exceptions.map((x) => ({ id: x.occurrence_id, source: "schedule" as const, state: "failed" as const, reason: x.reason, scheduleId: x.schedule_id,
-        period: x.period, dueOn: x.due_on })),
-    ];
-    const counts = Object.fromEntries(JOURNAL_STATES.map((st) => [st, items.filter((i) => i.state === st).length]));
-    return { states: JOURNAL_STATES, counts, items };
+    return journalLifecycle(cell, tenant, req.params.book);
   });
 
   // ------------------------------------------------------------ schedules (FIN-GL-02/03)

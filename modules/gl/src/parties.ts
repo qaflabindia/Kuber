@@ -352,6 +352,14 @@ export class PartyMaster {
     return new Map(rows.map((r) => [r.party_id, r.entity_id]));
   }
 
+  /** Registered parties (ids, kind, legal entity, hold), by id; at most `limit` (default 200, at most 1000). Names and bank details: get(). */
+  async list(tenant: string, opts: { kind?: "vendor" | "customer" | "both"; limit?: number } = {}) {
+    const limit = Math.min(Math.max(Math.trunc(opts.limit ?? 200) || 1, 1), 1000);
+    return this.store.tenantTx(tenant, (tx) => tx<{ partyId: string; entityId: string; kind: string; hold: boolean }[]>`
+      SELECT party_id AS "partyId", entity_id AS "entityId", kind, hold FROM mdm.parties
+      WHERE tenant_id = ${tenant} ${opts.kind ? tx`AND kind = ${opts.kind}` : tx``} ORDER BY party_id LIMIT ${limit}`);
+  }
+
   /** Open review items (shared identifiers), oldest first. */
   async reviews(tenant: string) {
     return this.store.tenantTx(tenant, (tx) => tx<{ reviewId: string; partyId: string; otherPartyId: string; reason: string }[]>`

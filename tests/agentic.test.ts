@@ -120,7 +120,7 @@ describe("copilot, model loop", () => {
     ];
     const fake: LlmProvider = { name: "fake", turn: async (_s, _m, tools) => { seen.push(tools.map((t) => t.name)); return script.shift()!; } };
     const seq = (await cell.gl.state(T, B)).seq;
-    const r = await new Copilot(cell, fake, null, () => clock.value).ask({ tenant: T, book: B, principal: OWNER }, "Record printer ink 1499 from bank");
+    const r = await new Copilot(cell, fake, null, () => clock.value).ask({ tenant: T, book: B, principal: OWNER }, "Printer ink 1499 from bank, please handle");  // the router cannot resolve it: the model loop runs
     expect(seen[0]).not.toContain("kuber_commit");
     expect(r.cards).toHaveLength(1);
     expect(r.cards[0]!.journals[0]!.lines[0]).toMatchObject({ accountId: "BIZEXP", amount: "149900" });
