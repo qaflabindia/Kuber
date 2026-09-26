@@ -1,0 +1,15 @@
+{
+  "set": "copilot",
+  "programs": [
+    "next_step",
+    "compose"
+  ],
+  "metric": "copilot.golden.v1",
+  "dspyMetrics": [
+    "next_step.tool_args.v1",
+    "compose.grounded_coverage.v1"
+  ],
+  "cases": "cases.jsonl",
+  "dspyExport": "dspy/copilot.jsonl",
+  "description": "Copilot golden and adversarial set. Scored by the copilot metrics only; the classifier set lives in eval/classifier (ASDGF A3)."
+}

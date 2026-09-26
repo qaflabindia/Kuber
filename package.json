@@ -20,6 +20,7 @@
     "ops": "tsx apps/core/src/ops-cli.ts",
     "test:llm": "bash scripts/test-llm.sh",
     "register": "tsx scripts/check-register.ts",
+    "eval:agent": "tsx scripts/eval-agent.ts",
     "test:mw": "test -x .venv/bin/python || { echo 'Set up the venv: python3 -m venv .venv && .venv/bin/pip install -e \"services/agent-mw[dev]\"'; exit 1; } && cd services/agent-mw && ../../.venv/bin/python -m pytest",
     "dream": "tsx apps/core/src/dream-cli.ts"
   },

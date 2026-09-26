@@ -25,6 +25,8 @@
     "packages/*/src",
     "modules/*/src",
     "apps/core/src",
-    "tests"
+    "tests",
+    "eval",
+    "scripts/eval-agent.ts"
   ]
 }

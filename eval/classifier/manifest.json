@@ -1,0 +1,6 @@
+{
+  "set": "classifier",
+  "program": "classify",
+  "metric": "classify.account_accuracy.v1",
+  "description": "Statement classifier evaluation set (design 13.5 seed; labels from tests/live/classifier.live.test.ts plus common Indian narrations). Scored only by the classifier metric: never merged with the copilot set (ASDGF A3, agent design 7.3)."
+}
