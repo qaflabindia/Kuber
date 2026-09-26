@@ -22,8 +22,8 @@
     {
       "kind": "injection_patterns",
       "id": "injection_patterns",
-      "version": "1.0.0",
-      "sha256": "aefeec7e3566b406a7955cfb4c497daa2f3ecac44a74867d76209089a45eea09",
+      "version": "1.1.0",
+      "sha256": "df94d77e46a7ebdad6726b54a63d97c95e54e5eb800f30c9db9fae770519ba72",
       "approver": "Pending — Security",
       "approvedAt": "pending",
       "file": "injection-patterns.json"

@@ -60,10 +60,16 @@ const within = <T>(p: Promise<T>, deadline: number): Promise<T> => {
 
 /** What one turn accumulates for its reply and its record. */
 interface TurnState {
-  tools: ToolCallRecord[]; outputs: string[]; results: { tool: string; result: ToolResult }[];
+  tools: ToolCallRecord[]; outputs: string[]; results: { tool: string; result: ToolResult }[]; question: string; tainted: boolean;
   cards: Plan[]; trace: { tool: string; ok: boolean }[];
 }
-const newTurn = (): TurnState => ({ tools: [], outputs: [], results: [], cards: [], trace: [] });
+const newTurn = (question = ""): TurnState => ({ tools: [], outputs: [], results: [], cards: [], trace: [], question, tainted: false });
+/**
+ * PRM-08 / finding AE-01: after a tool output carried instruction-like text, the model may not
+ * propose a change the person did not ask for in this turn. "Asked" means the person's own words name
+ * a write action; text inside tool outputs never counts.
+ */
+const WRITE_ASKED = /\b(record|post|approve|reconcile|allocate|rebalance|close|carry\s*forward|pay|paid|received|resolve|reclass\w*|schedule|accrue|prepa(?:y|id)|eliminat\w*|consolidat\w*|certify|adjust|move|transfer|split)\b/i;
 
 export class Copilot {
   readonly reasoner: Reasoner | null;
@@ -90,7 +96,7 @@ export class Copilot {
     const person = who.principal;
     const agentWho: Who = { ...who, principal: COPILOT, onBehalfOf: person };
     const hist = history.slice(-HISTORY_MAX).map((h) => ({ role: h.role, text: String(h.text ?? "").slice(0, HISTORY_CHARS) }));
-    const turn = newTurn();
+    const turn = newTurn(text);
     let input: InputVerdict = { ok: false, category: "empty" };
     let engine = "rules", steps = 0;
     let promptMeta = { id: "router", version: ROUTER_VERSION, hash: sha(`kuber-router@${ROUTER_VERSION}`) };
@@ -204,6 +210,10 @@ export class Copilot {
     const verdict = await this.governance.authorizeTool(name, { tenant: agentWho.tenant, book: agentWho.book, onBehalfOf: person });
     if (!verdict.ok) return refuse(verdict.reason ?? "not authorized", [deniedFlag(verdict.reason ?? "not authorized")]);
     if (!tool || name === "kuber_commit") return refuse(`tool ${name} is not available to the copilot`, [deniedFlag(`tool ${name} is not available to the copilot`)]);
+    if (turn.tainted && rev !== "none" && !WRITE_ASKED.test(turn.question)) {
+      const why = "an earlier tool result contained instruction-like text, and you did not ask for a change in this turn";
+      return refuse(why, [deniedFlag("write_after_untrusted_instruction")]);
+    }
     let r: ToolResult;
     try { r = await tool.run(args ?? {}); }
     catch (e) {
@@ -212,6 +222,7 @@ export class Copilot {
       return { ok: false as const, text: `Error: ${errText(e)}`, reason: errText(e) };
     }
     const screened = this.governance.screenToolOutput(name, r.text);
+    if (screened.flags.some((f) => f.startsWith("instruction_like:"))) turn.tainted = true;
     turn.outputs.push(r.text);
     turn.results.push({ tool: name, result: r });
     if (r.plan) turn.cards.push(r.plan);

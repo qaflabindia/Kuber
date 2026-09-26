@@ -1,8 +1,8 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "updated": "2026-09-25",
   "owner": "Security + System Owner",
-  "approvedBy": "Pending — Security",
+  "approvedBy": "Pending \u2014 Security",
   "approvedAt": "pending",
   "changeNote": "Initial library (PRM-07). Add a pattern with a test case in tests/agent-governance.test.ts; bump the version.",
   "patterns": [
@@ -65,6 +65,18 @@
       "id": "transfer-funds",
       "category": "hitl_bypass",
       "pattern": "\\b(transfer|wire|pay|send)\\b[^.\\n]{0,40}\\b(immediately|urgently|right now|now)\\b[^.\\n]{0,40}\\b(to account|to beneficiary|ifsc|upi|account (number|no))\\b"
+    },
+    {
+      "id": "inline-role-marker",
+      "category": "override",
+      "pattern": "\\bSYSTEM\\s*:\\s*\\S|\\bSYSTEM\\s+(ignore|override|approve|commit|transfer)\\b",
+      "scope": "output"
+    },
+    {
+      "id": "bulk-approve",
+      "category": "override",
+      "pattern": "\\b(approve|post|commit|ratify)\\s+(all|every)\\s+(the\\s+)?(drafts?|entries|plans?|journals?|transactions?)\\b",
+      "scope": "output"
     }
   ]
 }

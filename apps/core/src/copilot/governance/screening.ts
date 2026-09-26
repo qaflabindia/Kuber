@@ -27,17 +27,20 @@ export const MAX_INPUT_CHARS = 4000;
 
 const PatternFile = z.object({
   version: z.string(), updated: z.string(), owner: z.string(),
-  patterns: z.array(z.object({ id: z.string().regex(/^[a-z0-9-]+$/), category: z.string(), pattern: z.string() })).min(1),
+  patterns: z.array(z.object({ id: z.string().regex(/^[a-z0-9-]+$/), category: z.string(), pattern: z.string(),
+    /** "output": third-party text only (a person may legitimately ask for this, e.g. "approve all drafts"). */
+    scope: z.enum(["both", "output"]).default("both") })).min(1),
 });
-export type PatternLibrary = { version: string; patterns: { id: string; category: string; re: RegExp }[] };
+export type PatternLibrary = { version: string; patterns: { id: string; category: string; re: RegExp; scope: "both" | "output" }[] };
 
 export function loadPatterns(dir = AGENT_DIR): PatternLibrary {
   const f = PatternFile.parse(JSON.parse(readFileSync(join(dir, "injection-patterns.json"), "utf8")));
-  return { version: f.version, patterns: f.patterns.map((p) => ({ id: p.id, category: p.category, re: new RegExp(p.pattern, "i") })) };
+  return { version: f.version, patterns: f.patterns.map((p) => ({ id: p.id, category: p.category, re: new RegExp(p.pattern, "i"), scope: p.scope })) };
 }
 
 /** Pattern ids an input or text matches. */
-export const injectionMatches = (lib: PatternLibrary, text: string) => lib.patterns.filter((p) => p.re.test(text));
+/** Input screening (a person's own words): output-only patterns do not apply. */
+export const injectionMatches = (lib: PatternLibrary, text: string) => lib.patterns.filter((p) => p.scope !== "output" && p.re.test(text));
 
 // ------------------------------------------------------------------ scope classifier (PRM-04)
 /** Finance, accounting, the books and Kuber itself: any of these keeps an input in scope unless a strong out-of-scope signal fires. */
