@@ -64,7 +64,7 @@ const withJournal = (m: ReadonlyMap<string, JournalRecord>, id: string, j: Journ
   (m instanceof JournalMap ? m : JournalMap.from(m)).with(id, j);
 
 export type BookCommand =
-  | { kind: "OpenBook"; bookId: string; entityId: string; entityType: string; basis?: "statutory" | "management" | "tax" | "budget" | "scenario"; accounts: Account[];
+  | { kind: "OpenBook"; bookId: string; entityId: string; entityType: string; basis?: "statutory" | "management" | "tax" | "budget" | "scenario" | "consolidation"; accounts: Account[];
       legalEntityId?: string; framework?: string; fiscalYearStartMonth?: number; purpose?: "personal" | "business"; functionalCurrency?: { code: "INR"; exponent: 2 } }
   | { kind: "AddAccount"; account: Account }
   | { kind: "PostJournal"; journalId: string; txnDate: string; narration: string; voucherType?: string; lines: Line[];
@@ -172,6 +172,7 @@ export function decide(s: BookState, c: BookCommand, principal: string, ctx: Dec
     case "PostJournal": {
       if (s.journals.has(c.journalId)) return [];                    // idempotent retry
       assertBookCurrency(c.currency);
+      checkConsolidationVoucher(s, c.voucherType);
       validateJournal(s, c.txnDate, c.lines, principal);
       checkEntity(s, c.lines, ctx);
       // A control line naming a registered master party is a subledger posting; any other manual
@@ -289,6 +290,15 @@ export function checkEntity(s: BookState, lines: Line[], ctx: DecideContext) {
     const pe = l.partyId ? ctx.partyEntities?.get(l.partyId) : undefined;
     if (pe !== undefined && pe !== own) throw new DomainError("cross_entity", `party ${l.partyId} belongs to entity ${pe}; this book belongs to ${own}`);
   }
+}
+/**
+ * FIN-GRP-03: a consolidation book (basis "consolidation") holds only consolidation vouchers
+ * (eliminations, NCI, equity accounting), and a consolidation voucher never lands in a local book.
+ */
+export function checkConsolidationVoucher(s: BookState, voucherType: string | undefined) {
+  const consolidation = s.config.basis === "consolidation", voucher = (voucherType ?? "journal") === "consolidation";
+  if (consolidation && !voucher) throw new DomainError("consolidation_book", `${s.bookId} is a consolidation book: it accepts only consolidation vouchers from an approved consolidation plan`);
+  if (!consolidation && voucher) throw new DomainError("consolidation_book", `consolidation vouchers post only to a consolidation book; ${s.bookId} is a ${s.config.basis} book`);
 }
 /** Dimension keys that would name a legal entity. The entity is book configuration, never a dimension. */
 const ENTITY_DIMENSIONS = ["entity", "legalEntity", "legal_entity"];

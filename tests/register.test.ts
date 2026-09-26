@@ -23,7 +23,7 @@ describe("requirements register (requirements/register.md)", () => {
   it("has one row per G0 requirement and architecture finding", () => {
     const expected = [
       ...[1, 2, 3, 4, 5].map((n) => `FIN-MDM-0${n}`), ...[1, 2, 3, 4, 5].map((n) => `FIN-GL-0${n}`),
-      ...[1, 2, 3].map((n) => `FIN-OPS-0${n}`), "UAT-COM",
+      ...[1, 2, 3].map((n) => `FIN-OPS-0${n}`), ...[1, 2, 3, 4].map((n) => `FIN-GRP-0${n}`), "UAT-COM",
       ...Array.from({ length: 18 }, (_, i) => `F${String(i + 1).padStart(2, "0")}`),
       ...Array.from({ length: 8 }, (_, i) => `ROLE-0${i + 1}`),                    // role model v2 (design 6.3)
     ];

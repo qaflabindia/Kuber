@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
   "owner": "System Owner (Unassigned)",
-  "approvedBy": "Pending — System Owner",
+  "approvedBy": "Pending \u2014 System Owner",
   "approvedAt": "pending",
   "changeNote": "Initial register: every ops operation, kuber_commit (disabled for the copilot) and the read tools. External ext_* tools are denied until listed here by exact name (F17).",
   "policy": "Default deny: a tool not listed here, or listed with enabled false, is refused. The copilot may run only tools whose reversibility is none or simulation.",
@@ -451,6 +451,163 @@
       "untrustedOutput": true,
       "enabled": true,
       "note": "Open plans; titles and journals can quote narrations."
+    },
+    {
+      "name": "kuber_group_trial_balance",
+      "owner": "Group Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "group_trial_balance"
+    },
+    {
+      "name": "kuber_group_pnl",
+      "owner": "Group Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "group_pnl"
+    },
+    {
+      "name": "kuber_group_balance_sheet",
+      "owner": "Group Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "group_balance_sheet"
+    },
+    {
+      "name": "kuber_ic_mismatches",
+      "owner": "Group Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial",
+        "counterparty"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "ic_mismatches"
+    },
+    {
+      "name": "kuber_nci",
+      "owner": "Group Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "nci"
+    },
+    {
+      "name": "kuber_group_perimeter",
+      "owner": "Group Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "group_perimeter"
+    },
+    {
+      "name": "kuber_consolidate",
+      "owner": "Group Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "consolidate",
+      "note": "gate human: returns a plan on the group's consolidation book; a person commits it (plan.approve.period)",
+      "onCommit": "reversible"
+    },
+    {
+      "name": "kuber_certify_group",
+      "owner": "Group Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "certify_group",
+      "note": "gate human: returns a plan on the group's consolidation book; a person commits it (plan.approve.period)",
+      "onCommit": "irreversible"
+    },
+    {
+      "name": "kuber_group_structure",
+      "owner": "Group Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": false,
+      "op": "group_structure",
+      "note": "gate human: returns a plan on the group's consolidation book; a person commits it (plan.approve.period)",
+      "onCommit": "reversible"
+    },
+    {
+      "name": "kuber_group_ownership",
+      "owner": "Group Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": false,
+      "op": "group_ownership",
+      "note": "gate human: returns a plan on the group's consolidation book; a person commits it (plan.approve.period)",
+      "onCommit": "reversible"
+    },
+    {
+      "name": "kuber_group_ic_link",
+      "owner": "Group Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": false,
+      "op": "group_ic_link",
+      "note": "gate human: returns a plan on the group's consolidation book; a person commits it (plan.approve.period)",
+      "onCommit": "reversible"
+    },
+    {
+      "name": "kuber_ic_adjust",
+      "owner": "Group Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "ic_adjust",
+      "note": "gate human: returns a plan on the group's consolidation book; a person commits it (plan.approve.period)",
+      "onCommit": "reversible"
     }
   ]
 }

@@ -12,6 +12,7 @@
     "@kuber/auth": "workspace:*",
     "@kuber/bus": "workspace:*",
     "@kuber/channels": "workspace:*",
+    "@kuber/consolidation": "workspace:*",
     "@kuber/contracts": "workspace:*",
     "@kuber/crypto": "workspace:*",
     "@kuber/dream-rsi": "workspace:*",

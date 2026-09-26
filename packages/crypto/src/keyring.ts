@@ -6,7 +6,7 @@
  * Keys are stored only wrapped by the KMS master key. Deleting a tenant's keys (crypto-shredding)
  * makes every ciphertext of that tenant permanently unreadable, including copies in backups.
  */
-import { randomBytes } from "node:crypto";
+import { hkdfSync, randomBytes } from "node:crypto";
 import type { Sql } from "postgres";
 import { CryptoError, blindIndex, openWith, parseToken, sealWith } from "./cipher.ts";
 import type { Kms } from "./kms.ts";
@@ -33,6 +33,12 @@ export interface TenantKeys {
   index(purpose: string, value: string): string;
   /** Key version a token was sealed with (for re-encryption). */
   versionOf(token: string): number;
+  /**
+   * A 256-bit key derived (HKDF-SHA256) from the tenant's index key for `purpose` and `context`.
+   * Stable across data-key rotation; gone when the tenant is crypto-shredded. Used where another
+   * tenant holds data that must become unreadable with this tenant (linked-tenant packs, FIN-GRP-04).
+   */
+  deriveKey(purpose: string, context: string): Buffer;
 }
 
 interface Row { purpose: "data" | "index"; version: number; kek_id: string; wrapped: string; state: "active" | "retired" }
@@ -109,6 +115,7 @@ export class Keyring {
       openJson: <T>(tok: string, ctx: string) => JSON.parse(open(tok, ctx).toString("utf8")) as T,
       index: (purpose, value) => blindIndex(ik, purpose, value),
       versionOf: (tok) => parseToken(tok).version,
+      deriveKey: (purpose, context) => Buffer.from(hkdfSync("sha256", ik, Buffer.from(`kuber-derive|${tenant}`, "utf8"), Buffer.from(`${purpose}\u0000${context}`, "utf8"), 32)),
     };
     return keys;
   }

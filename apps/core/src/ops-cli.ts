@@ -43,6 +43,8 @@
  *                    [--duplication] --owner p --as p
  *   ops incident update <tenant> <id> [--containment "…"] [--corrections j1,j2] [--owner p] [--note "…"] --as p
  *   ops incident close <tenant> <id> --reconciliation <ref> [--note "…"] --as p   (not the incident's owner)
+ *   ops consolidate …                             FIN-GRP-01..04 group consolidation: groups, register plans, run, certify,
+ *                                                 group reports, IC disputes, linked tenants (see group-cli.ts)
  *   ops drill-compare --source <owner url> --restored <owner url> [--out file] [--meta json]
  *                                                 FIN-OPS-01: compare a restored database with its source
  *                                                 (used by scripts/restore-drill.sh); exit 1 on any difference
@@ -62,6 +64,7 @@ import { dirname } from "node:path";
 import { REVIEW_DECISIONS, SWITCH_SCOPES, type ReviewDecision, type SwitchScope } from "@kuber/identity";
 import { Cell } from "./cell.ts";
 import { OpsAdmin } from "./ops-admin.ts";
+import { groupCommand } from "./group-cli.ts";
 
 const argv = process.argv.slice(2);
 if (argv[0] === "ops") argv.shift();
@@ -223,6 +226,7 @@ try {
       } else throw new Error("usage: ops incident list|show|open|update|close <tenant> …");
       break;
     }
+    case "consolidate": print(await groupCommand(cell, args)); break;
     case "drill-compare": {
       const source = flag("--source"), restored = flag("--restored");
       if (!source || !restored) throw new Error("usage: ops drill-compare --source <owner url> --restored <owner url> [--out file] [--meta json]");
@@ -236,7 +240,7 @@ try {
       break;
     }
     default:
-      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify, verify-signatures, bus-consumers, backfill-confirmations, run-schedules, access-review, autonomy, agent-turns, agent-signals, incident, drill-compare");
+      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify, verify-signatures, bus-consumers, backfill-confirmations, run-schedules, access-review, autonomy, agent-turns, agent-signals, incident, consolidate, drill-compare");
       process.exitCode = 2;
   }
 } finally {

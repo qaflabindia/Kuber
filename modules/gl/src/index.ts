@@ -10,7 +10,7 @@ import { DomainError, decide, emptyBook, evolve, verifyChain, type BookCommand, 
 import { SEEDS } from "./seeds.ts";
 import { SnapshotStore, approxBytes } from "./snapshot.ts";
 
-export { DomainError, verifyChain, validateJournal, checkEntity, type BookCommand, type BookState, type DecideContext, type JournalRecord } from "./book.ts";
+export { DomainError, verifyChain, validateJournal, checkEntity, checkConsolidationVoucher, type BookCommand, type BookState, type DecideContext, type JournalRecord } from "./book.ts";
 export * from "./parties.ts";
 export { JournalMap } from "./journals.ts";
 export { BOOK_SNAPSHOT_SCHEMA, SnapshotStore } from "./snapshot.ts";

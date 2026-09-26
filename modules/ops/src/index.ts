@@ -30,7 +30,7 @@ import { OPERATIONS } from "./operations.ts";
 import { OPS_FIN_MIGRATIONS } from "./fin-migrations.ts";
 import { FIN_OPERATIONS } from "./fin-operations.ts";
 import { SCHEDULE_MIGRATIONS, Schedules } from "./schedules.ts";
-import type { Action, Effect, OpContext, OpDef, OpName, OpsGuard, Plan, PlanJournal, Services } from "./types.ts";
+import type { Action, Effect, ExtensionHandler, OpContext, OpDef, OpName, OpsGuard, Plan, PlanJournal, Services } from "./types.ts";
 
 export * from "./types.ts";
 export { OPERATIONS } from "./operations.ts";
@@ -78,6 +78,8 @@ export const DENY_ALL: OpsGuard = { check: async () => { throw new OpsError("for
 
 export class Operations {
   readonly defs = new Map<OpName, OpDef<any>>([...OPERATIONS, ...FIN_OPERATIONS].map((d) => [d.name, d]));
+  /** Handlers of `ext` actions by module (see registerExtension). */
+  private readonly extensions = new Map<string, ExtensionHandler>();
   /** Recurring and recognition schedules (FIN-GL-02/03): approved through a plan, run by `runSchedules`. */
   readonly schedules: Schedules;
   constructor(private sql: Sql, private store: EventStore, private svc: Services, private clock: () => string = () => new Date().toISOString().slice(0, 10),
@@ -109,6 +111,24 @@ export class Operations {
     });
   }
 
+  /**
+   * Add operations owned by another module (group consolidation). They are planned, stored, approved
+   * and committed exactly like the built-in ones, under the same guard, and appear in list() (and so
+   * in every agent surface's tool catalogue and the governance register).
+   */
+  register(defs: OpDef<any>[]) {
+    for (const d of defs) {
+      if (this.defs.has(d.name)) throw new Error(`operation ${d.name} is already registered`);
+      this.defs.set(d.name, d);
+    }
+  }
+
+  /** The handler for `ext` actions of `module` (one per module). */
+  registerExtension(module: string, handler: ExtensionHandler) {
+    if (this.extensions.has(module)) throw new Error(`extension ${module} is already registered`);
+    this.extensions.set(module, handler);
+  }
+
   list() {
     return [...this.defs.values()].map(({ name, title, description, kind, gate, event }) => ({ name, title, description, kind, gate, event: event ?? null }));
   }
@@ -121,7 +141,8 @@ export class Operations {
     if (!parsed.success) throw new OpsError("bad_input", parsed.error.issues.map((i) => `${i.path.join(".") || "input"}: ${i.message}`).join("; "), 400);
     const state = await this.svc.gl.state(tenant, book);
     if (!state.exists) throw new OpsError("no_book", `book ${book} does not exist`, 404);
-    const ctx: OpContext = { tenant, book, principal, today: this.clock(), state, svc: this.svc, schedules: this.schedules };
+    const ctx: OpContext = { tenant, book, principal, today: this.clock(), state, svc: this.svc, schedules: this.schedules,
+      ...(opts.onBehalfOf ? { onBehalfOf: opts.onBehalfOf } : {}) };
     const d = await def.plan(ctx, parsed.data);
 
     const journals = journalsOf(state, d.actions, d.data);
@@ -305,6 +326,10 @@ export class Operations {
           } else if (a.type === "cancelSchedule") {
             await this.schedules.cancel(b.tx, tenant, a, planId);
             steps.push(`cancelled schedule ${a.scheduleId} from ${a.effective}`);
+          } else if (a.type === "ext") {
+            const h = this.extensions.get(a.module);
+            if (!h) throw new OpsError("no_extension", `no handler for ${a.module} actions; nothing was applied`);
+            steps.push(await h(b.tx, { tenant, book: row.book_id, principal, approvedBy, planId }, a));
           } else if (a.type === "resolveSuspenseItem") {
             await this.svc.agent.suspense.markResolved(b.tx, tenant, a.itemId, principal, planId, a);
             steps.push(`resolved suspense item ${a.itemId}`);
