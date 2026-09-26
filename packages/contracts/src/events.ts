@@ -273,7 +273,8 @@ export const AGENT = {
   /** `journalId` null: the line is a different transaction and is processed as new. */
   MatchReviewResolved: z.object({ reviewId: Id, txnId: Id, journalId: Id.nullable() }),
   TransactionClassified: z.object({ txnId: Id, accountId: Id, confidence: z.number(), source: z.string() }),
-  PolicyDecisionMade: z.object({ txnId: Id, decision: Decision }),
+  /** `on`: the agent's decision date (selects the policies in force); absent on events recorded before it was added. */
+  PolicyDecisionMade: z.object({ txnId: Id, decision: Decision, on: IsoDate.optional() }),
   PostingRequested: z.object({
     requestId: Id, bookId: Id, txnDate: IsoDate, narration: z.string(), voucherType: z.string(),
     lines: z.array(Line).min(2), provisional: z.boolean(), autonomy: z.union([AutonomyLevel, z.literal("human")]),
@@ -325,6 +326,15 @@ export const AGENT = {
     toolDenials: z.number().int().nonnegative(), injectionFlags: z.number().int().nonnegative(),
     anomalies: z.array(z.string().max(200)), hitlBypass: z.boolean(),
   }),
+  /**
+   * Dream-RSI (design 7.2): an owner-approved autonomy tuning now governs this book and action type.
+   * Appended in the same transaction as the tuning row the agent's decisions read, after the
+   * approval (DreamProposalApproved). `tuning` holds thresholds only; no personal data.
+   */
+  AutonomyTuningApplied: z.object({ bookId: Id, actionType: z.enum(["receipt", "payment"]), proposalId: Id,
+    tuning: z.object({ l3MinConfidence: z.number(), l4MinConfidence: z.number().nullable(), relaxAfterAcceptances: z.number().int(),
+      accuracyFloor: z.number(), amountCeilingPaise: z.number().int(), newCounterpartyKnownAfter: z.number().int(), amountZLimit: z.number().nullable() }),
+    previous: z.record(z.string(), z.unknown()).nullable() }),
 } as const;
 
 // ------------------------------------------------------------------ Ops events
@@ -444,14 +454,30 @@ export const IDENTITY = {
   PortalQueryOpened: z.object({ queryId: Id, partyId: Id, subject: z.string(), message: z.string(), reference: z.string().optional() }),
   /** Role model v2: a certified snapshot was published to investors, or withdrawn. */
   SnapshotPublished: z.object({ snapshotId: Id, bookId: Id, published: z.boolean() }),
+  /** Design 7.3 data use: the owner allowed (or withdrew) the tenant's history for offline policy optimisation (Dream-RSI). */
+  OptimisationOptInChanged: z.object({ optIn: z.boolean(), previous: z.boolean().nullable() }),
 } as const;
 
-export const ALL_EVENTS = { ...GL, ...PARTY, ...CHANNELS, ...AGENT, ...OPS, ...EVIDENCE, ...IDENTITY } as const;
+// ------------------------------------------------------------------ Dream-RSI events (design 7.2)
+/**
+ * Offline policy optimisation. Promotion is not deployment: a winning autonomy policy is recorded
+ * as a proposal, and only an approval by a person with autonomy.manage applies it (the agent then
+ * appends AutonomyTuningApplied). Payloads carry hashes and thresholds, never personal data.
+ */
+export const DREAM = {
+  DreamProposalRecorded: z.object({ proposalId: Id, family: z.enum(["autonomy"]), bookId: Id, segments: z.array(z.string()).min(1),
+    seed: z.number().int(), poolHash: z.string().length(64), reportHash: z.string().length(64), evidence: z.string() }),
+  DreamProposalApproved: z.object({ proposalId: Id, family: z.enum(["autonomy"]), bookId: Id, segments: z.array(z.string()).min(1),
+    reportHash: z.string().length(64) }),
+  DreamProposalRejected: z.object({ proposalId: Id, reason: z.string().min(1) }),
+} as const;
+
+export const ALL_EVENTS = { ...GL, ...PARTY, ...CHANNELS, ...AGENT, ...OPS, ...EVIDENCE, ...IDENTITY, ...DREAM } as const;
 export type EventType = keyof typeof ALL_EVENTS;
 export type EventData<T extends EventType> = z.infer<(typeof ALL_EVENTS)[T]>;
 
 /** Which module owns (may append) each event type. Enforced by the event store. */
-export type Module = "gl" | "channels" | "agent" | "ops" | "evidence" | "identity";
+export type Module = "gl" | "channels" | "agent" | "ops" | "evidence" | "identity" | "dream";
 export const OWNER: Record<EventType, Module> = Object.fromEntries([
   ...Object.keys(GL).map((k) => [k, "gl"]),
   ...Object.keys(PARTY).map((k) => [k, "gl"]),                  // the GL owns master data (chart and parties)
@@ -460,6 +486,7 @@ export const OWNER: Record<EventType, Module> = Object.fromEntries([
   ...Object.keys(OPS).map((k) => [k, "ops"]),
   ...Object.keys(EVIDENCE).map((k) => [k, "evidence"]),
   ...Object.keys(IDENTITY).map((k) => [k, "identity"]),
+  ...Object.keys(DREAM).map((k) => [k, "dream"]),
 ]) as Record<EventType, Module>;
 
 export const SCHEMA_VERSION = 1;

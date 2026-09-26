@@ -8,6 +8,7 @@ COPY packages/eventstore/package.json packages/eventstore/
 COPY packages/bus/package.json packages/bus/
 COPY packages/crypto/package.json packages/crypto/
 COPY packages/auth/package.json packages/auth/
+COPY packages/dream-rsi/package.json packages/dream-rsi/
 COPY modules/gl/package.json modules/gl/
 COPY modules/policy/package.json modules/policy/
 COPY modules/channels/package.json modules/channels/

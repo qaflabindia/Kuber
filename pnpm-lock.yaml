@@ -26,6 +26,9 @@ importers:
       '@kuber/core':
         specifier: workspace:*
         version: link:apps/core
+      '@kuber/dream-rsi':
+        specifier: workspace:*
+        version: link:packages/dream-rsi
       '@kuber/eventstore':
         specifier: workspace:*
         version: link:packages/eventstore
@@ -105,6 +108,9 @@ importers:
       '@kuber/crypto':
         specifier: workspace:*
         version: link:../../packages/crypto
+      '@kuber/dream-rsi':
+        specifier: workspace:*
+        version: link:../../packages/dream-rsi
       '@kuber/eventstore':
         specifier: workspace:*
         version: link:../../packages/eventstore
@@ -336,6 +342,27 @@ importers:
       postgres:
         specifier: ^3.4.7
         version: 3.4.9
+
+  packages/dream-rsi:
+    dependencies:
+      '@kuber/agent':
+        specifier: workspace:*
+        version: link:../../modules/agent
+      '@kuber/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@kuber/eventstore':
+        specifier: workspace:*
+        version: link:../eventstore
+      '@kuber/policy':
+        specifier: workspace:*
+        version: link:../../modules/policy
+      postgres:
+        specifier: ^3.4.7
+        version: 3.4.9
+      zod:
+        specifier: ^4.1.0
+        version: 4.6.5
 
   packages/eventstore:
     dependencies:

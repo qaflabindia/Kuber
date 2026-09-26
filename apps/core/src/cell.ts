@@ -16,6 +16,8 @@ import { REPORTING_MIGRATIONS, Reporting } from "@kuber/reporting";
 import { Incidents, OPS_MIGRATIONS, Operations } from "@kuber/ops";
 import { EVIDENCE_MIGRATIONS, EvidenceService } from "@kuber/evidence";
 import { IDENTITY_MIGRATIONS, IDENTITY_SEAL_MIGRATION, Identity, type IdentityOptions } from "@kuber/identity";
+import { DREAM_MIGRATIONS, DreamService } from "@kuber/dream-rsi";
+import { join, resolve } from "node:path";
 import { sealIdentityColumns } from "./keys-admin.ts";
 import { Portal } from "./portal.ts";
 import { AGENT_GOVERNANCE_MIGRATIONS } from "./copilot/governance/recorder.ts";
@@ -54,15 +56,19 @@ export interface CellOptions {
   classifier?: LlmClassifier;
   /** Passkey relying party and development sign-in (identity module). Defaults suit local development. */
   identity?: Partial<IdentityOptions>;
+  /** Dream-RSI output: evidence reports (default <repo>/requirements/evidence) and routing artifacts (default <repo>/agent/artifacts). */
+  dream?: { evidenceDir?: string; artifactsDir?: string };
 }
 
-const SCHEMAS = ["es", "agent", "reporting", "ops", "keys", "evidence", "channels", "identity", "mdm"];
+const SCHEMAS = ["es", "agent", "reporting", "ops", "keys", "evidence", "channels", "identity", "mdm", "dream"];
 const ident = (role: string) => { if (!/^[a-z_][a-z0-9_]*$/.test(role)) throw new Error(`invalid role name ${role}`); return role; };
 
 /** Every SQL migration of the cell, in order. */
 export const CELL_MIGRATIONS = [...EVENTSTORE_MIGRATIONS, ...LIFECYCLE_MIGRATIONS, ...AGENT_MIGRATIONS, ...REPORTING_MIGRATIONS, ...OPS_MIGRATIONS, ...EVIDENCE_MIGRATIONS, ...CHANNELS_MIGRATIONS, ...IDENTITY_MIGRATIONS, ...PARTY_MIGRATIONS,
   // Copilot governance (TAGOF TOL-05, AGT-07): the turn index next to the sealed AgentTurnRecorded events.
-  ...AGENT_GOVERNANCE_MIGRATIONS];
+  ...AGENT_GOVERNANCE_MIGRATIONS,
+  // Dream-RSI (design 7.2): autonomy tuning, outcomes, proposals.
+  ...DREAM_MIGRATIONS];
 
 /** Migration ids a started cell requires: the SQL migrations and the data migrations run after them. */
 export const requiredMigrationIds = (): string[] => [...CELL_MIGRATIONS.map((m) => m.id), IDENTITY_SEAL_MIGRATION];
@@ -127,6 +133,8 @@ export class Cell {
   parties!: PartyMaster;
   /** Role model v2: what customers, suppliers, investors and guests may read, filtered at this boundary. */
   portal!: Portal;
+  /** Dream-RSI (design 7.2): offline policy runs, proposals and their approval. */
+  dream!: DreamService;
 
   private constructor(
     public readonly cellId: string, public readonly sql: Sql, private readonly systemSql: Sql, public readonly store: EventStore, public readonly bus: Bus,
@@ -198,6 +206,10 @@ export class Cell {
     // Role model v2: legacy role values (owner, approver, preparer, member) become the new roles, once
     // (idempotent; each change is a MemberRoleChanged event with the reason "role model v2").
     await identity.migrateRoleModel();
+    const repo = resolve(o.policyDir, "..");
+    cell.dream = new DreamService({ store, policies, guard: identity, agent, optIn: (t, tx) => identity.optimisationOptIn(t, tx),
+      clock: o.clock ?? (() => new Date().toISOString().slice(0, 10)),
+      evidenceDir: o.dream?.evidenceDir ?? join(repo, "requirements", "evidence"), artifactsDir: o.dream?.artifactsDir ?? join(repo, "agent", "artifacts") });
     return cell;
   }
 
