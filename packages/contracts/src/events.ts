@@ -271,7 +271,19 @@ export const AGENT = {
     /** Why the lines match: a shared reference, a shared counterparty, or a person linked them. */
     basis: z.enum(["reference", "counterparty", "user"]).optional() }),
   /** A statement line could be (or could not be told apart from) a provisional entry: a person decides. */
-  MatchReviewQueued: z.object({ txnId: Id, reviewId: Id, bookId: Id, candidates: z.array(Id), reason: z.string() }),
+  MatchReviewQueued: z.object({ txnId: Id, reviewId: Id, bookId: Id, candidates: z.array(Id), reason: z.string(),
+    /** FIN-CASH-02 (registered bank accounts): what a person is asked to decide; absent on earlier reviews ("match"). */
+    kind: z.enum(["match", "fee", "return", "partial"]).optional() }),
+  /**
+   * FIN-CASH-02: a statement line of a registered bank account settles book entries on that account
+   * (legs: journal and the signed amount of its bank line cleared by this statement line; the legs
+   * sum to the line's signed amount). One-to-one, one-to-many, a partial settlement, a settlement
+   * net of a separately posted fee, or a return linked to the entry it returns.
+   */
+  SettlementMatched: z.object({ txnId: Id, bookId: Id, instrument: Id,
+    kind: z.enum(["one_to_one", "one_to_many", "partial", "fee", "return", "transfer"]),
+    basis: z.enum(["reference", "counterparty", "user", "own_account"]),
+    legs: z.array(z.object({ journalId: Id, amount: MinorString })).min(1) }),
   /** `journalId` null: the line is a different transaction and is processed as new. */
   MatchReviewResolved: z.object({ reviewId: Id, txnId: Id, journalId: Id.nullable() }),
   TransactionClassified: z.object({ txnId: Id, accountId: Id, confidence: z.number(), source: z.string() }),
@@ -535,12 +547,43 @@ export const DREAM = {
   DreamProposalRejected: z.object({ proposalId: Id, reason: z.string().min(1) }),
 } as const;
 
-export const ALL_EVENTS = { ...GL, ...PARTY, ...CHANNELS, ...AGENT, ...OPS, ...EVIDENCE, ...IDENTITY, ...DREAM, ...CONSOLIDATION } as const;
+// ------------------------------------------------------------------ Bank events (FIN-CASH-01..03, modules/bank)
+/**
+ * Bank-account register, statement integrity, exceptions and certified bank reconciliations.
+ * Stream `<tenant>/bank/<bookId>/<bankAccountId>`; exceptions `<tenant>/bank-exceptions/<bookId>`.
+ * Payloads are sealed like every event; the account number is sealed here and in bank.accounts.
+ */
+const BankStatus = z.enum(["verified", "held"]);
+export const BANK = {
+  BankAccountRegistered: z.object({ bankAccountId: Id, bookId: Id, glAccountId: Id, bankName: z.string().min(1).max(200),
+    accountNumber: z.string().regex(/^[0-9]{6,20}$/), ifsc: z.string().regex(/^[A-Z]{4}0[A-Z0-9]{6}$/), masked: z.string(),
+    accountIdx: z.string(), currency: z.literal("INR"), staleDays: z.number().int().positive(), feeTolerancePaise: MinorString }),
+  /** A statement file: `verified` (identity, arithmetic and rows proven; its lines were submitted) or `held` (nothing submitted). */
+  BankStatementImported: z.object({ statementId: Id, bookId: Id, bankAccountId: Id, status: BankStatus,
+    provenance: z.enum(["uploaded", "authenticated"]), periodFrom: IsoDate, periodTo: IsoDate,
+    opening: MinorString.nullable(), closing: MinorString.nullable(), contentHash: z.string().length(64),
+    rows: z.number().int(), accepted: z.number().int(), duplicates: z.number().int(), skipped: z.number().int(),
+    signalId: Id.nullable(), identity: z.enum(["proven", "mismatch", "missing"]), problems: z.array(z.string()) }),
+  /** The common exception record (CFO §2): a case with owner, due time and its hold. */
+  BankExceptionRaised: z.object({ caseId: Id, bookId: Id, bankAccountId: Id.nullable(), requirement: z.string(), sourceId: z.string(),
+    cause: z.string(), amount: MinorString.nullable(), period: z.string().nullable(), owner: z.string(), dueBy: IsoDate,
+    hold: z.enum(["import", "certification", "none"]) }),
+  BankExceptionResolved: z.object({ caseId: Id, bookId: Id, resolution: z.string().min(3) }),
+  /** FIN-CASH-03: the certified reconciliation (sealed body in reporting.snapshots, snapshotId). */
+  BankReconciliationCertified: z.object({ reconciliationId: Id, bookId: Id, bankAccountId: Id, periodFrom: IsoDate, periodEnd: IsoDate,
+    version: z.number().int().positive(), snapshotId: Id, contentHash: z.string().length(64), statementHashes: z.array(z.string()),
+    ledgerSeq: z.number().int(), ledgerHash: z.string().nullable(), preparedBy: Principal, certifiedBy: Principal, planId: Id }),
+  /** A later posting (or statement movement) into the certified period: the certification no longer stands. */
+  BankReconciliationWithdrawn: z.object({ reconciliationId: Id, bookId: Id, bankAccountId: Id, periodEnd: IsoDate, reason: z.string(),
+    journalId: Id.optional(), statementId: Id.optional() }),
+} as const;
+
+export const ALL_EVENTS = { ...GL, ...PARTY, ...CHANNELS, ...AGENT, ...OPS, ...EVIDENCE, ...IDENTITY, ...DREAM, ...CONSOLIDATION, ...BANK } as const;
 export type EventType = keyof typeof ALL_EVENTS;
 export type EventData<T extends EventType> = z.infer<(typeof ALL_EVENTS)[T]>;
 
 /** Which module owns (may append) each event type. Enforced by the event store. */
-export type Module = "gl" | "channels" | "agent" | "ops" | "evidence" | "identity" | "dream" | "consolidation";
+export type Module = "gl" | "channels" | "agent" | "ops" | "evidence" | "identity" | "dream" | "consolidation" | "bank";
 export const OWNER: Record<EventType, Module> = Object.fromEntries([
   ...Object.keys(GL).map((k) => [k, "gl"]),
   ...Object.keys(PARTY).map((k) => [k, "gl"]),                  // the GL owns master data (chart and parties)
@@ -551,6 +594,7 @@ export const OWNER: Record<EventType, Module> = Object.fromEntries([
   ...Object.keys(IDENTITY).map((k) => [k, "identity"]),
   ...Object.keys(DREAM).map((k) => [k, "dream"]),
   ...Object.keys(CONSOLIDATION).map((k) => [k, "consolidation"]),
+  ...Object.keys(BANK).map((k) => [k, "bank"]),
 ]) as Record<EventType, Module>;
 
 export const SCHEMA_VERSION = 1;

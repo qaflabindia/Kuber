@@ -29,12 +29,17 @@ import { RELAX_LOOKBACK, amountZScore, relaxStatsFrom, type AutonomyTuning, type
 import { SUSPENSE, accountNameCtx, classify, type LlmClassifier } from "./classify.ts";
 import { AgentError } from "./errors.ts";
 import { SuspenseCases } from "./suspense.ts";
+import { matchSettlement, type ClearingHook, type SettlementOutcome } from "./settlement.ts";
+import { matchWords, refsOf, wordsOverlap } from "./words.ts";
 
 export { AGENT_MIGRATIONS } from "./migrations.ts";
 export { LLM_MAX_CONFIDENCE, MERCHANTS, SUSPENSE, accountNameCtx } from "./classify.ts";
 export type { ClassifierAccount, ClassifierInput, LlmClassifier, LlmSuggestion } from "./classify.ts";
 export { AgentError } from "./errors.ts";
 export { SuspenseCases, suspenseItemId, type RollForward, type SuspenseItem } from "./suspense.ts";
+export { judge, matchSettlement, namesAccount, type Clearing, type ClearingHook, type Evidence, type OwnAccount, type PriorLine, type SettlementContext,
+  type SettlementLeg, type SettlementLine, type SettlementOutcome } from "./settlement.ts";
+export { MATCH_STOP, matchWords, refsOf, wordsOverlap } from "./words.ts";
 
 export const AGENT_PRINCIPAL = "agent:kuber";
 const INGEST_EVENT = "EVT-TXN-INGESTED";
@@ -58,6 +63,12 @@ export class Agent {
    * unreleased bank-detail change. A draft paying such a party cannot be approved. Set by the cell.
    */
   paymentHolds?: (tenantId: string, partyIds: string[], tx: TransactionSql) => Promise<{ partyId: string; changeId: string; status: string }[]>;
+  /**
+   * FIN-CASH-02: registered bank accounts (the bank module, set by the cell). A statement line of a
+   * registered account is matched against every uncleared book entry on it (matchSettlement), not
+   * only provisional ones; without the hook, or for other instruments, provisional matching applies.
+   */
+  clearing?: ClearingHook;
 
   constructor(private sql: Sql, private store: EventStore, private policies: PolicyEngine,
               private clock: () => string = () => new Date().toISOString().slice(0, 10),
@@ -251,9 +262,37 @@ export class Agent {
     const { partyId, partyName, isNew } = await this.resolveParty(tx, t, txn.counterpartyHint ?? narrationKey(txn.narration), keys);
     if (partyId && !opts.skipMatch) events.push({ type: "PartyResolved", data: { txnId: d.txnId, partyId, partyName: partyName!, isNew } });
 
+    // 2a. FIN-CASH-02: a line of a registered bank account settles uncleared book entries on it
+    //     (one-to-one, one-to-many, partial), goes to a person (ambiguous, fee, return), is an
+    //     own-account transfer, or is new; recorded by the bank module in this transaction.
+    let bankPath = false, transferTo: string | null = null;
+    if (d.trust === "authoritative" && this.clearing) {
+      const bctx = await this.clearing.context(tx, t, d.bookId, txn.instrument, d.txnId);
+      if (bctx) {
+        bankPath = true;
+        await this.clearing.noteLine(tx, t, d.bookId, txn.instrument, d.txnId, txn);
+        if (!opts.skipMatch) {
+          const m: SettlementOutcome = matchSettlement({ txnDate: txn.txnDate, signed, narration: txn.narration, reference: txn.reference ?? null,
+            counterpartyHint: txn.counterpartyHint ?? null }, bctx);
+          if (m.kind === "clear") {
+            await this.clearing.record(tx, t, { bookId: d.bookId, instrument: txn.instrument, txnId: d.txnId, txnDate: txn.txnDate, kind: m.match, basis: m.basis, legs: m.legs, by: AGENT_PRINCIPAL });
+            events.push(...(await this.settled(tx, t, d.bookId, txn.instrument, d.txnId, m.match, m.basis, m.legs, bctx.legs)));
+            await this.store.append("agent", t, { streamId: stream, expected: "any", events }, baseMeta, tx);
+            return;
+          }
+          if (m.kind === "review") {
+            events.push(await this.queueReview(tx, t, d.bookId, d.txnId, txn, keys, m.candidates, m.reason, { kind: m.review, bankAccountId: bctx.bankAccountId }));
+            await this.store.append("agent", t, { streamId: stream, expected: "any", events }, baseMeta, tx);
+            return;
+          }
+          if (m.kind === "transfer") transferTo = m.toAccount;
+        }
+      }
+    }
+
     // 2. an authoritative line may confirm an earlier provisional entry instead of posting again,
     //    but only on real evidence (see matchProvisional); anything ambiguous waits for a person
-    if (d.trust === "authoritative" && !opts.skipMatch) {
+    if (d.trust === "authoritative" && !opts.skipMatch && !bankPath) {
       const m = await this.matchProvisional(tx, t, d.bookId, txn, keys);
       if (m.kind === "confirm") {
         await tx`UPDATE agent.journal_index SET confirmed = true WHERE tenant_id = ${t} AND journal_id = ${m.journalId}`;
@@ -262,22 +301,17 @@ export class Agent {
         return;
       }
       if (m.kind === "review") {
-        const reviewId = stableId("match-review", `${t}/${d.txnId}`);
-        await tx`INSERT INTO agent.match_reviews (tenant_id, review_id, txn_id, book_id, status, candidates, detail)
-                 VALUES (${t}, ${reviewId}, ${d.txnId}, ${d.bookId}, 'open', ${tx.json(m.candidates as never)},
-                         ${keys.sealJson({ txnDate: txn.txnDate, narration: txn.narration, amount: txn.amount, direction: txn.direction,
-                           instrument: txn.instrument, reference: txn.reference ?? null, reason: m.reason }, matchReviewCtx(reviewId))})
-                 ON CONFLICT DO NOTHING`;
-        events.push({ type: "MatchReviewQueued", data: { txnId: d.txnId, reviewId, bookId: d.bookId, candidates: m.candidates, reason: m.reason } });
+        events.push(await this.queueReview(tx, t, d.bookId, d.txnId, txn, keys, m.candidates, m.reason));
         await this.store.append("agent", t, { streamId: stream, expected: "any", events }, baseMeta, tx);
         return;
       }
     }
 
-    // 3. classify
+    // 3. classify (an own-account transfer is classified to the other bank account: FIN-CASH-02)
     const accounts = await this.accountSet(tx, t, d.bookId);
     if (!accounts.has(txn.instrument)) throw new AgentError("unknown_instrument", `book ${d.bookId} has no account ${txn.instrument}`);
-    const c = await classify(tx, t, d.bookId, accounts, { direction: txn.direction, narration: txn.narration, partyId, partyName, purpose: txn.purposeHint }, keys, this.llm);
+    const c = transferTo && accounts.has(transferTo) ? { accountId: transferTo, confidence: 1, source: "own-account transfer" }
+      : await classify(tx, t, d.bookId, accounts, { direction: txn.direction, narration: txn.narration, partyId, partyName, purpose: txn.purposeHint }, keys, this.llm);
     events.push({ type: "TransactionClassified", data: { txnId: d.txnId, accountId: c.accountId, confidence: c.confidence, source: c.source } });
 
     const provisional = d.trust === "provisional" || (d.trust === "user" && txn.instrument !== "CASH");
@@ -336,6 +370,110 @@ export class Agent {
                        ${tx.json(decision as never)}) ON CONFLICT DO NOTHING`;
     }
     await this.store.append("agent", t, { streamId: stream, expected: "any", events }, meta, tx);
+  }
+
+  /** A match review (sealed detail) and its event; `bank`: a registered bank account's review (FIN-CASH-02). */
+  private async queueReview(tx: TransactionSql, t: string, bookId: string, txnId: string, txn: RawTxn, keys: TenantKeys, candidates: string[], reason: string,
+                            bank?: { kind: "match" | "fee" | "return" | "partial"; bankAccountId: string }): Promise<NewEvent> {
+    const reviewId = stableId("match-review", `${t}/${txnId}`);
+    await tx`INSERT INTO agent.match_reviews (tenant_id, review_id, txn_id, book_id, status, candidates, detail)
+             VALUES (${t}, ${reviewId}, ${txnId}, ${bookId}, 'open', ${tx.json(candidates as never)},
+                     ${keys.sealJson({ txnDate: txn.txnDate, narration: txn.narration, amount: txn.amount, direction: txn.direction,
+                       instrument: txn.instrument, reference: txn.reference ?? null, reason, ...(bank ? { bank } : {}) }, matchReviewCtx(reviewId))})
+             ON CONFLICT DO NOTHING`;
+    return { type: "MatchReviewQueued", data: { txnId, reviewId, bookId, candidates, reason, ...(bank ? { kind: bank.kind } : {}) } };
+  }
+
+  /**
+   * FIN-CASH-02: the events of a settlement: SettlementMatched, and for each provisional entry the
+   * line clears completely, ProvisionalConfirmed (the GL records the confirmation).
+   */
+  private async settled(tx: TransactionSql, t: string, bookId: string, instrument: string, txnId: string, kind: EventData<"SettlementMatched">["kind"],
+                        basis: EventData<"SettlementMatched">["basis"], legs: { journalId: string; amount: bigint }[],
+                        known: { journalId: string; remaining: bigint; provisional: boolean }[]): Promise<NewEvent[]> {
+    const events: NewEvent[] = [{ type: "SettlementMatched", data: { txnId, bookId, instrument, kind, basis, legs: legs.map((l) => ({ journalId: l.journalId, amount: l.amount.toString() })) } }];
+    for (const l of legs) {
+      const k = known.find((x) => x.journalId === l.journalId);
+      await tx`UPDATE agent.journal_index SET confirmed = true WHERE tenant_id = ${t} AND journal_id = ${l.journalId}`;
+      if (k?.provisional && k.remaining === l.amount) {
+        events.push({ type: "ProvisionalConfirmed", data: { txnId, journalId: l.journalId, bookId, basis: basis === "reference" ? "reference" : basis === "user" ? "user" : "counterparty" } });
+      }
+    }
+    return events;
+  }
+
+  /**
+   * FIN-CASH-02: resolve a registered bank account's match review.
+   *   journalIds  the book entries this line settles: their uncleared amounts must add up to the
+   *               line exactly, or one entry larger than the line is settled in part
+   *   fee         with journalIds: the line is the settlement net of this fee; the fee is posted as
+   *               its own journal (bank line to `accountId`) and linked, so gross less fee = bank
+   *   returnOf    the line returns this cleared payment: a linked return entry mirroring it is
+   *               posted (restoring the payable); paying again needs a new authorized decision
+   * The resolver needs draft.decide in the book (module guard).
+   */
+  async resolveSettlement(tenantId: string, reviewId: string, principal: string,
+                          r: { journalIds?: string[]; fee?: { amountPaise: string; accountId: string }; returnOf?: string }) {
+    const hook = this.clearing;
+    if (!hook) throw new AgentError("no_bank_module", "bank settlement is not available");
+    return this.store.tenantTx(tenantId, async (tx) => {
+      const keys = await this.store.keys(tenantId);
+      const [row] = await tx<{ txn_id: string; book_id: string; detail: string }[]>`
+        SELECT txn_id, book_id, detail FROM agent.match_reviews WHERE tenant_id = ${tenantId} AND review_id = ${reviewId} AND status = 'open' FOR UPDATE`;
+      if (!row) throw new AgentError("not_open", `no open match review ${reviewId}`);
+      await this.mayDecide(tx, tenantId, principal, row.book_id);
+      const det = keys.openJson<MatchReviewDetail>(row.detail, matchReviewCtx(reviewId));
+      if (!det.bank) throw new AgentError("not_bank_review", `${reviewId} is not a bank settlement review: resolve it with resolveMatch`);
+      const bctx = await hook.context(tx, tenantId, row.book_id, det.instrument, row.txn_id);
+      if (!bctx) throw new AgentError("not_registered", `${det.instrument} is no longer a registered bank account`);
+      const signed = BigInt(det.amount) * (det.direction === "in" ? 1n : -1n);
+      const stream = `${tenantId}/txn/${row.txn_id}`;
+      const events: NewEvent[] = [];
+      let legs: { journalId: string; amount: bigint }[], kind: EventData<"SettlementMatched">["kind"];
+      const accounts = await this.accountSet(tx, tenantId, row.book_id);
+      if (r.returnOf) {
+        const orig = await hook.journal(tenantId, row.book_id, r.returnOf);
+        const leg = orig?.lines.filter((l) => l.accountId === det.instrument).reduce((a, l) => a + BigInt(l.amount), 0n) ?? 0n;
+        if (!orig || leg !== -signed) throw new AgentError("not_returnable", `${r.returnOf} has no line of ${-signed} paise on ${det.instrument} for this line to return`);
+        const requestId = `ret-${row.txn_id}`;
+        const lines = orig.lines.map((l) => ({ ...l, amount: (-BigInt(l.amount)).toString(), dimensions: { ...(l.dimensions ?? {}), returns: r.returnOf! } }));
+        events.push({ type: "PostingRequested", data: { requestId, bookId: row.book_id, txnDate: det.txnDate, narration: `Returned: ${orig.narration}`, voucherType: "return",
+          lines, provisional: false, autonomy: "human", sourceStream: stream } });
+        legs = [{ journalId: journalIdForRequest(tenantId, requestId), amount: signed }];
+        kind = "return";
+      } else {
+        const ids = [...new Set(r.journalIds ?? [])];
+        if (!ids.length) throw new AgentError("bad_request", "name the book entries this line settles, or returnOf");
+        const chosen = ids.map((id) => bctx.legs.find((l) => l.journalId === id));
+        const missing = ids.filter((_, i) => !chosen[i] || (chosen[i]!.remaining < 0n) !== (signed < 0n));
+        if (missing.length) throw new AgentError("not_matchable", `${missing.join(", ")}: not an uncleared entry on ${det.instrument} in the same direction`);
+        legs = chosen.map((l) => ({ journalId: l!.journalId, amount: l!.remaining }));
+        if (r.fee) {
+          const fee = BigInt(r.fee.amountPaise);
+          if (fee <= 0n) throw new AgentError("bad_fee", "a fee is a positive amount (paise)");
+          if (!accounts.has(r.fee.accountId) || r.fee.accountId === det.instrument) throw new AgentError("no_account", `unknown fee account ${r.fee.accountId}`);
+          const requestId = `fee-${row.txn_id}`;
+          events.push({ type: "PostingRequested", data: { requestId, bookId: row.book_id, txnDate: det.txnDate, narration: `Bank charge deducted from settlement: ${det.narration}`,
+            voucherType: "payment", lines: [{ accountId: det.instrument, amount: (-fee).toString(), dimensions: { settles: row.txn_id } }, { accountId: r.fee.accountId, amount: fee.toString(), dimensions: { settles: row.txn_id } }],
+            provisional: false, autonomy: "human", sourceStream: stream } });
+          legs.push({ journalId: journalIdForRequest(tenantId, requestId), amount: -fee });
+          kind = "fee";
+        } else kind = legs.length > 1 ? "one_to_many" : "one_to_one";
+        const total = legs.reduce((a, l) => a + l.amount, 0n);
+        if (total !== signed) {
+          if (!r.fee && legs.length === 1 && (legs[0]!.amount < 0n) === (signed < 0n) && (legs[0]!.amount < 0n ? -legs[0]!.amount : legs[0]!.amount) > (signed < 0n ? -signed : signed)) {
+            legs = [{ journalId: legs[0]!.journalId, amount: signed }]; kind = "partial";
+          } else throw new AgentError("not_equal", `the entries${r.fee ? " less the fee" : ""} come to ${total} paise, the line is ${signed}: a settlement must add up exactly`);
+        }
+      }
+      await hook.record(tx, tenantId, { bookId: row.book_id, instrument: det.instrument, txnId: row.txn_id, txnDate: det.txnDate, kind, basis: "user", legs, by: principal });
+      await tx`UPDATE agent.match_reviews SET status = 'linked', journal_id = ${legs[0]!.journalId}, resolved_by = ${principal}, resolved_at = now()
+               WHERE tenant_id = ${tenantId} AND review_id = ${reviewId}`;
+      events.unshift({ type: "MatchReviewResolved", data: { reviewId, txnId: row.txn_id, journalId: legs[0]!.journalId } });
+      events.push(...(await this.settled(tx, tenantId, row.book_id, det.instrument, row.txn_id, kind, "user", legs, bctx.legs)));
+      await this.store.append("agent", tenantId, { streamId: stream, expected: "any", events }, { principal }, tx);
+      return { status: "linked" as const, kind, legs: legs.map((l) => ({ journalId: l.journalId, amount: l.amount.toString() })) };
+    });
   }
 
   // ------------------------------------------------------------------ commands from people
@@ -455,6 +593,14 @@ export class Agent {
    * which the GL records). null: it is a different transaction and is classified and posted or drafted as new.
    */
   async resolveMatch(tenantId: string, reviewId: string, principal: string, journalId: string | null) {
+    const r = await this.resolveMatchIn(tenantId, reviewId, principal, journalId);
+    if (r) return r;
+    // FIN-CASH-02: linking a bank settlement review to one entry is a settlement of that entry.
+    const s = await this.resolveSettlement(tenantId, reviewId, principal, { journalIds: [journalId!] });
+    return { status: "linked" as const, journalId: s.legs[0]!.journalId };
+  }
+
+  private async resolveMatchIn(tenantId: string, reviewId: string, principal: string, journalId: string | null) {
     return this.store.tenantTx(tenantId, async (tx) => {
       const keys = await this.store.keys(tenantId);
       const [r] = await tx<{ txn_id: string; book_id: string; detail: string }[]>`
@@ -463,6 +609,7 @@ export class Agent {
       await this.mayDecide(tx, tenantId, principal, r.book_id);
       const det = keys.openJson<MatchReviewDetail>(r.detail, matchReviewCtx(reviewId));
       const stream = `${tenantId}/txn/${r.txn_id}`;
+      if (journalId && det.bank) return null;                      // a bank settlement review: resolveSettlement, below
       if (journalId) {
         const signed = BigInt(det.amount) * (det.direction === "in" ? 1n : -1n);
         const [j] = await tx<{ journal_id: string }[]>`
@@ -889,44 +1036,10 @@ function openProposal(keys: TenantKeys, draftId: string, v: unknown): Proposal {
 // ------------------------------------------------------------------ matching helpers
 type MatchOutcome = { kind: "none" } | { kind: "confirm"; journalId: string; basis: "reference" | "counterparty" }
   | { kind: "review"; candidates: string[]; reason: string };
-interface MatchReviewDetail { txnDate: string; narration: string; amount: string; direction: "in" | "out"; instrument: string; reference: string | null; reason: string }
+interface MatchReviewDetail { txnDate: string; narration: string; amount: string; direction: "in" | "out"; instrument: string; reference: string | null; reason: string;
+  /** FIN-CASH-02: a registered bank account's review and what is to be decided. */
+  bank?: { kind: "match" | "fee" | "return" | "partial"; bankAccountId: string } }
 export interface MatchReviewRow { review_id: string; txn_id: string; book_id: string; candidates: string[]; detail: MatchReviewDetail; created_at: Date }
 
 export const matchReviewCtx = (reviewId: string) => `agent.match_reviews.detail|${reviewId}`;
 export const provisionalSourceCtx = (txnId: string) => `agent.provisional_sources.detail|${txnId}`;
-
-/** Words that say nothing about who the counterparty is: rails, banks, verbs, units, document words. */
-const MATCH_STOP = new Set(["upi", "neft", "imps", "rtgs", "ach", "nach", "ecs", "txn", "ref", "reference", "the", "and", "paid", "payment",
-  "transfer", "transferred", "cash", "spent", "received", "sent", "gave", "got", "credited", "debited", "collected", "earned", "bought",
-  "via", "from", "for", "bank", "card", "pos", "atm", "p2m", "p2a", "lakh", "lakhs", "crore", "crores", "rupees", "inr", "using", "through",
-  "with", "yesterday", "today", "gpay", "phonepe", "paytm", "netbanking", "hdfc", "icici", "sbi", "axis", "kotak", "invoice", "inv", "bill",
-  "receipt", "order", "ltd", "pvt", "private", "limited", "llp", "inc", "mr", "mrs", "ms", "shri", "smt", "chq", "cheque", "online", "fund", "funds"]);
-
-function matchWords(...texts: (string | null | undefined)[]): Set<string> {
-  const out = new Set<string>();
-  for (const t of texts) {
-    for (const w of (t ?? "").toLowerCase().replace(/@[a-z0-9.\-]+/g, " ").split(/[^a-z0-9]+/)) {
-      if (w.length >= 3 && !/^\d+$/.test(w) && !MATCH_STOP.has(w)) out.add(w);
-    }
-  }
-  return out;
-}
-
-/** A shared word, or one word the start of the other (at least 4 letters: "acme" / "acmecorp"). */
-function wordsOverlap(a: Set<string>, b: Set<string>): boolean {
-  for (const x of a) for (const y of b) {
-    if (x === y) return true;
-    const [s, l] = x.length <= y.length ? [x, y] : [y, x];
-    if (s.length >= 4 && l.startsWith(s)) return true;
-  }
-  return false;
-}
-
-/** References worth matching: the reference column and long digit runs (UTR, cheque numbers). */
-function refsOf(reference: string | undefined, narration: string): Set<string> {
-  const out = new Set<string>();
-  const r = (reference ?? "").trim().toLowerCase();
-  if (r.length >= 6 && !/^0+$/.test(r)) out.add(r);
-  for (const m of narration.toLowerCase().match(/\b[a-z]*\d{6,}\b/g) ?? []) if (!/^0+$/.test(m)) out.add(m);
-  return out;
-}

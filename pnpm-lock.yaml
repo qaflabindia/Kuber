@@ -14,6 +14,9 @@ importers:
       '@kuber/auth':
         specifier: workspace:*
         version: link:packages/auth
+      '@kuber/bank':
+        specifier: workspace:*
+        version: link:modules/bank
       '@kuber/bus':
         specifier: workspace:*
         version: link:packages/bus
@@ -99,6 +102,9 @@ importers:
       '@kuber/auth':
         specifier: workspace:*
         version: link:../../packages/auth
+      '@kuber/bank':
+        specifier: workspace:*
+        version: link:../../modules/bank
       '@kuber/bus':
         specifier: workspace:*
         version: link:../../packages/bus
@@ -205,6 +211,39 @@ importers:
       postgres:
         specifier: ^3.4.7
         version: 3.4.9
+
+  modules/bank:
+    dependencies:
+      '@kuber/agent':
+        specifier: workspace:*
+        version: link:../agent
+      '@kuber/channels':
+        specifier: workspace:*
+        version: link:../channels
+      '@kuber/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@kuber/crypto':
+        specifier: workspace:*
+        version: link:../../packages/crypto
+      '@kuber/eventstore':
+        specifier: workspace:*
+        version: link:../../packages/eventstore
+      '@kuber/gl':
+        specifier: workspace:*
+        version: link:../gl
+      '@kuber/ops':
+        specifier: workspace:*
+        version: link:../ops
+      '@kuber/reporting':
+        specifier: workspace:*
+        version: link:../reporting
+      postgres:
+        specifier: ^3.4.7
+        version: 3.4.9
+      zod:
+        specifier: ^4.1.0
+        version: 4.6.5
 
   modules/channels:
     dependencies:

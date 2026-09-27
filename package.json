@@ -39,6 +39,7 @@
   "dependencies": {
     "@kuber/agent": "workspace:*",
     "@kuber/auth": "workspace:*",
+    "@kuber/bank": "workspace:*",
     "@kuber/bus": "workspace:*",
     "@kuber/channels": "workspace:*",
     "@kuber/consolidation": "workspace:*",

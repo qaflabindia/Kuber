@@ -318,6 +318,24 @@ export class Reporting {
     return snap;
   }
 
+  /**
+   * A certified snapshot computed by another module (FIN-CASH-03: a bank reconciliation), stored in
+   * the caller's transaction, sealed, under the same content-hash rule, so it is listed, retrieved
+   * and verified like a report snapshot. Its reproduction belongs to the owning module
+   * (reproduceSnapshot recomputes report kinds only).
+   */
+  async storeSnapshot(tx: TransactionSql, s: { tenantId: string; bookId: string; kind: string; params: Record<string, unknown>; seq: number; ledgerHash: string | null;
+    statement: CertifiedSnapshot["statement"]; takenBy: string }): Promise<{ snapshotId: string; contentHash: string; takenAt: string }> {
+    const snapshotId = uuid(), takenAt = new Date().toISOString();
+    const contentHash = contentHashOf({ bookId: s.bookId, kind: s.kind, params: s.params as ReportParams, seq: s.seq, ledgerHash: s.ledgerHash, statement: s.statement });
+    const snap = { snapshotId, tenantId: s.tenantId, bookId: s.bookId, kind: s.kind, params: s.params, seq: s.seq, ledgerHash: s.ledgerHash, contentHash,
+      takenBy: s.takenBy, takenAt, statement: s.statement };
+    const body = (await this.store.keys(s.tenantId)).seal(JSON.stringify(snap), snapshotCtx(snapshotId));
+    await tx`INSERT INTO reporting.snapshots (tenant_id, snapshot_id, book_id, kind, seq, content_hash, body, taken_by, taken_at)
+      VALUES (${s.tenantId}, ${snapshotId}, ${s.bookId}, ${s.kind}, ${s.seq}, ${contentHash}, ${body}, ${s.takenBy}, ${takenAt})`;
+    return { snapshotId, contentHash, takenAt };
+  }
+
   /** A stored snapshot, decrypted, with its hash re-checked against its content. */
   async getSnapshot(tenantId: string, snapshotId: string): Promise<(CertifiedSnapshot & { verified: boolean }) | null> {
     const [r] = await this.store.tenantTx(tenantId, (tx) => tx<{ body: string; content_hash: string; seq: number }[]>`

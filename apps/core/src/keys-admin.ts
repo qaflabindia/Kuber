@@ -32,6 +32,7 @@ import { IDENTITY_SEAL_MIGRATION, accessReviewNoteCtx, autonomyReasonCtx, enrolm
 import { incidentDetailCtx } from "@kuber/ops";
 import { bankChangeCtx, partyDetailCtx } from "@kuber/gl";
 import { disputeDetailCtx, groupNameCtx, groupSnapshotCtx, linkedPackCtx, positionNoteCtx, runStockCtx } from "@kuber/consolidation";
+import { bankDetailsCtx, exceptionResolutionCtx, lineDetailCtx, statementOriginalCtx } from "@kuber/bank";
 
 export interface SealedColumn {
   table: string; column: string; kind: "text" | "json"; keyCols: string[];
@@ -72,6 +73,11 @@ export const SEALED_COLUMNS: SealedColumn[] = [
   { table: "consolidation.runs", column: "stock", kind: "text", keyCols: ["run_id"], ctx: (r) => runStockCtx(r.run_id!) },
   { table: "consolidation.snapshots", column: "body", kind: "text", keyCols: ["snapshot_id"], ctx: (r) => groupSnapshotCtx(r.snapshot_id!) },
   { table: "consolidation.linked_packs", column: "body", kind: "text", keyCols: ["pack_id"], ctx: (r) => linkedPackCtx(r.pack_id!) },
+  // Cash and banks (FIN-CASH-01..03): own account numbers and IFSC, held statement originals, statement narrations, exception resolutions.
+  { table: "bank.accounts", column: "bank", kind: "text", keyCols: ["bank_account_id"], ctx: (r) => bankDetailsCtx(r.bank_account_id!) },
+  { table: "bank.statements", column: "original", kind: "text", keyCols: ["statement_id"], ctx: (r) => statementOriginalCtx(r.statement_id!) },
+  { table: "bank.lines", column: "detail", kind: "text", keyCols: ["txn_id"], ctx: (r) => lineDetailCtx(r.txn_id!) },
+  { table: "bank.exceptions", column: "resolution", kind: "text", keyCols: ["case_id"], ctx: (r) => exceptionResolutionCtx(r.case_id!) },
 ];
 
 /**
@@ -112,6 +118,10 @@ export const RETENTION: Record<string, "purge" | "sealed" | "keys" | "tombstone"
   // received linked packs. The facts are in sealed streams; a linked pack is also unreadable once its subsidiary is shredded.
   "consolidation.groups": "purge", "consolidation.ic_links": "purge", "consolidation.disputes": "purge", "consolidation.dispute_positions": "purge",
   "consolidation.runs": "purge", "consolidation.snapshots": "purge", "consolidation.links": "purge", "consolidation.linked_packs": "purge",
+  // Cash and banks (FIN-CASH-01..03): register, statements and row lineage, clearing links, exceptions, certified
+  // reconciliation index. The facts are in sealed streams (bank, agent txn); certified bodies in reporting.snapshots.
+  "bank.accounts": "purge", "bank.statements": "purge", "bank.statement_rows": "purge", "bank.lines": "purge", "bank.clearings": "purge",
+  "bank.exceptions": "purge", "bank.reconciliations": "purge",
   "evidence.balances": "purge", "evidence.records": "purge", "evidence.lookup": "purge",
   "es.outbox": "purge", "es.snapshots": "purge", "es.dead_letters": "purge", "es.commands": "purge", "es.verify_checkpoints": "purge",
   "es.events": "sealed", "keys.tenant_keys": "keys", "keys.shredded": "tombstone",

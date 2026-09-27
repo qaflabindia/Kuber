@@ -19,6 +19,7 @@ import { IDENTITY_MIGRATIONS, IDENTITY_SEAL_MIGRATION, Identity, type IdentityOp
 import { DREAM_MIGRATIONS, DreamService } from "@kuber/dream-rsi";
 import { join, resolve } from "node:path";
 import { CONSOLIDATION_MIGRATIONS, Consolidation, LinkedTenants, consolidationOperations } from "@kuber/consolidation";
+import { BANK_MIGRATIONS, BankService, bankExtension, bankOperations } from "@kuber/bank";
 import { sealIdentityColumns } from "./keys-admin.ts";
 import { Portal } from "./portal.ts";
 import { AGENT_GOVERNANCE_MIGRATIONS } from "./copilot/governance/recorder.ts";
@@ -61,7 +62,7 @@ export interface CellOptions {
   dream?: { evidenceDir?: string; artifactsDir?: string };
 }
 
-const SCHEMAS = ["es", "agent", "reporting", "ops", "keys", "evidence", "channels", "identity", "mdm", "dream", "consolidation"];
+const SCHEMAS = ["es", "agent", "reporting", "ops", "keys", "evidence", "channels", "identity", "mdm", "dream", "consolidation", "bank"];
 const ident = (role: string) => { if (!/^[a-z_][a-z0-9_]*$/.test(role)) throw new Error(`invalid role name ${role}`); return role; };
 
 /** Every SQL migration of the cell, in order. */
@@ -71,7 +72,9 @@ export const CELL_MIGRATIONS = [...EVENTSTORE_MIGRATIONS, ...LIFECYCLE_MIGRATION
   // Dream-RSI (design 7.2): autonomy tuning, outcomes, proposals.
   ...DREAM_MIGRATIONS,
   // Group consolidation (FIN-GRP-01..04).
-  ...CONSOLIDATION_MIGRATIONS];
+  ...CONSOLIDATION_MIGRATIONS,
+  // Cash and banks (FIN-CASH-01..03).
+  ...BANK_MIGRATIONS];
 
 /** Migration ids a started cell requires: the SQL migrations and the data migrations run after them. */
 export const requiredMigrationIds = (): string[] => [...CELL_MIGRATIONS.map((m) => m.id), IDENTITY_SEAL_MIGRATION];
@@ -140,6 +143,8 @@ export class Cell {
   dream!: DreamService;
   /** Group consolidation (FIN-GRP-01..04): register, intercompany, eliminations, group close, linked tenants. */
   consolidation!: Consolidation;
+  /** Cash and banks (FIN-CASH-01..03): bank-account register, statement integrity, settlement clearing, certified bank reconciliations. */
+  bank!: BankService;
 
   private constructor(
     public readonly cellId: string, public readonly sql: Sql, private readonly systemSql: Sql, public readonly store: EventStore, public readonly bus: Bus,
@@ -223,6 +228,16 @@ export class Cell {
     ops.register(consolidationOperations(consolidation));
     ops.registerExtension("consolidation", consolidation.extension);
     cell.consolidation = consolidation;
+    // Cash and banks: the agent matches registered accounts' statement lines through it (FIN-CASH-02); its
+    // operations and certification step go through the ops service; its consumer withdraws certifications.
+    const bank = new BankService({ store, gl, channels, reporting, guard: identity, clock: o.clock ?? (() => new Date().toISOString().slice(0, 10)),
+      samePerson: (t, a, b) => identity.isSamePerson(t, a, b), partyName: async (t, id) => (await parties.get(t, id))?.name ?? null });
+    agent.clearing = bank;
+    ops.register(bankOperations(bank));
+    ops.registerExtension("bank", bankExtension(bank));
+    await bus.subscribe({ name: "bank", filter: [s("gl", "JournalPosted")], handler: opened(bank.handler) });
+    cell.consumers.bank = bank.handler;
+    cell.bank = bank;
     return cell;
   }
 
