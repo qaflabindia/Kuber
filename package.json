@@ -49,6 +49,7 @@
     "@kuber/evidence": "workspace:*",
     "@kuber/gl": "workspace:*",
     "@kuber/identity": "workspace:*",
+    "@kuber/migration": "workspace:*",
     "@kuber/ops": "workspace:*",
     "@kuber/policy": "workspace:*",
     "@kuber/reporting": "workspace:*",

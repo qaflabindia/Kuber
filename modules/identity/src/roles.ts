@@ -67,6 +67,7 @@ export const ACTIONS = [
   "party.manage",         // create a party, change its details, request a bank-detail change (maker, FIN-MDM-03)
   "party.bank.verify",    // record the out-of-band verification of a bank-detail change, or reject it (checker)
   "party.bank.release",   // release a verified bank-detail change: lifts the payment hold (fresh approval)
+  "migration.manage",     // FIN-MIG-01..03: migration projects, source imports, mapping approval, rehearsal, loads, rollback (Controller/Operations)
   // Reporting to outsiders:
   "snapshot.publish",     // mark a certified snapshot published (or not) to investors
   "share.grant",          // share a certified snapshot or a report with a guest until an expiry

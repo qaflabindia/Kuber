@@ -19,6 +19,7 @@ import { IDENTITY_MIGRATIONS, IDENTITY_SEAL_MIGRATION, Identity, type IdentityOp
 import { DREAM_MIGRATIONS, DreamService } from "@kuber/dream-rsi";
 import { join, resolve } from "node:path";
 import { CONSOLIDATION_MIGRATIONS, Consolidation, LinkedTenants, consolidationOperations } from "@kuber/consolidation";
+import { MIGRATION_MIGRATIONS, Migration } from "@kuber/migration";
 import { sealIdentityColumns } from "./keys-admin.ts";
 import { Portal } from "./portal.ts";
 import { AGENT_GOVERNANCE_MIGRATIONS } from "./copilot/governance/recorder.ts";
@@ -61,7 +62,7 @@ export interface CellOptions {
   dream?: { evidenceDir?: string; artifactsDir?: string };
 }
 
-const SCHEMAS = ["es", "agent", "reporting", "ops", "keys", "evidence", "channels", "identity", "mdm", "dream", "consolidation"];
+const SCHEMAS = ["es", "agent", "reporting", "ops", "keys", "evidence", "channels", "identity", "mdm", "dream", "consolidation", "migration"];
 const ident = (role: string) => { if (!/^[a-z_][a-z0-9_]*$/.test(role)) throw new Error(`invalid role name ${role}`); return role; };
 
 /** Every SQL migration of the cell, in order. */
@@ -71,7 +72,9 @@ export const CELL_MIGRATIONS = [...EVENTSTORE_MIGRATIONS, ...LIFECYCLE_MIGRATION
   // Dream-RSI (design 7.2): autonomy tuning, outcomes, proposals.
   ...DREAM_MIGRATIONS,
   // Group consolidation (FIN-GRP-01..04).
-  ...CONSOLIDATION_MIGRATIONS];
+  ...CONSOLIDATION_MIGRATIONS,
+  // Legacy migration (FIN-MIG-01..03).
+  ...MIGRATION_MIGRATIONS];
 
 /** Migration ids a started cell requires: the SQL migrations and the data migrations run after them. */
 export const requiredMigrationIds = (): string[] => [...CELL_MIGRATIONS.map((m) => m.id), IDENTITY_SEAL_MIGRATION];
@@ -140,6 +143,8 @@ export class Cell {
   dream!: DreamService;
   /** Group consolidation (FIN-GRP-01..04): register, intercompany, eliminations, group close, linked tenants. */
   consolidation!: Consolidation;
+  /** Legacy migration (FIN-MIG-01..03): Tally/Zoho/CSV imports, mapping, rehearsal, delta, parallel run, go-live, rollback. */
+  migration!: Migration;
 
   private constructor(
     public readonly cellId: string, public readonly sql: Sql, private readonly systemSql: Sql, public readonly store: EventStore, public readonly bus: Bus,
@@ -223,6 +228,10 @@ export class Cell {
     ops.register(consolidationOperations(consolidation));
     ops.registerExtension("consolidation", consolidation.extension);
     cell.consolidation = consolidation;
+    // Legacy migration: loads go through the GL and the party master under the identity guard; a
+    // rehearsal book is load-only, so the ops service refuses every write operation in it (FIN-MIG-03).
+    cell.migration = new Migration({ store, gl, parties, guard: identity, clock: o.clock ?? (() => new Date().toISOString().slice(0, 10)) });
+    ops.addBookGate(cell.migration.rehearsalGate);
     return cell;
   }
 

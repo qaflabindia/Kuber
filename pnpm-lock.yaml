@@ -44,6 +44,9 @@ importers:
       '@kuber/identity':
         specifier: workspace:*
         version: link:modules/identity
+      '@kuber/migration':
+        specifier: workspace:*
+        version: link:modules/migration
       '@kuber/ops':
         specifier: workspace:*
         version: link:modules/ops
@@ -129,6 +132,9 @@ importers:
       '@kuber/identity':
         specifier: workspace:*
         version: link:../../modules/identity
+      '@kuber/migration':
+        specifier: workspace:*
+        version: link:../../modules/migration
       '@kuber/ops':
         specifier: workspace:*
         version: link:../../modules/ops
@@ -292,6 +298,24 @@ importers:
       zod:
         specifier: ^4.1.0
         version: 4.6.5
+
+  modules/migration:
+    dependencies:
+      '@kuber/channels':
+        specifier: workspace:*
+        version: link:../channels
+      '@kuber/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@kuber/eventstore':
+        specifier: workspace:*
+        version: link:../../packages/eventstore
+      '@kuber/gl':
+        specifier: workspace:*
+        version: link:../gl
+      postgres:
+        specifier: ^3.4.7
+        version: 3.4.9
 
   modules/ops:
     dependencies:

@@ -30,7 +30,7 @@ import { OPERATIONS } from "./operations.ts";
 import { OPS_FIN_MIGRATIONS } from "./fin-migrations.ts";
 import { FIN_OPERATIONS } from "./fin-operations.ts";
 import { SCHEDULE_MIGRATIONS, Schedules } from "./schedules.ts";
-import type { Action, Effect, ExtensionHandler, OpContext, OpDef, OpName, OpsGuard, Plan, PlanJournal, Services } from "./types.ts";
+import type { Action, BookGate, Effect, ExtensionHandler, OpContext, OpDef, OpName, OpsGuard, Plan, PlanJournal, Services } from "./types.ts";
 
 export * from "./types.ts";
 export { OPERATIONS } from "./operations.ts";
@@ -80,6 +80,8 @@ export class Operations {
   readonly defs = new Map<OpName, OpDef<any>>([...OPERATIONS, ...FIN_OPERATIONS].map((d) => [d.name, d]));
   /** Handlers of `ext` actions by module (see registerExtension). */
   private readonly extensions = new Map<string, ExtensionHandler>();
+  /** Book gates (addBookGate): each may refuse an operation in a book, with the reason. */
+  private readonly bookGates: BookGate[] = [];
   /** Recurring and recognition schedules (FIN-GL-02/03): approved through a plan, run by `runSchedules`. */
   readonly schedules: Schedules;
   constructor(private sql: Sql, private store: EventStore, private svc: Services, private clock: () => string = () => new Date().toISOString().slice(0, 10),
@@ -123,6 +125,19 @@ export class Operations {
     }
   }
 
+  /**
+   * Refuse operations in some books, whoever asks (FIN-MIG-03: a migration rehearsal book runs no
+   * operation that could have an effect outside Kuber). Checked when a plan is simulated and again
+   * when it is committed; a gate answers the reason to refuse, or null.
+   */
+  addBookGate(gate: BookGate) { this.bookGates.push(gate); }
+  private async checkBookGates(tenant: string, book: string, op: Pick<OpDef, "name" | "kind">) {
+    for (const g of this.bookGates) {
+      const why = await g(tenant, book, { name: op.name, kind: op.kind });
+      if (why) throw new OpsError("book_restricted", why, 409);
+    }
+  }
+
   /** The handler for `ext` actions of `module` (one per module). */
   registerExtension(module: string, handler: ExtensionHandler) {
     if (this.extensions.has(module)) throw new Error(`extension ${module} is already registered`);
@@ -137,6 +152,7 @@ export class Operations {
     const def = this.defs.get(op as OpName);
     if (!def) throw new OpsError("unknown_op", `no operation ${op}`, 404);
     await this.guard.check({ step: "plan", tenant, book, principal, op: def, onBehalfOf: opts.onBehalfOf });
+    await this.checkBookGates(tenant, book, def);
     const parsed = def.input.safeParse(rawInput ?? {});
     if (!parsed.success) throw new OpsError("bad_input", parsed.error.issues.map((i) => `${i.path.join(".") || "input"}: ${i.message}`).join("; "), 400);
     const state = await this.svc.gl.state(tenant, book);
@@ -253,6 +269,7 @@ export class Operations {
     await this.guard.check({ step: approvedBy ? "execute" : "commit", tenant, book: row.book_id, principal, op: { name: row.plan.op, kind: row.plan.kind, gate: row.plan.gate },
       plan: row.plan, parties: planParties(row.plan, row.actions), bankVerifiers: await this.bankVerifiers(tenant, paying), ...(approvedBy ? { approvedBy } : {}) });
     if (row.status === "committed" && row.hash === hash) return { planId, status: "committed" as const, steps: row.result?.done ?? [], replayed: true };
+    await this.checkBookGates(tenant, row.book_id, { name: row.plan.op, kind: row.plan.kind });
     if (row.status !== "proposed") throw new OpsError("not_open", `plan is ${row.status}`);
     if (row.hash !== hash) throw new OpsError("hash_mismatch", "the plan you approved is not the plan on record; simulate again");
     if (row.plan.blocked) throw new OpsError("blocked", "a blocking check failed; resolve it and simulate again");

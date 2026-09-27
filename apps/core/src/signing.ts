@@ -12,6 +12,8 @@
  *   draft.approve  POST /drafts/:id/approve   a draft whose amount is above the tenant's SoD limit
  *   journal.ratify POST /journals/:id/ratify  an automatic posting above the tenant's SoD limit
  *   period.lock    POST /books/:book/locks    always (a direct period lock)
+ *   migration.golive POST /migrations/:p/go-live  always: a superuser signs the parallel-run comparison and
+ *                                             the cut-over checklist (FIN-MIG-02); Kuber becomes the book of record
  *
  * Not reachable as one HTTP command today (documented, not signed here): "publish policy" (policies
  * are files loaded at start-up, no API) and "pay" as a bank payment (Kuber records payments; a
@@ -29,6 +31,7 @@ export const SigningRequest = z.discriminatedUnion("action", [
   z.object({ action: z.literal("draft.approve"), draftId: z.string().min(1), accountId: z.string().min(1).optional() }),
   z.object({ action: z.literal("journal.ratify"), journalId: z.string().min(1) }),
   z.object({ action: z.literal("period.lock"), book: z.string().min(1), periodEnd: IsoDate, level: z.enum(["soft", "hard"]) }),
+  z.object({ action: z.literal("migration.golive"), projectId: z.string().min(1), comparisonId: z.string().min(1) }),
 ]);
 export type SigningRequest = z.infer<typeof SigningRequest>;
 void SIGNED_ACTIONS;
@@ -118,4 +121,11 @@ export async function amountReason(cell: Cell, tenant: string, amount: bigint): 
 export const actionLabel: Record<SignedAction, string> = {
   "plan.commit": "approve and carry out this plan", "plan.approve": "approve this plan", "draft.approve": "approve this draft",
   "journal.ratify": "confirm this automatic posting", "period.lock": "lock this period",
+  "migration.golive": "go live and make Kuber the book of record",
 };
+
+/** FIN-MIG-02: the go-live of a migration project, over its comparison and checklist (rendered by the migration module). */
+export async function goLiveIntent(cell: Cell, tenant: string, projectId: string, comparisonId: string): Promise<SigningIntent> {
+  const i = await cell.migration.goLiveIntent(tenant, projectId, comparisonId);
+  return { action: "migration.golive", book: i.book, subject: i.subject, subjectHash: i.subjectHash, summary: i.summary };
+}

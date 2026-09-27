@@ -1,0 +1,16 @@
+{
+  "name": "@kuber/migration",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@kuber/channels": "workspace:*",
+    "@kuber/contracts": "workspace:*",
+    "@kuber/eventstore": "workspace:*",
+    "@kuber/gl": "workspace:*",
+    "postgres": "^3.4.7"
+  }
+}
