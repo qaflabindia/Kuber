@@ -40,7 +40,9 @@ import { createGovernance, type KuberGovernance } from "./copilot/governance/ind
 import { registerAgentRoutes } from "./copilot/governance/routes.ts";
 import { registerGroupRoutes } from "./group-routes.ts";
 import { ConsolidationError } from "@kuber/consolidation";
-import { SigningRequest, actionLabel, amountReason, draftIntent, lockIntent, planIntent, ratifyIntent } from "./signing.ts";
+import { MigrationError } from "@kuber/migration";
+import { registerMigrationRoutes } from "./migration-routes.ts";
+import { SigningRequest, actionLabel, amountReason, draftIntent, goLiveIntent, lockIntent, planIntent, ratifyIntent } from "./signing.ts";
 import type { Who } from "./tools.ts";
 
 export interface ServerOptions {
@@ -153,6 +155,7 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     if (err instanceof IngestionError) return reply.code(422).send({ error: err.code, message: err.message, detail: err.detail });
     if (err instanceof OpsError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof ConsolidationError) return reply.code(err.status).send({ error: err.code, message: err.message });
+    if (err instanceof MigrationError) return reply.code(err.status).send({ error: err.code, message: err.message, ...(err.detail !== undefined ? { detail: err.detail } : {}) });
     if (err instanceof IncidentError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof ScheduleError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof ConcurrencyError) return reply.code(409).send({ error: "conflict", message: err.message });
@@ -621,7 +624,7 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
    * answers with WebAuthn options whose challenge is the command digest, the digest inputs and the
    * summary to show before the passkey prompt. `required: false` when this command needs no signature.
    */
-  app.post<P>("/v1/tenants/:tenant/signing/options", async (req) => {
+  app.post<P>("/v1/tenants/:tenant/signing/options", async (req, reply) => {
     const r = SigningRequest.parse(req.body);
     let tenant: string, principal: string, intent: SigningIntent | null, reason: string | null;
     if (r.action === "plan.commit" || r.action === "plan.approve") {
@@ -645,6 +648,13 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
       const d = await ratifyIntent(cell, tenant, r.journalId);
       reason = d ? await amountReason(cell, tenant, d.amount) : null;
       intent = reason ? d : null;
+    } else if (r.action === "migration.golive") {
+      // FIN-MIG-02: a superuser signs the cut-over over the project's comparison and checklist.
+      const proj = await cell.migration.project(req.params.tenant, r.projectId);
+      if (!proj) return reply.code(404).send({ error: "no_project", message: `no migration project ${r.projectId}` });
+      ({ tenant, principal } = await who(req, "authority.manage", { book: proj.bookId }));
+      reason = "going live: the cut-over decision";
+      intent = await goLiveIntent(cell, tenant, r.projectId, r.comparisonId);
     } else {
       ({ tenant, principal } = await who(req, "period.lock", { book: r.book }));
       reason = "locking a period";
@@ -781,6 +791,8 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   registerPortalRoutes(app, cell, who);
   // ------------------------------------------------------------ group consolidation (FIN-GRP-01..04)
   registerGroupRoutes(app, cell, who);
+  // ------------------------------------------------------------ legacy migration (FIN-MIG-01..03)
+  registerMigrationRoutes(app, cell, who, attestFor, signatureRequired, Assertion);
 
   return app;
 }

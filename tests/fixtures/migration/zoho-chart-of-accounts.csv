@@ -1,0 +1,10 @@
+Account ID,Account Name,Account Code,Account Type,Parent Account,Status
+460000000001,Owner's Equity,3000,Equity,,Active
+460000000002,ICICI Current 9021,1010,Bank,,Active
+460000000003,Petty Cash,1020,Cash,,Active
+460000000004,Accounts Receivable,1100,Accounts Receivable,,Active
+460000000005,Accounts Payable,2100,Accounts Payable,,Active
+460000000006,Output CGST,2210,Other Current Liability,,Active
+460000000007,Sales,4000,Income,,Active
+460000000008,Office Rent,6100,Expense,,Active
+460000000009,Old Suspense,9999,Other Current Asset,,Inactive

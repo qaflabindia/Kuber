@@ -421,8 +421,8 @@ export function kindsOf(x: Extract): Record<string, number> {
 
 /**
  * Merge the files of a project into one extract, oldest first. A later file's record with the same
- * key replaces an earlier one (a corrected re-export), except vouchers, which keep the first copy
- * (the delta import reports a changed voucher as a difference instead).
+ * key replaces an earlier one (a corrected re-export); for a voucher already imported, the delta
+ * import then reports the change as a difference to resolve and never overwrites the journal.
  */
 export function mergeExtracts(system: SourceSystem, parts: Extract[]): Extract {
   const x = emptyExtract(system);
@@ -437,7 +437,7 @@ export function mergeExtracts(system: SourceSystem, parts: Extract[]): Extract {
   x.parties = byKey((e) => e.parties, (p) => p.key);
   x.openingBalances = byKey((e) => e.openingBalances, (b) => b.accountKey);
   x.openItems = byKey((e) => e.openItems, (i) => i.key);
-  x.vouchers = byKey((e) => e.vouchers, (v) => v.key, true);
+  x.vouchers = byKey((e) => e.vouchers, (v) => v.key);
   x.trialBalances = parts.flatMap((p) => p.trialBalances);
   x.schedules = byKey((e) => e.schedules, (s) => `${s.kind}|${s.key}`);
   x.problems = parts.flatMap((p) => p.problems);

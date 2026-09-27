@@ -440,9 +440,7 @@ export class Migration {
         lines: plan.lines.map((l) => ({ accountId: l.accountId, amount: s(l.amount), ...(l.partyId ? { partyId: l.partyId } : {}), dimensions: {} })) }, { principal, commandId: loadId });
       // Provenance: each opening line from the source ledgers it carries; each new account from the ledger that asked for it.
       plan.lines.forEach((l, i) => { for (const src of l.sources) rec("opening_line", `${journalId}#${i + 1}`, src, { accountId: l.accountId, partyId: l.partyId, amount: src.amount }); });
-      const accountSrc = new Map<string, { key: string; file: string; row: number }>();
-      for (const l of plan.lines) for (const src of l.sources) if (!accountSrc.has(l.accountId)) accountSrc.set(l.accountId, src);
-      for (const a of plan.newAccounts) { const src = accountSrc.get(a.accountId); if (src) rec("account", a.accountId, src, a); }
+      for (const a of plan.newAccounts) if (a.source) rec("account", a.accountId, a.source, { accountId: a.accountId, name: a.name, nature: a.nature });
       for (const party of plan.parties) rec("party", party.partyId, { key: party.key, file: party.file, row: party.row }, { partyId: party.partyId, kind: party.kind, registered: kind === "target" });
       // The subledger: open items, never posted.
       const items = plan.openItems.map((i) => {
@@ -652,7 +650,7 @@ export class Migration {
       }
       for (let k = 0; k < records.length; k += 500) await b.tx`INSERT INTO migration.records ${b.tx(records.slice(k, k + 500) as never)}`;
       await this.append(b.tx, tenant, projectId, [{ type: "MigrationDeltaImported", data: { projectId, loadId: l.loadId, bookId: l.bookId, created, duplicates, changed: changed.length, held: held.length } }], principal);
-      return { loadId: l.loadId, bookId: l.bookId, vouchers: vouchers.length, created, duplicates, changed, held, numbering: numbering(x.vouchers.filter((v) => !v.cancelled)) };
+      return { loadId: l.loadId, bookId: l.bookId, vouchers: vouchers.length, created, duplicates, changed, held, numbering: numbering(x.vouchers) };
     });
   }
 

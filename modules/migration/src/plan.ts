@@ -29,7 +29,7 @@ export interface LoadPlan {
   lines: PlanLine[];
   openItems: PlanOpenItem[];
   parties: PlanParty[];
-  newAccounts: NewAccountSpec[];
+  newAccounts: (NewAccountSpec & { source: { key: string; file: string; row: number } | null })[];
   schedules: ScheduleTie[];
   sourceTotals: { debits: bigint; credits: bigint; ledgers: number };
   sourceTbChecks: { asOf: string | null; file: string; rows: number; mismatches: { accountKey: string; reported: bigint; computed: bigint }[] }[];
@@ -191,6 +191,17 @@ export function buildPlan(x: Extract, cutoff: string, mapping: Map<string, Mappi
     for (const i of x.openItems) if (i.docDate > cutoff) note("open_item_after_cutoff", `open item ${i.docNo} is dated ${i.docDate}, after the cut-off: left to the delta import`);
   }
 
+  // Every approved new account is added by the load, used at the cut-off or only after it.
+  for (const [key, m] of mapping) {
+    if (m.status !== "approved" || !m.newAccount || accounts.has(m.newAccount.accountId) || newAccounts.has(m.newAccount.accountId)) continue;
+    newAccounts.set(m.newAccount.accountId, m.newAccount);
+    void key;
+  }
+  const newSources = new Map<string, { key: string; file: string; row: number }>();
+  for (const [key, m] of mapping) {
+    const src = srcBy.get(key);
+    if (m.status === "approved" && m.newAccount && src && !newSources.has(m.newAccount.accountId)) newSources.set(m.newAccount.accountId, { key, file: src.file, row: src.row });
+  }
   const planLines = [...lines.values()].filter((l) => l.amount !== 0n).sort((a, b) => a.accountId.localeCompare(b.accountId) || (a.partyId ?? "").localeCompare(b.partyId ?? ""));
   const net = sum(planLines.map((l) => l.amount));
   if (net !== 0n && !problems.some((p) => p.blocking)) block("source_tb_unbalanced", `the source trial balance at ${cutoff} does not balance: debits minus credits = ${net} paise (resolve the difference in the source; it is never posted to suspense)`);
@@ -221,7 +232,7 @@ export function buildPlan(x: Extract, cutoff: string, mapping: Map<string, Mappi
   }
 
   const debits = sum(planLines.filter((l) => l.amount > 0n).map((l) => l.amount)), credits = -sum(planLines.filter((l) => l.amount < 0n).map((l) => l.amount));
-  return { cutoff, balances, lines: planLines, openItems: planItems, parties: [...partiesUsed.values()], newAccounts: [...newAccounts.values()], schedules,
+  return { cutoff, balances, lines: planLines, openItems: planItems, parties: [...partiesUsed.values()], newAccounts: [...newAccounts.values()].map((a) => ({ ...a, source: newSources.get(a.accountId) ?? null })), schedules,
     sourceTotals: { debits, credits, ledgers }, sourceTbChecks: checks, problems, blocked: problems.some((p) => p.blocking) };
 }
 

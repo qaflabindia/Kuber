@@ -1,0 +1,4 @@
+Invoice ID,Invoice Number,Invoice Date,Due Date,Customer ID,Customer Name,Account,SubTotal,Tax,Tax Account,Total,Balance,Status
+INV1,INV-0001,2026-03-05,2026-04-04,C-1001,Acme Retail,Sales,"42,372.88","7,627.12",Output CGST,"50,000.00","50,000.00",Overdue
+INV2,INV-0002,2026-03-20,2026-04-04,C-1002,Bharat Foods,Sales,"33,898.31","6,101.69",Output CGST,"40,000.00","30,000.00",Partially Paid
+INV3,INV-0003,2026-03-22,2026-04-06,C-1002,Bharat Foods,Sales,"1,000.00",0.00,,"1,000.00",0.00,Paid

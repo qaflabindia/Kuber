@@ -1,0 +1,4 @@
+Contact ID,Contact Name,Company Name,Contact Type,GST Treatment,GST Identification Number (GSTIN),PAN Number,Payment Terms,Beneficiary Name,Account Number,IFSC
+C-1001,Acme Retail,Acme Retail LLP,customer,business_gst,29AAACA1111B1Z2,AAACA1111B,Net 30,,,
+C-1002,Bharat Foods,Bharat Foods Pvt Ltd,customer,consumer,,,Net 15,,,
+V-2001,Om Logistics,Om Logistics,vendor,business_gst,27AAAFO2222C1Z9,AAAFO2222C,Net 45,Om Logistics,00123456789012,SBIN0000456
