@@ -27,6 +27,8 @@ export interface Shell {
   intact: boolean | null;
   role: string;
   canSeeMembers: boolean;
+  /** FIN-MIG: the member may run legacy migrations (Controller, Superuser). */
+  canMigrate: boolean;
 }
 
 export function shellState(r: ShellInputs, sessionRole: string): Shell {
@@ -43,6 +45,7 @@ export function shellState(r: ShellInputs, sessionRole: string): Shell {
     // From the core's answer for this member (role changes show at once), not the session.
     role: r.me?.role ?? sessionRole,
     canSeeMembers: !!r.me?.permissions.includes("members.read"),
+    canMigrate: !!r.me?.permissions.includes("migration.manage"),
   };
 }
 

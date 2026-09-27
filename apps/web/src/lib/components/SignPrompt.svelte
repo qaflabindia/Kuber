@@ -22,8 +22,15 @@
       <dt>Book</dt><dd>{p.summary.book}</dd>
       {#if p.summary.amountPaise}<dt>Amount</dt><dd class="num strong">{inr(p.summary.amountPaise)}</dd>{/if}
       {#each p.summary.payees as y}<dt>Payee</dt><dd>{y.name ?? y.partyId}{y.name ? ` (${y.partyId})` : ""}</dd>{/each}
-      {#each p.summary.periods as x}<dt>Locks</dt><dd>everything up to {date(x.periodEnd)} ({x.level})</dd>{/each}
+      {#if p.summary.action === "migration.golive"}
+        {#each p.summary.periods as x}<dt>Parallel run</dt><dd>compared up to {date(x.periodEnd)}</dd>{/each}
+      {:else}
+        {#each p.summary.periods as x}<dt>Locks</dt><dd>everything up to {date(x.periodEnd)} ({x.level})</dd>{/each}
+      {/if}
     </dl>
+    {#if p.summary.action === "migration.golive"}
+      <ul class="small golive">{#each p.summary.lines as l}<li>{l}</li>{/each}</ul>
+    {/if}
     {#if p.summary.accounts.length}
       <table class="table mini">
         <thead><tr><th>Account</th><th class="r">Debit</th><th class="r">Credit</th></tr></thead>
@@ -50,4 +57,5 @@
   .small { font-size: 12.5px; margin: 0; }
   .mono { font-family: var(--mono, monospace); font-size: 12px; }
   .acts { display: flex; gap: 6px; justify-content: flex-end; }
+  .golive { padding-left: 18px; display: grid; gap: 2px; color: var(--text-2); }
 </style>

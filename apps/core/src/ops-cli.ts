@@ -51,6 +51,10 @@
  *   ops bank …                                    FIN-CASH-01..03 bank accounts, statements, coverage, reconciliation, certify (bank-cli.ts)
  *   ops consolidate …                             FIN-GRP-01..04 group consolidation: groups, register plans, run, certify,
  *                                                 group reports, IC disputes, linked tenants (see group-cli.ts)
+ *   ops migrate-import --source tally|zoho|csv --file x.xml --book b --cutoff d --tenant t --as p
+ *   ops migrate-status|mapping|approve|plan|rehearse|load|delta|reconcile|coverage|decide|compare|explain|rollback|recovery …
+ *                                                 FIN-MIG-01..03 legacy migration (see migration-cli.ts); the go-live is a
+ *                                                 passkey-signed API command, not a CLI one
  *   ops drill-compare --source <owner url> --restored <owner url> [--out file] [--meta json]
  *                                                 FIN-OPS-01: compare a restored database with its source
  *                                                 (used by scripts/restore-drill.sh); exit 1 on any difference
@@ -72,6 +76,7 @@ import { Cell } from "./cell.ts";
 import { OpsAdmin } from "./ops-admin.ts";
 import { groupCommand } from "./group-cli.ts";
 import { bankCommand } from "./bank-cli.ts";
+import { migrationCommand } from "./migration-cli.ts";
 
 const argv = process.argv.slice(2);
 if (argv[0] === "ops") argv.shift();
@@ -253,6 +258,10 @@ try {
       break;
     }
     case "bank": print(await bankCommand(cell, args)); break;
+    case "migrate-import": case "migrate-status": case "migrate-mapping": case "migrate-approve": case "migrate-plan": case "migrate-rehearse":
+    case "migrate-load": case "migrate-delta": case "migrate-reconcile": case "migrate-coverage": case "migrate-decide": case "migrate-compare":
+    case "migrate-explain": case "migrate-rollback": case "migrate-recovery":
+      print(await migrationCommand(cell, cmd, args)); break;
     case "drill-compare": {
       const source = flag("--source"), restored = flag("--restored");
       if (!source || !restored) throw new Error("usage: ops drill-compare --source <owner url> --restored <owner url> [--out file] [--meta json]");
@@ -266,7 +275,7 @@ try {
       break;
     }
     default:
-      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify, verify-signatures, bus-consumers, backfill-confirmations, run-schedules, access-review, autonomy, agent-turns, agent-signals, incident, consolidate, close, bank, drill-compare");
+      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify, verify-signatures, bus-consumers, backfill-confirmations, run-schedules, access-review, autonomy, agent-turns, agent-signals, incident, consolidate, close, bank, migrate-*, drill-compare");
       process.exitCode = 2;
   }
 } finally {

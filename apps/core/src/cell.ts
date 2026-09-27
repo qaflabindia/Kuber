@@ -21,6 +21,7 @@ import { join, resolve } from "node:path";
 import { CONSOLIDATION_MIGRATIONS, Consolidation, LinkedTenants, consolidationOperations } from "@kuber/consolidation";
 import { CLOSE_MIGRATIONS, CloseService, closeOperations } from "@kuber/close";
 import { BANK_MIGRATIONS, BankService, bankExtension, bankOperations } from "@kuber/bank";
+import { MIGRATION_MIGRATIONS, Migration } from "@kuber/migration";
 import { sealIdentityColumns } from "./keys-admin.ts";
 import { Portal } from "./portal.ts";
 import { AGENT_GOVERNANCE_MIGRATIONS } from "./copilot/governance/recorder.ts";
@@ -63,7 +64,7 @@ export interface CellOptions {
   dream?: { evidenceDir?: string; artifactsDir?: string };
 }
 
-const SCHEMAS = ["es", "agent", "reporting", "ops", "keys", "evidence", "channels", "identity", "mdm", "dream", "consolidation", "close", "bank"];
+const SCHEMAS = ["es", "agent", "reporting", "ops", "keys", "evidence", "channels", "identity", "mdm", "dream", "consolidation", "close", "bank", "migration"];
 const ident = (role: string) => { if (!/^[a-z_][a-z0-9_]*$/.test(role)) throw new Error(`invalid role name ${role}`); return role; };
 
 /** Every SQL migration of the cell, in order. */
@@ -77,7 +78,9 @@ export const CELL_MIGRATIONS = [...EVENTSTORE_MIGRATIONS, ...LIFECYCLE_MIGRATION
   // Period close (FIN-CLS-01..04).
   ...CLOSE_MIGRATIONS,
   // Cash and banks (FIN-CASH-01..03).
-  ...BANK_MIGRATIONS];
+  ...BANK_MIGRATIONS,
+  // Legacy migration (FIN-MIG-01..03).
+  ...MIGRATION_MIGRATIONS];
 
 /** Migration ids a started cell requires: the SQL migrations and the data migrations run after them. */
 export const requiredMigrationIds = (): string[] => [...CELL_MIGRATIONS.map((m) => m.id), IDENTITY_SEAL_MIGRATION];
@@ -150,6 +153,8 @@ export class Cell {
   periodClose!: CloseService;
   /** Cash and banks (FIN-CASH-01..03): bank-account register, statement integrity, settlement clearing, certified bank reconciliations. */
   bank!: BankService;
+  /** Legacy migration (FIN-MIG-01..03): Tally/Zoho/CSV imports, mapping, rehearsal, delta, parallel run, go-live, rollback. */
+  migration!: Migration;
 
   private constructor(
     public readonly cellId: string, public readonly sql: Sql, private readonly systemSql: Sql, public readonly store: EventStore, public readonly bus: Bus,
@@ -263,6 +268,10 @@ export class Cell {
     // Mapped statements and KPIs (FIN-RPT-01/02): the book's framework, basis and fiscal year come from the GL's book state.
     reporting.fin.bookInfo = async (t, b) => { const st = await gl.state(t, b); return st.exists ? { ...st.config } : null; };
     ops.register(REPORT_OPERATIONS);
+    // Legacy migration: loads go through the GL and the party master under the identity guard; a
+    // rehearsal book is load-only, so the ops service refuses every write operation in it (FIN-MIG-03).
+    cell.migration = new Migration({ store, gl, parties, guard: identity, clock: o.clock ?? (() => new Date().toISOString().slice(0, 10)) });
+    ops.addBookGate(cell.migration.rehearsalGate);
     return cell;
   }
 

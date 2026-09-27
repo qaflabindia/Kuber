@@ -65,6 +65,9 @@ export type Action =
    */
   | { type: "ext"; module: string; kind: string; payload: unknown };
 
+/** A book gate (Operations.addBookGate): the reason `op` may not run in `book`, or null. */
+export type BookGate = (tenant: string, book: string, op: { name: string; kind: "read" | "write" }) => Promise<string | null>;
+
 /** Runs one `ext` action inside a commit; returns the step description. */
 export type ExtensionHandler = (tx: import("postgres").TransactionSql, ctx: { tenant: string; book: string; principal: string; approvedBy: string | null; planId: string },
   action: Extract<Action, { type: "ext" }>) => Promise<string>;

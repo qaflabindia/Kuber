@@ -27,6 +27,8 @@ describe("requirements register (requirements/register.md)", () => {
       ...Array.from({ length: 18 }, (_, i) => `F${String(i + 1).padStart(2, "0")}`),
       ...Array.from({ length: 8 }, (_, i) => `ROLE-0${i + 1}`),                    // role model v2 (design 6.3)
       "FIN-RPT-01", "FIN-RPT-02",                                                     // G1 statements and KPIs (CFO §3.10)
+      ...[1, 2, 3].map((n) => `FIN-MIG-0${n}`),                                     // G1 legacy migration
+      ...[1, 2, 3].map((n) => `FIN-CASH-0${n}`), "UAT-03",                         // G1 cash and banks (CFO §3.6, §4)
     ];
     // Agent-governance controls (TAGOF TOL/AGT/PRM/GEN/CBJ/LOG) are listed too; every G0 id above must be present.
     const ids = rows.map((r) => r.id);

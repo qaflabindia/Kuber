@@ -12,7 +12,7 @@ import { ApiError, members, type SigningRequest } from "$lib/server/api";
 import { devSignInEnabled } from "$lib/server/session";
 import type { RequestHandler } from "./$types";
 
-const ACTIONS = new Set(["plan.commit", "plan.approve", "draft.approve", "journal.ratify", "period.lock"]);
+const ACTIONS = new Set(["plan.commit", "plan.approve", "draft.approve", "journal.ratify", "period.lock", "migration.golive"]);
 
 export const POST: RequestHandler = async ({ locals, request }) => {
   const s = locals.session;

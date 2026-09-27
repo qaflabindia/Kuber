@@ -1,0 +1,15 @@
+record,key,name,group,nature,control,bank,party_kind,gstin,pan,credit_days,ifsc,account_number,holder,account,party,doc_no,doc_date,due_date,voucher_type,narration,debit,credit,quantity,value
+account,CAP,Proprietor Capital,Capital,equity,,,,,,,,,,,,,,,,,,,,
+account,BNK,Axis Bank,Bank,asset,,yes,,,,,,,,,,,,,,,,,,
+account,DEB,Debtors,Receivables,asset,receivable,,,,,,,,,,,,,,,,,,,
+account,FA,Plant and Machinery,Fixed Assets,asset,,,,,,,,,,,,,,,,,,,,
+party,P1,Nila Textiles,,,,,customer,33AAACN3333D1Z1,,30,,,,,,,,,,,,,,
+balance,,,,,,,,,,,,,,CAP,,,,,,,,"3,10,000.00",,
+balance,,,,,,,,,,,,,,BNK,,,,,,,"1,50,000.00",,,
+balance,,,,,,,,,,,,,,DEB,,,,,,,"60,000.00",,,
+balance,,,,,,,,,,,,,,FA,,,,,,,"1,00,000.00",,,
+open_item,NT-7,,,,,,,,,,,,,,P1,NT-7,2026-03-12,2026-04-11,,,"60,000.00",,,
+assets,FA-1,Lathe,,,,,,,,,,,,FA,,,,,,,,,1,"1,00,000.00"
+commitments,PO-9,Open PO Sundaram Castings,,,,,,,,,,,,,,,,,,,,,,"45,000.00"
+voucher,V1,,,,,,,,,,,,,BNK,,RC-1,2026-04-03,,Receipt,Nila part payment,"20,000.00",,,
+voucher,V1,,,,,,,,,,,,,DEB,P1,RC-1,2026-04-03,,Receipt,Nila part payment,,"20,000.00",,

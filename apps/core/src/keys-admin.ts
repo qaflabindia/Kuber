@@ -34,6 +34,7 @@ import { bankChangeCtx, partyDetailCtx } from "@kuber/gl";
 import { disputeDetailCtx, groupNameCtx, groupSnapshotCtx, linkedPackCtx, positionNoteCtx, runStockCtx } from "@kuber/consolidation";
 import { closeBodyCtx, documentNameCtx, restatementCtx, substantiationCtx } from "@kuber/close";
 import { bankDetailsCtx, exceptionResolutionCtx, lineDetailCtx, statementOriginalCtx } from "@kuber/bank";
+import { comparisonBodyCtx, comparisonExplanationsCtx, decisionDetailCtx, fileExtractCtx, fileNameCtx, fileOriginalCtx, mappingDetailCtx, recordSourceCtx } from "@kuber/migration";
 
 export interface SealedColumn {
   table: string; column: string; kind: "text" | "json"; keyCols: string[];
@@ -85,6 +86,16 @@ export const SEALED_COLUMNS: SealedColumn[] = [
   { table: "bank.statements", column: "original", kind: "text", keyCols: ["statement_id"], ctx: (r) => statementOriginalCtx(r.statement_id!) },
   { table: "bank.lines", column: "detail", kind: "text", keyCols: ["txn_id"], ctx: (r) => lineDetailCtx(r.txn_id!) },
   { table: "bank.exceptions", column: "resolution", kind: "text", keyCols: ["case_id"], ctx: (r) => exceptionResolutionCtx(r.case_id!) },
+  // Legacy migration (FIN-MIG-01..03): source originals and parsed extracts (names, bank details), source names in the
+  // mapping and provenance, decisions and parallel-run comparisons.
+  { table: "migration.files", column: "original", kind: "text", keyCols: ["file_id"], ctx: (r) => fileOriginalCtx(r.file_id!) },
+  { table: "migration.files", column: "extract", kind: "text", keyCols: ["file_id"], ctx: (r) => fileExtractCtx(r.file_id!) },
+  { table: "migration.files", column: "name", kind: "text", keyCols: ["file_id"], ctx: (r) => fileNameCtx(r.file_id!) },
+  { table: "migration.mappings", column: "detail", kind: "text", keyCols: ["project_id", "source_idx"], ctx: (r) => mappingDetailCtx(r.project_id!, r.source_idx!) },
+  { table: "migration.records", column: "source", kind: "text", keyCols: ["record_id"], ctx: (r) => recordSourceCtx(r.record_id!) },
+  { table: "migration.decisions", column: "detail", kind: "text", keyCols: ["decision_id"], ctx: (r) => decisionDetailCtx(r.decision_id!) },
+  { table: "migration.comparisons", column: "body", kind: "text", keyCols: ["comparison_id"], ctx: (r) => comparisonBodyCtx(r.comparison_id!) },
+  { table: "migration.comparisons", column: "explanations", kind: "text", keyCols: ["comparison_id"], ctx: (r) => comparisonExplanationsCtx(r.comparison_id!) },
 ];
 
 /**
@@ -133,6 +144,10 @@ export const RETENTION: Record<string, "purge" | "sealed" | "keys" | "tombstone"
   // reconciliation index. The facts are in sealed streams (bank, agent txn); certified bodies in reporting.snapshots.
   "bank.accounts": "purge", "bank.statements": "purge", "bank.statement_rows": "purge", "bank.lines": "purge", "bank.clearings": "purge",
   "bank.exceptions": "purge", "bank.reconciliations": "purge",
+  // Legacy migration (FIN-MIG-01..03): projects, retained source files, mapping, loads, provenance, the migrated
+  // subledger, the external-document register, decisions and comparisons. The facts are in the sealed project stream.
+  "migration.projects": "purge", "migration.files": "purge", "migration.mappings": "purge", "migration.loads": "purge", "migration.rehearsal_books": "purge",
+  "migration.records": "purge", "migration.open_items": "purge", "migration.external_documents": "purge", "migration.decisions": "purge", "migration.comparisons": "purge",
   "evidence.balances": "purge", "evidence.records": "purge", "evidence.lookup": "purge",
   "es.outbox": "purge", "es.snapshots": "purge", "es.dead_letters": "purge", "es.commands": "purge", "es.verify_checkpoints": "purge",
   "es.events": "sealed", "keys.tenant_keys": "keys", "keys.shredded": "tombstone",

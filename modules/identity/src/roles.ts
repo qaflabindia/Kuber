@@ -69,6 +69,8 @@ export const ACTIONS = [
   "party.bank.release",   // release a verified bank-detail change: lifts the payment hold (fresh approval)
   // Cash and banks (FIN-CASH-01..03):
   "bank.manage",          // register the book's own bank accounts (sealed numbers) and resolve bank exceptions
+  // Legacy migration (FIN-MIG-01..03):
+  "migration.manage",     // FIN-MIG-01..03: migration projects, source imports, mapping approval, rehearsal, loads, rollback (Controller/Operations)
   // Reporting to outsiders:
   "snapshot.publish",     // mark a certified snapshot published (or not) to investors
   "share.grant",          // share a certified snapshot or a report with a guest until an expiry

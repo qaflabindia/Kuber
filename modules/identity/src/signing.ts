@@ -149,7 +149,7 @@ export class SignedCommands {
 
 // ------------------------------------------------------------------ offline verification
 /** Event types that can carry a command signature, and what each must be bound to. */
-export const SIGNED_EVENT_TYPES = ["PlanApproved", "PlanApprovalRecorded", "DraftApproved", "Ratified", "PeriodLocked"] as const;
+export const SIGNED_EVENT_TYPES = ["PlanApproved", "PlanApprovalRecorded", "DraftApproved", "Ratified", "PeriodLocked", "MigrationWentLive"] as const;
 
 /**
  * What a stored signature must say, given the event it is stored in: the event is the command the
@@ -166,6 +166,8 @@ export function expectedBinding(env: Pick<Envelope, "type" | "data" | "meta">): 
     case "Ratified": return { ...base, action: "journal.ratify", subject: d.journalId as string };
     case "PeriodLocked": return { ...base, action: "period.lock", subject: `${d.periodEnd}:${d.level}`, book: d.bookId as string,
       subjectHash: lockSubjectHash(d.bookId as string, d.periodEnd as string, d.level as string) };
+    // FIN-MIG-02: the go-live signs the project's comparison (subject) and the checklist hash over it.
+    case "MigrationWentLive": return { ...base, action: "migration.golive", subject: `${d.projectId}:${d.comparisonId}`, subjectHash: d.subjectHash as string, book: d.bookId as string };
     default: return null;
   }
 }

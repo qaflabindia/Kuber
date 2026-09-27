@@ -87,7 +87,9 @@ export type Meta = z.infer<typeof Meta>;
  * canonical `CommandDigestInputs` (tenant, book, action, subject, subject hash, principal, a
  * single-use server nonce and its expiry, and the hash of the summary the person was shown).
  */
-export const SIGNED_ACTIONS = ["plan.commit", "plan.approve", "draft.approve", "journal.ratify", "period.lock"] as const;
+export const SIGNED_ACTIONS = ["plan.commit", "plan.approve", "draft.approve", "journal.ratify", "period.lock",
+  // FIN-MIG-02: a superuser signs the parallel-run comparison and the cut-over (go-live) decision.
+  "migration.golive"] as const;
 export type SignedAction = (typeof SIGNED_ACTIONS)[number];
 const Hex64 = z.string().regex(/^[0-9a-f]{64}$/);
 const B64u = z.string().regex(/^[A-Za-z0-9_-]*$/).max(20_000);
@@ -487,6 +489,38 @@ export const CLOSE = {
   CloseDocumentRegistered: z.object({ bookId: Id, documentId: Id, sha256: z.string().length(64), periodEnd: IsoDate.nullable() }),
 } as const;
 
+// ------------------------------------------------------------------ Migration events (FIN-MIG-01..03)
+/**
+ * Legacy migration (design 16.7): a migration project per book, stream `<tenant>/migration/<projectId>`.
+ * Source files, mapping approvals, loads (rehearsal or target), delta imports, rollbacks, decisions
+ * (authority switch, fallback operators), parallel-run comparisons and the signed go-live. Amounts
+ * are paise; source names and bank details never appear in these payloads (they are sealed in the
+ * module's tables and the party master), and every payload is sealed like any event.
+ */
+const MigSource = z.enum(["tally", "zoho", "csv"]);
+export const MIGRATION = {
+  MigrationProjectCreated: z.object({ projectId: Id, bookId: Id, sourceSystem: MigSource, cutoff: IsoDate, scope: z.array(z.string()) }),
+  /** A source file was parsed and retained (sealed); `purpose` source (masters, balances, open items, history), delta or comparison. */
+  MigrationFileImported: z.object({ projectId: Id, fileId: Id, fileHash: Hex64, purpose: z.enum(["source", "delta", "comparison"]),
+    kinds: z.array(z.string()), counts: z.record(z.string(), z.number().int()) }),
+  /** A person approved the target of one source ledger (`sourceIdx`: keyed index of the source id, never its name). */
+  MigrationMappingApproved: z.object({ projectId: Id, sourceIdx: z.string(), accountId: Id, partyId: Id.optional(), newAccount: z.boolean(), suggested: z.boolean() }),
+  /** Opening GL journal and subledger open items loaded into a rehearsal or the target book. */
+  MigrationLoadRecorded: z.object({ projectId: Id, loadId: Id, bookId: Id, kind: z.enum(["rehearsal", "target"]), journalIds: z.array(Id),
+    openItems: z.number().int(), records: z.number().int(), reconciled: z.boolean(), contentHash: Hex64 }),
+  /** Vouchers dated after the cut-off imported into a load's book; a reimport creates nothing. */
+  MigrationDeltaImported: z.object({ projectId: Id, loadId: Id, bookId: Id, created: z.number().int(), duplicates: z.number().int(),
+    changed: z.number().int(), held: z.number().int() }),
+  /** Pre-cutover rollback: a rehearsal book discarded whole, or a target load voided with reversing entries. */
+  MigrationLoadVoided: z.object({ projectId: Id, loadId: Id, bookId: Id, method: z.enum(["discard_book", "reversing_entries"]), reversals: z.array(Id), reason: z.string().min(3) }),
+  /** Authority (system of record per process) or fallback operators, as a recorded decision. */
+  MigrationDecisionRecorded: z.object({ projectId: Id, decisionId: Id, kind: z.enum(["authority", "fallback"]), detail: z.record(z.string(), z.unknown()) }),
+  MigrationComparisonRecorded: z.object({ projectId: Id, comparisonId: Id, from: IsoDate, to: IsoDate, contentHash: Hex64, differences: z.number().int() }),
+  MigrationDifferenceExplained: z.object({ projectId: Id, comparisonId: Id, key: z.string(), category: z.string(), note: z.string().min(3) }),
+  /** The cut-over: Kuber becomes the book of record; a superuser's signature over the comparison and checklist. */
+  MigrationWentLive: z.object({ projectId: Id, bookId: Id, comparisonId: Id, subjectHash: Hex64, goLive: IsoDate, signature: CommandSignature }),
+} as const;
+
 // ------------------------------------------------------------------ Evidence events
 export const EVIDENCE = {
   /**
@@ -612,12 +646,12 @@ export const BANK = {
     journalId: Id.optional(), statementId: Id.optional() }),
 } as const;
 
-export const ALL_EVENTS = { ...GL, ...PARTY, ...CHANNELS, ...AGENT, ...OPS, ...EVIDENCE, ...IDENTITY, ...DREAM, ...CONSOLIDATION, ...CLOSE, ...BANK } as const;
+export const ALL_EVENTS = { ...GL, ...PARTY, ...CHANNELS, ...AGENT, ...OPS, ...EVIDENCE, ...IDENTITY, ...DREAM, ...CONSOLIDATION, ...CLOSE, ...BANK, ...MIGRATION } as const;
 export type EventType = keyof typeof ALL_EVENTS;
 export type EventData<T extends EventType> = z.infer<(typeof ALL_EVENTS)[T]>;
 
 /** Which module owns (may append) each event type. Enforced by the event store. */
-export type Module = "gl" | "channels" | "agent" | "ops" | "evidence" | "identity" | "dream" | "consolidation" | "close" | "bank";
+export type Module = "gl" | "channels" | "agent" | "ops" | "evidence" | "identity" | "dream" | "consolidation" | "close" | "bank" | "migration";
 export const OWNER: Record<EventType, Module> = Object.fromEntries([
   ...Object.keys(GL).map((k) => [k, "gl"]),
   ...Object.keys(PARTY).map((k) => [k, "gl"]),                  // the GL owns master data (chart and parties)
@@ -630,6 +664,7 @@ export const OWNER: Record<EventType, Module> = Object.fromEntries([
   ...Object.keys(CONSOLIDATION).map((k) => [k, "consolidation"]),
   ...Object.keys(CLOSE).map((k) => [k, "close"]),
   ...Object.keys(BANK).map((k) => [k, "bank"]),
+  ...Object.keys(MIGRATION).map((k) => [k, "migration"]),
 ]) as Record<EventType, Module>;
 
 export const SCHEMA_VERSION = 1;
