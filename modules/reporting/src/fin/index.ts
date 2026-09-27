@@ -4,7 +4,7 @@
  */
 import type { Sql, TransactionSql } from "postgres";
 import { SqlLedgerData } from "./data.ts";
-import { loadMappings, mappingFor, type StatementMapping } from "./mapping.ts";
+import { loadMappings, mappingFor, validateMapping, type StatementMapping } from "./mapping.ts";
 import { definitionHash, drillMetric, evaluateMetric, loadMetrics, type MetricDef, type MetricResult } from "./metrics.ts";
 import { computeStatements, type BookInfo, type Column, type OutputStatus, type Period, type StatementBundle } from "./statements.ts";
 import { certifyMetricVersions, metricCertifications, type CertificationSource, type MetricCertRow } from "./certification.ts";
@@ -26,6 +26,7 @@ export type SnapshotRunner = <T>(tenantId: string, bookId: string, opts: { fresh
 
 export class FinReportError extends Error {
   constructor(public code: string, message: string, public status = 400) { super(message); }
+  get statusCode() { return this.status; }
 }
 
 export interface KpiRow extends KpiExportRow { current: MetricResult; comparative: MetricResult | null; basis?: string }
@@ -70,6 +71,14 @@ export class FinReports {
   }
 
   mappingFor(framework: string) { return mappingFor(this.mappings, framework); }
+
+  /** Add a mapping (e.g. an approved one after CA review); validated like the files. An approved mapping is preferred for its frameworks. */
+  addMapping(m: StatementMapping) {
+    const problems = validateMapping(m);
+    if (problems.length) throw new FinReportError("bad_mapping", `mapping ${(m as { id?: string }).id}: ${problems.join("; ")}`);
+    if (this.mappings.some((x) => x.id === m.id && x.version === m.version)) throw new FinReportError("bad_mapping", `mapping ${m.id} v${m.version} already exists`);
+    this.mappings.unshift(m);
+  }
 
   /** Every mapped statement for a period and its comparative, in one snapshot. */
   async statements(tenantId: string, bookId: string, p: StatementParams, opts: { freshness?: "any" | "require" | "wait"; timeoutMs?: number } = {}): Promise<StatementBundle> {

@@ -46,8 +46,30 @@ async function call<T>(s: { tenant: string; principal: string | null; sid?: stri
   return json as T;
 }
 
+/** A signed GET returning the core's bytes unparsed (CSV / JSON exports carry their SHA-256 in x-content-sha256). */
+export async function coreFile(s: { tenant: string; principal: string | null; sid?: string | null }, path: string) {
+  const target = `/v1/tenants/${encodeURIComponent(s.tenant)}${path}`;
+  const res = await fetch(`${CORE}${target}`, { headers: { [AUTH_HEADER]: signRequest(coreKey(), { method: "GET", path: target, tenant: s.tenant, principal: s.principal, session: s.sid ?? null }) } });
+  const body = await res.text();
+  if (!res.ok) { const j = (() => { try { return JSON.parse(body); } catch { return null; } })(); throw new ApiError(res.status, j?.error ?? "error", j?.message ?? `Request failed (${res.status})`); }
+  return { body, contentType: res.headers.get("content-type") ?? "application/octet-stream", sha256: res.headers.get("x-content-sha256") ?? "", disposition: res.headers.get("content-disposition") ?? "" };
+}
+
 // ---------------------------------------------------------------- types returned by the core
 export interface Statement { title: string; rows: { label: string; amount: string; accountId?: string; section?: string }[]; totals: Record<string, string>; unit: "paise" }
+/** FIN-RPT-01/02: mapped statements and KPIs (paise strings; null = unavailable, never zero). */
+export type OutputStatus = "preliminary" | "certified" | "unavailable";
+export interface FinColumn { key: "current" | "comparative"; from: string; to: string; label: string; status: OutputStatus; reasons: string[] }
+export interface FinRow { key: string; label: string; kind: "line" | "subtotal" | "total" | "exception" | "check" | "note"; group?: string; section?: string; amounts: (string | null)[]; accounts?: string[]; text?: string }
+export interface FinStatement { kind: string; title: string; status: OutputStatus; reasons: string[]; columns: FinColumn[]; rows: FinRow[]; checks: { label: string; ok: boolean; column: string; detail?: string }[]; exceptions: string[] }
+export interface StatementBundle {
+  bookId: string; book: { framework: string; basis: string; fiscalYearStartMonth: number };
+  mapping: { id: string; version: number; status: string; label: string; reviewNote: string } | null;
+  periods: { from: string; to: string }[];
+  statements: Record<"balanceSheet" | "profitAndLoss" | "cashFlow" | "equity" | "notes", FinStatement>;
+}
+export interface KpiColumn { key: string; from: string; to: string; status: OutputStatus; value: string | null; exact: string | null; reasons: string[]; notes: string[] }
+export interface KpiReport { periods: { from: string; to: string }[]; periodStatus: FinColumn[]; metrics: { id: string; name: string; version: number; unit: string; owner: string; definitionStatus: string; basis?: string; columns: KpiColumn[] }[] }
 export interface Account { account_id: string; name: string; nature: "asset" | "liability" | "equity" | "income" | "expense"; parent_id: string | null; balance: string }
 export interface Line { accountId: string; amount: string; partyId?: string | null }
 export interface Journal { journal_id: string; seq: number; txn_date: string; narration: string; provisional: boolean; reverses: string | null; principal: string; lines: Line[] }
@@ -96,6 +118,10 @@ export const api = (s: Pick<Session, "tenant" | "principal" | "sid"> & { stepUpA
   openingBalance: (book: string, accountId: string, amount: string, asOf: string) => call(s, "POST", `/books/${book}/opening-balances`, { accountId, amount, asOf }),
   report: (book: string, kind: string, q: Record<string, string> = {}) =>
     call<Statement>(s, "GET", `/books/${book}/reports/${kind}${Object.keys(q).length ? "?" + new URLSearchParams(q) : ""}`),
+  finStatements: (book: string, q: Record<string, string> = {}) =>
+    call<StatementBundle>(s, "GET", `/books/${book}/statements${Object.keys(q).length ? "?" + new URLSearchParams(q) : ""}`),
+  kpis: (book: string, q: Record<string, string> = {}) =>
+    call<KpiReport>(s, "GET", `/books/${book}/metrics${Object.keys(q).length ? "?" + new URLSearchParams(q) : ""}`),
   drill: (book: string, account: string, q: Record<string, string> = {}) =>
     call<DrillLine[]>(s, "GET", `/books/${book}/accounts/${encodeURIComponent(account)}/lines${Object.keys(q).length ? "?" + new URLSearchParams(q) : ""}`),
   copilotInfo: () => call<{ engine: string; suggestions: string[] }>(s, "GET", "/copilot"),
