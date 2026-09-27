@@ -230,3 +230,32 @@ export const portal = (s: Pick<Session, "tenant" | "principal" | "sid">) => ({
   snapshots: () => call<InvestorSnapshot[]>(s, "GET", "/portal/investor/snapshots"),
   shares: () => call<GuestShare[]>(s, "GET", "/shares/mine"),
 });
+
+// ---------------------------------------------------------------- cash and banks (FIN-CASH-01..03)
+export interface BankAccountView { bankAccountId: string; glAccountId: string; bankName: string; masked: string; openingDate: string; staleDays: number; status: string }
+export interface BankTimingItem { journalId: string; txnDate: string; narration: string; amount: string; ageDays: number; stale: boolean; source: { voucherType: string; postedBy: string; provisional: boolean } }
+export interface BankReconciliationView {
+  bankAccountId: string; masked: string; periodFrom: string; periodEnd: string; bankBalance: string | null; bookBalance: string;
+  outstandingPayments: BankTimingItem[]; depositsInTransit: BankTimingItem[]; unrecorded: { txnId: string; txnDate: string; narration: string | null; amount: string }[];
+  adjustedBank: string | null; adjustedBook: string; difference: string | null; differenceZero: boolean; noOutstandingItems: boolean; outstandingCount: number;
+  certifiable: boolean; problems: string[]; staleItems: string[]; hash: string;
+}
+export interface BankCoverageView { from: string; to: string; complete: boolean; gaps: { from: string; to: string }[]; overlaps: { from: string; to: string }[];
+  periods: { statementId: string; status: string; provenance: string; periodFrom: string; periodTo: string; opening: string | null; closing: string | null }[] }
+export interface BankCertificationView { reconciliationId: string; bankAccountId: string; periodFrom: string; periodEnd: string; version: number; status: string;
+  preparedBy: string; certifiedBy: string; certifiedAt: string; withdrawnReason: string | null; snapshotId: string }
+export interface BankExceptionView { caseId: string; requirement: string; cause: string; owner: string; hold: string; dueBy: string; status: string; amount: string | null }
+
+/** Signed-in calls for the /bank page; the core authorizes each one. */
+export const bankApi = (s: Pick<Session, "tenant" | "principal" | "sid"> & { stepUpAt?: number }, book: string) => {
+  const b = `/books/${encodeURIComponent(book)}/bank`;
+  return {
+    accounts: () => call<BankAccountView[]>(s, "GET", `${b}/accounts`),
+    coverage: (account: string) => call<BankCoverageView>(s, "GET", `${b}/coverage?account=${encodeURIComponent(account)}`),
+    reconciliation: (account: string, periodEnd: string) => call<BankReconciliationView>(s, "GET", `${b}/reconciliations/${encodeURIComponent(account)}?periodEnd=${periodEnd}`),
+    certifications: (account: string) => call<BankCertificationView[]>(s, "GET", `${b}/reconciliations?account=${encodeURIComponent(account)}`),
+    exceptions: () => call<BankExceptionView[]>(s, "GET", `${b}/exceptions?status=open`),
+    prepare: (bankAccountId: string, periodEnd: string) => call<{ planId: string; hash: string; blocked: boolean; title: string }>(s, "POST", `${b}/reconciliations`, { bankAccountId, periodEnd }),
+    certify: (planId: string, hash: string, assertion?: unknown) => call<{ status: string }>(s, "POST", `${b}/certify`, { planId, hash, ...(assertion ? { assertion } : {}) }),
+  };
+};

@@ -20,7 +20,9 @@ export type OpName = "record" | "post" | "balance" | "reconcile" | "allocate" | 
   | "group_structure" | "group_ownership" | "group_ic_link" | "consolidate" | "certify_group" | "ic_adjust"
   | "group_trial_balance" | "group_pnl" | "group_balance_sheet" | "ic_mismatches" | "nci" | "group_perimeter"
   // period close (FIN-CLS-01..04, modules/close), registered by the cell with Operations.register
-  | "close_status" | "complete_close_task" | "approve_substantiation" | "certify_close" | "reopen_period" | "restate";
+  | "close_status" | "complete_close_task" | "approve_substantiation" | "certify_close" | "reopen_period" | "restate"
+  // cash and banks (FIN-CASH-03, modules/bank), registered by the cell with Operations.register
+  | "bank_reconciliation" | "certify_bank_reconciliation";
 
 export interface Services { gl: GeneralLedger; reporting: Reporting; agent: Agent; policies: PolicyEngine;
   /** Party master payment holds (FIN-MDM-03). Without it, no party is treated as held. */

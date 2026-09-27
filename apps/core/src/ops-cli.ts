@@ -48,6 +48,7 @@
  *                    [--duplication] --owner p --as p
  *   ops incident update <tenant> <id> [--containment "…"] [--corrections j1,j2] [--owner p] [--note "…"] --as p
  *   ops incident close <tenant> <id> --reconciliation <ref> [--note "…"] --as p   (not the incident's owner)
+ *   ops bank …                                    FIN-CASH-01..03 bank accounts, statements, coverage, reconciliation, certify (bank-cli.ts)
  *   ops consolidate …                             FIN-GRP-01..04 group consolidation: groups, register plans, run, certify,
  *                                                 group reports, IC disputes, linked tenants (see group-cli.ts)
  *   ops drill-compare --source <owner url> --restored <owner url> [--out file] [--meta json]
@@ -70,6 +71,7 @@ import { REVIEW_DECISIONS, SWITCH_SCOPES, type ReviewDecision, type SwitchScope 
 import { Cell } from "./cell.ts";
 import { OpsAdmin } from "./ops-admin.ts";
 import { groupCommand } from "./group-cli.ts";
+import { bankCommand } from "./bank-cli.ts";
 
 const argv = process.argv.slice(2);
 if (argv[0] === "ops") argv.shift();
@@ -250,6 +252,7 @@ try {
       }
       break;
     }
+    case "bank": print(await bankCommand(cell, args)); break;
     case "drill-compare": {
       const source = flag("--source"), restored = flag("--restored");
       if (!source || !restored) throw new Error("usage: ops drill-compare --source <owner url> --restored <owner url> [--out file] [--meta json]");
@@ -263,7 +266,7 @@ try {
       break;
     }
     default:
-      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify, verify-signatures, bus-consumers, backfill-confirmations, run-schedules, access-review, autonomy, agent-turns, agent-signals, incident, consolidate, close, drill-compare");
+      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify, verify-signatures, bus-consumers, backfill-confirmations, run-schedules, access-review, autonomy, agent-turns, agent-signals, incident, consolidate, close, bank, drill-compare");
       process.exitCode = 2;
   }
 } finally {

@@ -67,6 +67,8 @@ export const ACTIONS = [
   "party.manage",         // create a party, change its details, request a bank-detail change (maker, FIN-MDM-03)
   "party.bank.verify",    // record the out-of-band verification of a bank-detail change, or reject it (checker)
   "party.bank.release",   // release a verified bank-detail change: lifts the payment hold (fresh approval)
+  // Cash and banks (FIN-CASH-01..03):
+  "bank.manage",          // register the book's own bank accounts (sealed numbers) and resolve bank exceptions
   // Reporting to outsiders:
   "snapshot.publish",     // mark a certified snapshot published (or not) to investors
   "share.grant",          // share a certified snapshot or a report with a guest until an expiry
@@ -97,7 +99,7 @@ const PERMISSIONS: Record<Role, ReadonlySet<Action>> = {
   system_owner: set(["self", "agent.system", "agent.turns.read"]),
   controller: set(ACTIONS.filter((a) => !EXTERNAL_ACTIONS.has(a) && !POLICY_ONLY.has(a) && !CONTROLLER_EXCLUDED.has(a))),
   // Cash and treasury: prepare and approve treasury plans prepared by others; verify bank changes out of band.
-  treasurer: set(["self", "read", "capture", "plan.prepare", "plan.approve", "copilot", "party.bank.verify"]),
+  treasurer: set(["self", "read", "capture", "plan.prepare", "plan.approve", "copilot", "party.bank.verify", "bank.manage"]),
   staff: set(["self", "read", "capture", "plan.prepare", "party.manage", "copilot"]),
   auditor: set(["self", "read", "members.read", "agent.turns.read"]),
   agent: set(["capture", "plan.prepare"]),
@@ -115,7 +117,11 @@ const PERMISSIONS: Record<Role, ReadonlySet<Action>> = {
 export const SUPERUSER_OPS: ReadonlySet<string> = new Set(["certify_close", "reopen_period", "restate"]);
 
 /** Operations a treasurer may prepare and approve (payments, reconciliation, rebalance, cash allocation). */
-export const TREASURY_OPS: ReadonlySet<string> = new Set(["record", "post", "reconcile", "rebalance", "allocate"]);
+export const TREASURY_OPS: ReadonlySet<string> = new Set(["record", "post", "reconcile", "rebalance", "allocate",
+  // FIN-CASH-03: a treasurer may certify a bank reconciliation someone else prepared.
+  "bank_reconciliation", "certify_bank_reconciliation"]);
+/** Operations whose commit over HTTP is always a signed command (design 16.4), whatever the amount. */
+export const ALWAYS_SIGNED_OPS: ReadonlyMap<string, string> = new Map([["certify_bank_reconciliation", "certifying a bank reconciliation"]]);
 
 /** A role of the model (people and agents). */
 export const isRole = (r: string): r is Role => (ROLES as readonly string[]).includes(r);

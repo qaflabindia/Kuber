@@ -692,6 +692,35 @@
       "op": "restate",
       "onCommit": "irreversible",
       "note": "FIN-CLS-04: gate human, superuser only; a controlled adjustment in an open period and a restated comparative version."
+    },
+    {
+      "name": "kuber_bank_reconciliation",
+      "owner": "Treasurer",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial",
+        "counterparty"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "op": "bank_reconciliation",
+      "note": "FIN-CASH-03 read: reconciliation statement of a registered bank account; lists statement narrations (third-party text)."
+    },
+    {
+      "name": "kuber_certify_bank_reconciliation",
+      "owner": "Treasurer",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial",
+        "counterparty"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "op": "certify_bank_reconciliation",
+      "onCommit": "irreversible",
+      "note": "FIN-CASH-03: prepares the certification (the preparer is recorded); an independent superuser, controller or treasurer commits it with a passkey signature. Irreversible: a certification is withdrawn by a later posting, never undone."
     }
   ]
 }

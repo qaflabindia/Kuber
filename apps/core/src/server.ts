@@ -42,6 +42,8 @@ import { registerGroupRoutes } from "./group-routes.ts";
 import { ConsolidationError } from "@kuber/consolidation";
 import { CloseError } from "@kuber/close";
 import { registerCloseRoutes } from "./close-routes.ts";
+import { BankError } from "@kuber/bank";
+import { registerBankRoutes } from "./bank-routes.ts";
 import { SigningRequest, actionLabel, amountReason, draftIntent, lockIntent, planIntent, ratifyIntent } from "./signing.ts";
 import type { Who } from "./tools.ts";
 
@@ -156,6 +158,7 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     if (err instanceof OpsError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof ConsolidationError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof CloseError) return reply.code(err.status).send({ error: err.code, message: err.message });
+    if (err instanceof BankError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof IncidentError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof ScheduleError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof ConcurrencyError) return reply.code(409).send({ error: "conflict", message: err.message });
@@ -786,6 +789,8 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   registerGroupRoutes(app, cell, who);
   // ------------------------------------------------------------ period close (FIN-CLS-01..04)
   registerCloseRoutes(app, cell, who);
+  // ------------------------------------------------------------ cash and banks (FIN-CASH-01..03)
+  registerBankRoutes(app, cell, who, attestFor, signatureRequired, Assertion);
 
   return app;
 }

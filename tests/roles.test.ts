@@ -27,7 +27,7 @@ const EXPECTED: Record<Role, Action[]> = {
   admin: ["self", "members.read", "members.manage", "settings.manage"],        // no financial action, no ledger reads
   system_owner: ["self", "agent.system", "agent.turns.read"],
   controller: INTERNAL.filter((a) => !["members.manage", "settings.manage", "authority.manage", "agent.system"].includes(a)),
-  treasurer: ["self", "read", "capture", "plan.prepare", "plan.approve", "copilot", "party.bank.verify"],
+  treasurer: ["self", "read", "capture", "plan.prepare", "plan.approve", "copilot", "party.bank.verify", "bank.manage"],   // FIN-CASH-01: registers the book's bank accounts
   staff: ["self", "read", "capture", "plan.prepare", "party.manage", "copilot"],
   auditor: ["self", "read", "members.read", "agent.turns.read"],
   agent: ["capture", "plan.prepare"],

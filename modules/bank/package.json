@@ -1,5 +1,5 @@
 {
-  "name": "@kuber/core",
+  "name": "@kuber/bank",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -7,26 +7,14 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.128.0",
     "@kuber/agent": "workspace:*",
-    "@kuber/auth": "workspace:*",
-    "@kuber/bank": "workspace:*",
-    "@kuber/bus": "workspace:*",
     "@kuber/channels": "workspace:*",
-    "@kuber/close": "workspace:*",
-    "@kuber/consolidation": "workspace:*",
     "@kuber/contracts": "workspace:*",
     "@kuber/crypto": "workspace:*",
-    "@kuber/dream-rsi": "workspace:*",
     "@kuber/eventstore": "workspace:*",
-    "@kuber/evidence": "workspace:*",
     "@kuber/gl": "workspace:*",
-    "@kuber/identity": "workspace:*",
     "@kuber/ops": "workspace:*",
-    "@kuber/policy": "workspace:*",
     "@kuber/reporting": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "fastify": "^5.6.0",
     "postgres": "^3.4.7",
     "zod": "^4.1.0"
   }

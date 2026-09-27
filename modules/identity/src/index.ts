@@ -37,7 +37,7 @@ import type { CommandSignature, Envelope } from "@kuber/contracts";
 import type { OpsGuard, OpsGuardQuery, Plan } from "@kuber/ops";
 import type { PolicyEngine } from "@kuber/policy";
 import { ReplayCache } from "@kuber/auth";
-import { ACTIONS, EXTERNAL_ROLES, LEGACY_ALIASES, PARTY_BOUND_ROLES, POLICY_CHECKER, ROLE_MODEL_V2_REASON, SUPERUSER_OPS, TREASURY_OPS, can, isPersonRole, isRole, mayNot,
+import { ACTIONS, ALWAYS_SIGNED_OPS, EXTERNAL_ROLES, LEGACY_ALIASES, PARTY_BOUND_ROLES, POLICY_CHECKER, ROLE_MODEL_V2_REASON, SUPERUSER_OPS, TREASURY_OPS, can, isPersonRole, isRole, mayNot,
   prefixMatchesRole, prefixOf, roleOf, type Action, type LegacyRole, type PersonRole, type Role } from "./roles.ts";
 import { Authority, type AuthorityChange, type AuthorityChangeHook, type IdentityHost } from "./authority.ts";
 import { AutonomySwitch } from "./autonomy.ts";
@@ -665,7 +665,13 @@ export class Identity implements OpsGuard, ModuleGuard {
    * Why committing this plan needs a fresh passkey step-up, or null: the same plans that need
    * separation of duties (period operations, amounts above the approval limit).
    */
-  stepUpReason(tenant: string, plan: Plan): Promise<string | null> { return this.separationReason(tenant, plan); }
+  stepUpReason(tenant: string, plan: Plan): Promise<string | null> {
+    const always = ALWAYS_SIGNED_OPS.get(plan.op);
+    return always ? Promise.resolve(always) : this.separationReason(tenant, plan);
+  }
+
+  /** True when `later` is the same person as `earlier` (or a successor after role changes): independence checks in other modules. */
+  isSamePerson(tenant: string, earlier: string, later: string): Promise<boolean> { return this.samePerson(tenant, earlier, later); }
 
   private async separation(tenant: string, approver: Member, plan: Plan) {
     const preparer = plan.requestedBy ?? plan.createdBy;
