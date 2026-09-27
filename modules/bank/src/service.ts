@@ -483,18 +483,74 @@ export class BankService implements ClearingHook {
     return { reconciliationId, status: r.status, snapshotVerified: !!snap?.verified, figuresUnchanged: same, now };
   }
 
+  // ------------------------------------------------------------------ period close evidence (FIN-CLS-01/02/04)
+  /**
+   * The close module's `bank_reconciliation` evidence resolver (registered by the cell). A reference
+   * {id: reconciliationId, hash: certified snapshot content hash} resolves while that certification
+   * stands: certified (not withdrawn), for this book, the snapshot verifies, and nothing touching the
+   * account and dated in the period was posted after the certified ledger position (the bus consumer
+   * withdraws such a certification asynchronously; this check does not wait for it). It answers with
+   * the GL account and period it certifies and the adjusted bank balance (debit positive), which a
+   * certified reconciliation shows equal to the book.
+   */
+  async closeEvidence(ref: { id: string; hash: string }, q: { tenant: string; book: string; tx?: TransactionSql }): Promise<
+    { ok: true; balancePaise: string; accountId: string; periodEnd: string; certifiedAt: string; detail: string } | { ok: false; reason: string }> {
+    const read = (tx: TransactionSql) => tx<(RecRow & { book_id: string; gl_account_id: string | null })[]>`
+      SELECT r.reconciliation_id, r.book_id, r.bank_account_id, r.period_from::text AS period_from, r.period_end::text AS period_end, r.version, r.status, r.snapshot_id,
+             r.content_hash, r.rec_hash, r.statement_hashes, r.ledger_seq, r.ledger_hash, r.prepared_by, r.certified_by, r.plan_id, r.certified_at, r.withdrawn_at, r.withdrawn_reason,
+             a.gl_account_id
+      FROM bank.reconciliations r LEFT JOIN bank.accounts a ON a.tenant_id = r.tenant_id AND a.bank_account_id = r.bank_account_id
+      WHERE r.tenant_id = ${q.tenant} AND r.reconciliation_id = ${ref.id}`;
+    const [r] = q.tx ? await read(q.tx) : await this.d.store.tenantTx(q.tenant, read);
+    if (!r || r.book_id !== q.book || !r.gl_account_id) return { ok: false, reason: "no such certified bank reconciliation in this book" };
+    if (r.status !== "certified") return { ok: false, reason: `the certification was withdrawn${r.withdrawn_reason ? `: ${r.withdrawn_reason}` : ""}` };
+    if (r.content_hash !== ref.hash) return { ok: false, reason: "the hash is not that of the certified reconciliation" };
+    const snap = await this.d.reporting.getSnapshot(q.tenant, r.snapshot_id);
+    const rec = (snap?.params as { reconciliation?: Reconciliation } | undefined)?.reconciliation;
+    if (!snap?.verified || snap.contentHash !== r.content_hash || !rec || rec.adjustedBank === null) return { ok: false, reason: `certified snapshot ${r.snapshot_id} does not verify` };
+    const state = await this.d.gl.state(q.tenant, q.book);
+    const book = bankJournals(state, r.gl_account_id).filter((j) => j.txnDate <= r.period_end).reduce((x, j) => x + j.amount, 0n);
+    if (book.toString() !== rec.bookBalance)
+      return { ok: false, reason: `${r.gl_account_id} at ${r.period_end} is ${book} in the ledger, ${rec.bookBalance} when certified: a posting dated in the period followed; certify the reconciliation again` };
+    return { ok: true, balancePaise: rec.adjustedBank, accountId: r.gl_account_id, periodEnd: r.period_end, certifiedAt: r.certified_at.toISOString(),
+      detail: `certified bank reconciliation ${r.reconciliation_id} (${r.bank_account_id} v${r.version}, certified by ${r.certified_by})` };
+  }
+
+  /**
+   * The close module's `bank_reconciliation` withdrawer (FIN-CLS-04): reopening a period withdraws
+   * the certified reconciliations its tasks and substantiations cited, in the reopen's transaction,
+   * each visibly (BankReconciliationWithdrawn and a certification-hold exception). Returns what it withdrew.
+   */
+  async withdrawForReopen(tx: TransactionSql, q: { tenant: string; book: string; periodEnd: string; refs: { id: string }[]; reason: string; planId: string }): Promise<string[]> {
+    const out: string[] = [];
+    for (const id of [...new Set(q.refs.map((r) => r.id))]) {
+      const recs = await tx<{ reconciliation_id: string; bank_account_id: string; period_end: string }[]>`
+        UPDATE bank.reconciliations SET status = 'withdrawn', withdrawn_at = now(), withdrawn_reason = ${`period ${q.periodEnd} reopened: ${q.reason}`}
+        WHERE tenant_id = ${q.tenant} AND book_id = ${q.book} AND reconciliation_id = ${id} AND status = 'certified'
+        RETURNING reconciliation_id, bank_account_id, period_end::text AS period_end`;
+      for (const r of recs) {
+        await this.recordWithdrawal(tx, q.tenant, q.book, r.bank_account_id, r, `period ${q.periodEnd} reopened (plan ${q.planId}): ${q.reason}`, {}, SYSTEM);
+        out.push(`${r.bank_account_id} ${r.reconciliation_id}`);
+      }
+    }
+    return out;
+  }
+
+  private async recordWithdrawal(tx: TransactionSql, tenant: string, book: string, bankAccountId: string, r: { reconciliation_id: string; period_end: string }, reason: string,
+                                 cause: { journalId?: string; statementId?: string }, principal: string) {
+    await this.d.store.append("bank", tenant, { streamId: accountStream(tenant, book, bankAccountId), expected: "any", events: [{ type: "BankReconciliationWithdrawn",
+      data: { reconciliationId: r.reconciliation_id, bookId: book, bankAccountId, periodEnd: r.period_end, reason, ...cause } }] }, { principal }, tx);
+    await this.raise(tx, tenant, { bookId: book, bankAccountId, requirement: "FIN-CASH-03", sourceId: r.reconciliation_id,
+      cause: `certification withdrawn: ${reason}`, amount: null, period: `..${r.period_end}`, hold: "certification", key: `withdrawn/${r.reconciliation_id}` }, principal);
+  }
+
   private async withdrawFrom(tx: TransactionSql, tenant: string, book: string, bankAccountId: string, fromDate: string, seq: number, reason: string,
                              cause: { journalId?: string; statementId?: string }, principal = SYSTEM) {
     const recs = await tx<{ reconciliation_id: string; period_end: string }[]>`
       UPDATE bank.reconciliations SET status = 'withdrawn', withdrawn_at = now(), withdrawn_reason = ${reason}
       WHERE tenant_id = ${tenant} AND bank_account_id = ${bankAccountId} AND status = 'certified' AND period_end >= ${fromDate} AND ledger_seq < ${seq}
       RETURNING reconciliation_id, period_end::text AS period_end`;
-    for (const r of recs) {
-      await this.d.store.append("bank", tenant, { streamId: accountStream(tenant, book, bankAccountId), expected: "any", events: [{ type: "BankReconciliationWithdrawn",
-        data: { reconciliationId: r.reconciliation_id, bookId: book, bankAccountId, periodEnd: r.period_end, reason, ...cause } }] }, { principal }, tx);
-      await this.raise(tx, tenant, { bookId: book, bankAccountId, requirement: "FIN-CASH-03", sourceId: r.reconciliation_id,
-        cause: `certification withdrawn: ${reason}`, amount: null, period: `..${r.period_end}`, hold: "certification", key: `withdrawn/${r.reconciliation_id}` }, principal);
-    }
+    for (const r of recs) await this.recordWithdrawal(tx, tenant, book, bankAccountId, r, reason, cause, principal);
     return recs.length;
   }
 

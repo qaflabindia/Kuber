@@ -5,8 +5,9 @@
  *   FIN-CLS-03  race-safe certified close: one book version, backdated posts refused or stale, snapshot, superuser, signature
  *   FIN-CLS-04  reopen withdraws certifications; hard close immutable; restatement with a comparative bridge
  *   UAT-COM     replay, concurrent submit, crash between approval and posting, revoked approver, switched book
- * A bank reconciliation (FIN-CASH, another workstream) is cited through the pluggable resolver: the
- * tests install a stand-in that answers for the reconciliations they "certify".
+ * A bank reconciliation is cited through the pluggable resolver: these tests replace the bank module's
+ * (registered by the cell) with a stand-in that answers for the reconciliations they "certify". The real
+ * resolver and withdrawer are exercised end to end in tests/g1-integration.test.ts.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";

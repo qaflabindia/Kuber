@@ -4,4 +4,5 @@ export * from "./evidence.ts";
 export * from "./template.ts";
 export * from "./ledger.ts";
 export * from "./service.ts";
+export * from "./certification.ts";
 export { closeOperations } from "./operations.ts";

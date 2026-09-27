@@ -9,4 +9,4 @@ export { parseTally, parseZoho, parseGenericCsv, parseSource, mergeExtracts, kin
 export { suggestMappings, similarity, isSuspenseAccount, newAccountId, type Suggestion, type NewAccountSpec } from "./mapping.ts";
 export { buildPlan, cutoffBalances, cutoffOpenItems, bookBalances, partyIdFor, type LoadPlan, type MappingRow, type Problem } from "./plan.ts";
 export * from "./migrations.ts";
-export { Migration, numbering, RECOVERY_PROCEDURE, REHEARSAL_POLICY, EXPLANATION_CATEGORIES, type MigrationDeps, type PartyPort, type CoverageSource, type ProjectRow, type LoadRow } from "./service.ts";
+export { Migration, numbering, RECOVERY_PROCEDURE, REHEARSAL_POLICY, EXPLANATION_CATEGORIES, type MigrationDeps, type PartyPort, type CoverageSource, type BankCoverageSource, type ProjectRow, type LoadRow } from "./service.ts";

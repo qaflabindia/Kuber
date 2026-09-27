@@ -19,7 +19,7 @@ import { IDENTITY_MIGRATIONS, IDENTITY_SEAL_MIGRATION, Identity, type IdentityOp
 import { DREAM_MIGRATIONS, DreamService } from "@kuber/dream-rsi";
 import { join, resolve } from "node:path";
 import { CONSOLIDATION_MIGRATIONS, Consolidation, LinkedTenants, consolidationOperations } from "@kuber/consolidation";
-import { CLOSE_MIGRATIONS, CloseService, closeOperations } from "@kuber/close";
+import { CLOSE_MIGRATIONS, CloseCertificationSource, CloseService, closeOperations } from "@kuber/close";
 import { BANK_MIGRATIONS, BankService, bankExtension, bankOperations } from "@kuber/bank";
 import { MIGRATION_MIGRATIONS, Migration } from "@kuber/migration";
 import { sealIdentityColumns } from "./keys-admin.ts";
@@ -265,12 +265,27 @@ export class Cell {
     await bus.subscribe({ name: "bank", filter: [s("gl", "JournalPosted")], handler: opened(bank.handler) });
     cell.consumers.bank = bank.handler;
     cell.bank = bank;
+    // Close ↔ bank (FIN-CLS-01/02/04 × FIN-CASH-03): a certified bank reconciliation is the close's bank
+    // evidence (task and substantiation), and reopening a period withdraws the reconciliations it cited.
+    close.evidence.registerResolver("bank_reconciliation", (ref, q) => bank.closeEvidence(ref, q));
+    close.evidence.registerWithdrawer("bank_reconciliation", (tx, q) => bank.withdrawForReopen(tx, q));
     // Mapped statements and KPIs (FIN-RPT-01/02): the book's framework, basis and fiscal year come from the GL's book state.
     reporting.fin.bookInfo = async (t, b) => { const st = await gl.state(t, b); return st.exists ? { ...st.config } : null; };
     ops.register(REPORT_OPERATIONS);
+    // Report ↔ close (FIN-RPT-01 × FIN-CLS-03/04): a period the close workflow has certified is what makes
+    // its statements "certified", and a reopen withdraws that; other periods keep the snapshot source.
+    reporting.fin.certification = new CloseCertificationSource(close, reporting.fin.certification);
     // Legacy migration: loads go through the GL and the party master under the identity guard; a
     // rehearsal book is load-only, so the ops service refuses every write operation in it (FIN-MIG-03).
-    cell.migration = new Migration({ store, gl, parties, guard: identity, clock: o.clock ?? (() => new Date().toISOString().slice(0, 10)) });
+    // Migration ↔ bank (FIN-MIG-02 × FIN-CASH-01): go-live bank coverage uses the bank module's verified statement
+    // periods for accounts registered there, and the channels' statement-line dates for the others.
+    cell.migration = new Migration({ store, gl, parties, guard: identity, clock: o.clock ?? (() => new Date().toISOString().slice(0, 10)),
+      bankCoverage: async (t, b, accountId, from, to) => {
+        const acct = (await bank.accounts(t, b)).find((a) => a.glAccountId === accountId && a.status === "active");
+        if (!acct) return null;
+        const c = await bank.coverage(t, b, acct.bankAccountId, { from, to });
+        return { bankAccountId: acct.bankAccountId, complete: c.complete, gaps: c.gaps, statements: c.statements.length, held: c.held.length };
+      } });
     ops.addBookGate(cell.migration.rehearsalGate);
     return cell;
   }

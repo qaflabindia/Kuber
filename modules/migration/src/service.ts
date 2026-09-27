@@ -56,7 +56,14 @@ export interface PartyPort {
 /** Statement lines per instrument (account) of a book: dates, for the bank coverage check. */
 export type CoverageSource = (tenant: string, book: string) => Promise<Map<string, string[]>>;
 
-export interface MigrationDeps { store: EventStore; gl: GeneralLedger; parties: PartyPort; guard: ModuleGuard; clock: () => string; coverage?: CoverageSource }
+/**
+ * Statement-period coverage of a GL bank account from a bank-account register (modules/bank,
+ * FIN-CASH-01): verified statements' declared periods over `from`..`to`, with their gaps. Null
+ * when the account is not registered there; the line-date check applies to it instead.
+ */
+export type BankCoverageSource = (tenant: string, book: string, accountId: string, from: string, to: string) =>
+  Promise<{ bankAccountId: string; complete: boolean; gaps: { from: string; to: string }[]; statements: number; held: number } | null>;
+export interface MigrationDeps { store: EventStore; gl: GeneralLedger; parties: PartyPort; guard: ModuleGuard; clock: () => string; coverage?: CoverageSource; bankCoverage?: BankCoverageSource }
 
 export interface ProjectRow { projectId: string; bookId: string; sourceSystem: SourceSystem; cutoff: string; scope: string[]; status: "open" | "live" | "closed";
   bookOfRecord: "source" | "kuber"; goLive: string | null; createdBy: string }
@@ -658,7 +665,9 @@ export class Migration {
   /**
    * Statements from the cut-off onward for every bank ledger of the source: each bank account's
    * statement lines (channels imports into the target book) must start within `toleranceDays` after
-   * the cut-off and reach `asOf`; long silences are listed as possible gaps.
+   * the cut-off and reach `asOf`; long silences are listed as possible gaps. An account registered in
+   * the bank module (bankCoverage) is checked on its verified statements' periods instead: they must
+   * cover every day from the day after the cut-off to `asOf`, with no gap (held statements do not count).
    */
   async coverage(tenant: string, projectId: string, o: { asOf?: string; toleranceDays?: number } = {}) {
     const p = await this.need(tenant, projectId);
@@ -668,13 +677,22 @@ export class Migration {
     const rows = await this.mappingRows(tenant, projectId, keys);
     const banks = [...new Set(rows.filter((r) => r.d.bank && r.status === "approved" && r.account_id).map((r) => r.new_account?.accountId ?? r.account_id!))].sort();
     const lines = await (this.d.coverage ?? this.eventCoverage)(tenant, p.bookId);
+    const registered = new Map<string, Awaited<ReturnType<BankCoverageSource>>>();
+    if (this.d.bankCoverage && asOf > p.cutoff) for (const accountId of banks) registered.set(accountId, await this.d.bankCoverage(tenant, p.bookId, accountId, addDays(p.cutoff, 1), asOf));
     const accounts = banks.map((accountId) => {
+      const reg = registered.get(accountId);
+      if (reg) {
+        const dates = (lines.get(accountId) ?? []).filter((d) => d > p.cutoff && d <= asOf).sort();
+        return { accountId, source: "bank" as const, bankAccountId: reg.bankAccountId, lines: dates.length, first: dates[0] ?? null, last: dates.at(-1) ?? null, gaps: reg.gaps, ok: reg.complete,
+          reason: reg.complete ? null : reg.statements === 0 ? `no verified statement of ${reg.bankAccountId} covers ${addDays(p.cutoff, 1)}..${asOf}${reg.held ? ` (${reg.held} held)` : ""}`
+            : `verified statements of ${reg.bankAccountId} leave ${reg.gaps.map((g) => `${g.from}..${g.to}`).join(", ")} uncovered` };
+      }
       const dates = (lines.get(accountId) ?? []).filter((d) => d > p.cutoff && d <= asOf).sort();
       const first = dates[0] ?? null, last = dates.at(-1) ?? null;
       const gaps: { from: string; to: string }[] = [];
       for (let i = 1; i < dates.length; i++) if (addDays(dates[i - 1]!, 2 * tol) < dates[i]!) gaps.push({ from: dates[i - 1]!, to: dates[i]! });
       const ok = !!first && first <= addDays(p.cutoff, tol) && !!last && last >= addDays(asOf, -tol);
-      return { accountId, lines: dates.length, first, last, gaps, ok, reason: ok ? null : !first ? `no statement lines after the cut-off ${p.cutoff}` : first > addDays(p.cutoff, tol) ? `statements start ${first}, more than ${tol} days after the cut-off` : `statements end ${last}, more than ${tol} days before ${asOf}` };
+      return { accountId, source: "statement-lines" as const, lines: dates.length, first, last, gaps, ok, reason: ok ? null : !first ? `no statement lines after the cut-off ${p.cutoff}` : first > addDays(p.cutoff, tol) ? `statements start ${first}, more than ${tol} days after the cut-off` : `statements end ${last}, more than ${tol} days before ${asOf}` };
     });
     return { cutoff: p.cutoff, asOf, toleranceDays: tol, accounts, ok: accounts.length > 0 && accounts.every((a) => a.ok), note: accounts.length ? null : "no approved bank ledger in the mapping" };
   }

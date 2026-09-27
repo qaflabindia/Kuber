@@ -4,10 +4,11 @@
  * per kind says whether a reference is valid for the book and period, now: the hash must be that
  * of the current certified content, so a reference to a changed or withdrawn item stops resolving.
  *
- *   bank_reconciliation      a certified bank reconciliation (FIN-CASH, another workstream): no resolver
- *                            is built in. Until one is registered (registerResolver, at merge time), a
- *                            bank reconciliation cannot be cited and the bank task cannot complete:
- *                            an unsupported module is never represented as reconciled.
+ *   bank_reconciliation      a certified bank reconciliation (FIN-CASH-03, modules/bank): no resolver is
+ *                            built in here; the cell registers the bank module's (BankService.closeEvidence)
+ *                            and its withdrawer for reopens. Without one, a bank reconciliation cannot be
+ *                            cited and the bank task cannot complete: an unsupported module is never
+ *                            represented as reconciled.
  *   schedule_reconciliation  the recognition schedules reconciled to the GL for the period (FIN-GL-03)
  *   suspense_roll_forward    the suspense roll-forward for the period, balanced (FIN-GL-05)
  *   document                 an uploaded document's SHA-256, registered for the book (close.documents)

@@ -488,6 +488,11 @@ export class CloseService {
       withdrawnBy: r.withdrawn_by, withdrawnAt: r.withdrawn_at?.toISOString() ?? null, withdrawnReason: r.withdrawn_reason }));
   }
 
+  /** The close records of one period, oldest version first (the statements' CertificationSource reads these, FIN-RPT-01). */
+  async closeRecordsFor(tenant: string, book: string, periodEnd: string): Promise<CloseRecord[]> {
+    return (await this.closes(tenant, book)).filter((c) => c.periodEnd === periodEnd);
+  }
+
   /** A certified close with its sealed body, its hash re-checked. Withdrawn closes stay retrievable. */
   async getClose(tenant: string, closeId: string): Promise<(CloseRecord & { body: CloseBody; verified: boolean }) | null> {
     const [r] = await this.d.store.tenantTx(tenant, (tx) => tx<{ body: string; book_id: string }[]>`SELECT body, book_id FROM close.closes WHERE tenant_id = ${tenant} AND close_id = ${closeId}`);
