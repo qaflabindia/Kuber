@@ -295,7 +295,7 @@ export class BankService implements ClearingHook {
         }
         // new movements dated inside a certified period withdraw its certification
         const firstNew = rowsOut.filter((r) => txnOf.get(r.rowNo)?.disposition === "accepted" && r.txnDate).map((r) => r.txnDate!).sort()[0];
-        if (firstNew) await this.withdrawFrom(tx, tenant, book, acct.bankAccountId, firstNew, Number.MAX_SAFE_INTEGER,
+        if (firstNew) await this.withdrawFrom(tx, tenant, book, acct.bankAccountId, firstNew, 2_147_483_647,
           `statement ${statementId} adds movements from ${firstNew} into a certified period`, { statementId });
       }
       return { statementId, bankAccountId: acct.bankAccountId, status, provenance, identity, periodFrom, periodTo, opening: opening?.toString() ?? null, closing: closing?.toString() ?? null,

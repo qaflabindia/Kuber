@@ -13,9 +13,9 @@
  */
 import { z } from "zod";
 import { Id, IsoDate, principalRole } from "@kuber/contracts";
-import type { Check, Draft, ExtensionHandler, OpContext, OpDef, Section } from "@kuber/ops";
+import { OpsError, type Check, type Draft, type ExtensionHandler, type OpContext, type OpDef, type Section } from "@kuber/ops";
 import type { Reconciliation, TimingItem } from "./reconcile.ts";
-import { PREPARERS, type BankService } from "./service.ts";
+import { BankError, PREPARERS, type BankService } from "./service.ts";
 
 export const BANK_EXT = "bank";
 const rs = (v: string | bigint | null) => {
@@ -99,5 +99,7 @@ export function bankOperations(svc: BankService): OpDef<any>[] {
 /** The `bank` ext handler: the certification step of a committed plan. */
 export const bankExtension = (svc: BankService): ExtensionHandler => async (tx, ctx, a) => {
   if (a.kind !== "certify") throw new Error(`unknown bank action ${a.kind}`);
-  return svc.certify(tx, ctx, a.payload as Parameters<BankService["certify"]>[2]);
+  // A refusal is the caller's answer as it is (status and code), not a failed commit: the plan stays open.
+  try { return await svc.certify(tx, ctx, a.payload as Parameters<BankService["certify"]>[2]); }
+  catch (e) { if (e instanceof BankError) throw new OpsError(e.code, `${e.message} (nothing was applied)`, e.status); throw e; }
 };

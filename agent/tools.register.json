@@ -608,6 +608,35 @@
       "op": "ic_adjust",
       "note": "gate human: returns a plan on the group's consolidation book; a person commits it (plan.approve.period)",
       "onCommit": "reversible"
+    },
+    {
+      "name": "kuber_bank_reconciliation",
+      "owner": "Treasurer",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial",
+        "counterparty"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "op": "bank_reconciliation",
+      "note": "FIN-CASH-03 read: reconciliation statement of a registered bank account; lists statement narrations (third-party text)."
+    },
+    {
+      "name": "kuber_certify_bank_reconciliation",
+      "owner": "Treasurer",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial",
+        "counterparty"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "op": "certify_bank_reconciliation",
+      "onCommit": "irreversible",
+      "note": "FIN-CASH-03: prepares the certification (the preparer is recorded); an independent superuser, controller or treasurer commits it with a passkey signature. Irreversible: a certification is withdrawn by a later posting, never undone."
     }
   ]
 }

@@ -32,7 +32,7 @@ describe("requirements register (requirements/register.md)", () => {
     for (const id of expected) expect(ids).toContain(id);
     expect(new Set(ids).size).toBe(ids.length);
     const extra = ids.filter((id) => !expected.includes(id));
-    for (const id of extra) expect(id).toMatch(/^(TOL|AGT|PRM|GEN|CBJ|LOG|MON|FIN-GRP)-\d\d$/);
+    for (const id of extra) expect(id).toMatch(/^(TOL|AGT|PRM|GEN|CBJ|LOG|MON|FIN-GRP|FIN-CASH|UAT)-\d\d$/);
   });
 
   it("engineering has claimed nothing beyond verified, and nothing is signed off", () => {
