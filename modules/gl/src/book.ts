@@ -46,6 +46,11 @@ export interface BookState {
   config: BookConfig;
   /** FIN-MDM-02: closed accounts (no new ordinary entries; reversals and corrections still post). */
   closed: ReadonlySet<string>;
+  /**
+   * FIN-CLS-03: period ends with a certified close (PeriodClosed, not reopened). Nothing dated on or
+   * before one of them posts, by anyone, until a controlled reopen. Absent on states built before it.
+   */
+  closes?: readonly { periodEnd: string; closeId: string }[];
 }
 
 /** Facts from outside the book that `decide` needs (loaded by the GL before deciding; decide stays pure). */
@@ -56,7 +61,7 @@ export interface DecideContext {
 
 export const emptyBook = (): BookState => ({
   exists: false, bookId: "", entityId: "", accounts: new Map(), locks: [], seq: 0, version: 0, lastHash: GENESIS_HASH, journals: JournalMap.empty(),
-  config: bookConfigOf({ entityId: "", entityType: "", basis: "statutory" }), closed: new Set(),
+  config: bookConfigOf({ entityId: "", entityType: "", basis: "statutory" }), closed: new Set(), closes: [],
 });
 
 /** Set one journal, sharing structure with the previous map (O(log n), not a copy of the book). */
@@ -77,6 +82,10 @@ export type BookCommand =
   | { kind: "CorrectJournal"; journalId: string; fromAccount: string; toAccount: string; reversalJournalId: string; newJournalId: string }
   /** `signature`: the person's signature over a directly requested lock (design 16.4), recorded on PeriodLocked. */
   | { kind: "LockPeriod"; periodEnd: string; level: "soft" | "hard"; signature?: CommandSignature }
+  /** FIN-CLS-03: record a certified close (modules/close, inside the certify_close plan's commit). */
+  | { kind: "ClosePeriod"; periodEnd: string; closeId: string; populationHash: string }
+  /** FIN-CLS-04: withdraw a certified close (reopen_period plan). Refused when a hard lock covers the period. */
+  | { kind: "ReopenPeriod"; periodEnd: string; closeId: string; reason: string }
   | { kind: "ConfirmJournal"; journalId: string; source: string; basis?: string }
   | { kind: "CloseAccount"; accountId: string; reason: string }
   | { kind: "ChangeAccountControls"; accountId: string; taxonomyTag?: string; requiredDims?: string[]; reason?: string }
@@ -120,6 +129,14 @@ function apply(s: BookState, e: Envelope): BookState {
     case "PeriodLocked": {
       const d = e.data as EventData<"PeriodLocked">;
       return { ...s, locks: [...s.locks.filter((l) => !(l.periodEnd === d.periodEnd && l.level === d.level)), { periodEnd: d.periodEnd, level: d.level }] };
+    }
+    case "PeriodClosed": {
+      const d = e.data as EventData<"PeriodClosed">;
+      return { ...s, closes: [...(s.closes ?? []).filter((c) => c.periodEnd !== d.periodEnd), { periodEnd: d.periodEnd, closeId: d.closeId }] };
+    }
+    case "PeriodReopened": {
+      const d = e.data as EventData<"PeriodReopened">;
+      return { ...s, closes: (s.closes ?? []).filter((c) => c.periodEnd !== d.periodEnd) };
     }
     case "AccountClosed": {
       const d = e.data as EventData<"AccountClosed">;
@@ -239,6 +256,23 @@ export function decide(s: BookState, c: BookCommand, principal: string, ctx: Dec
       if (!isPrivilegedPrincipal(principal)) throw new DomainError("forbidden", "only a superuser, owner or controller can lock a period");
       return [{ type: "PeriodLocked", data: { bookId: s.bookId, periodEnd: c.periodEnd, level: c.level, ...(c.signature ? { signature: c.signature } : {}) } }];
     }
+    case "ClosePeriod": {
+      if (!isIsoDate(c.periodEnd)) throw new DomainError("bad_date", `bad period end ${c.periodEnd}`);
+      if (!isPrivilegedPrincipal(principal)) throw new DomainError("forbidden", "only a superuser, owner or controller can close a period");
+      if (!/^[0-9a-f]{64}$/.test(c.populationHash)) throw new DomainError("bad_command", "a close names the journal population it certified");
+      if ((s.closes ?? []).some((x) => x.periodEnd === c.periodEnd && x.closeId === c.closeId)) return [];     // idempotent
+      return [{ type: "PeriodClosed", data: { bookId: s.bookId, periodEnd: c.periodEnd, closeId: c.closeId, populationHash: c.populationHash } }];
+    }
+    case "ReopenPeriod": {
+      if (!isPrivilegedPrincipal(principal)) throw new DomainError("forbidden", "only a superuser, owner or controller can reopen a period");
+      const cur = (s.closes ?? []).find((x) => x.periodEnd === c.periodEnd);
+      if (!cur) throw new DomainError("not_closed", `period ending ${c.periodEnd} has no certified close to reopen`);
+      if (cur.closeId !== c.closeId) throw new DomainError("stale_close", `the certified close of ${c.periodEnd} is ${cur.closeId}, not ${c.closeId}`);
+      const hard = s.locks.find((l) => l.level === "hard" && l.periodEnd >= c.periodEnd);
+      if (hard) throw new DomainError("period_hard_locked", `period ending ${c.periodEnd} is hard-locked (to ${hard.periodEnd}): its journals are immutable; correct it by a restatement in an open period`);
+      if (c.reason.trim().length < 3) throw new DomainError("reason_required", "reopening a period needs a reason");
+      return [{ type: "PeriodReopened", data: { bookId: s.bookId, periodEnd: c.periodEnd, closeId: c.closeId, reason: c.reason } }];
+    }
     case "CloseAccount": {
       if (!isPrivilegedPrincipal(principal)) throw new DomainError("forbidden", "only a superuser, owner or controller can close an account");
       if (!s.accounts.has(c.accountId)) throw new DomainError("no_account", `unknown account ${c.accountId}`);
@@ -356,6 +390,10 @@ export function validateJournal(s: BookState, txnDate: string, lines: Line[], pr
     if (txnDate > lock.periodEnd) continue;
     if (lock.level === "hard") throw new DomainError("period_hard_locked", `period ending ${lock.periodEnd} is hard-locked`);
     if (!isPrivilegedPrincipal(principal)) throw new DomainError("period_soft_locked", `period ending ${lock.periodEnd} is soft-locked; only a superuser, owner or controller may post`);
+  }
+  // FIN-CLS-03: a certified close refuses everyone (a racing backdated post cannot land in a closed period).
+  for (const c of s.closes ?? []) {
+    if (txnDate <= c.periodEnd) throw new DomainError("period_closed", `period ending ${c.periodEnd} is closed and certified; reopen it with an approved reopen_period plan before posting into it`);
   }
 }
 

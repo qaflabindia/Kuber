@@ -165,11 +165,11 @@ export class Operations {
       policy: decision ? { ids: decision.policyIds, level: decision.level, approver: decision.approver, reasons: decision.reasons } : null,
       checks, journals, effects, sections: d.sections ?? [], data: d.data, notes: d.notes ?? [], links: d.links ?? [],
       basisSeq: state.seq, basisVersion: state.version, createdAt: new Date().toISOString(), createdBy: principal, hash: "",
-      ...(opts.onBehalfOf ? { requestedBy: opts.onBehalfOf } : {}),
+      ...(opts.onBehalfOf ? { requestedBy: opts.onBehalfOf } : {}), ...(d.fence ? { fence: d.fence } : {}),
       status: committable ? "proposed" : "preview", blocked,
       needsPerson: def.gate === "human" || !decision || RANK[decision.level]! < 3,
     };
-    plan.hash = sha256(canonical({ op: plan.op, book, basisSeq: plan.basisSeq, basisVersion: plan.basisVersion, actions: d.actions }));
+    plan.hash = sha256(canonical({ op: plan.op, book, basisSeq: plan.basisSeq, basisVersion: plan.basisVersion, actions: d.actions, ...(d.fence ? { fence: d.fence } : {}) }));
     if (committable) {
       // Plans and their actions contain narrations and amounts: stored sealed, bound to the plan id.
       const keys = await this.store.keys(tenant);
@@ -284,7 +284,9 @@ export class Operations {
         if (cur!.status === "committed") return { steps: cur!.result?.done ?? [], replayed: true as const };
         if (cur!.status !== "proposed") throw new OpsError("not_open", `plan is ${cur!.status}`);
         // Nothing can post between this check and the actions below.
-        const moved = row.basis_version !== null ? b.version !== row.basis_version : b.state.seq !== row.basis_seq;
+        const moved = row.basis_version !== null
+          ? (p.fence ? await movedWithin(this.store, tenant, row.book_id, row.basis_version, p.fence.periodEnd, b.tx) : b.version !== row.basis_version)
+          : b.state.seq !== row.basis_seq;
         // A proposal made before a party's bank details changed is held too, until the change is released.
         const paying = paidParties(b.state.accounts, paymentJournals(row.actions, p.data));
         const held = paying.length && this.svc.parties ? await this.svc.parties.holds(tenant, paying, b.tx) : [];
@@ -318,6 +320,7 @@ export class Operations {
             await b.execute(a.command, { principal, commandId: planId });
             const c = a.command;
             steps.push(c.kind === "PostJournal" ? `posted ${c.journalId}` : c.kind === "LockPeriod" ? `locked ${c.level} to ${c.periodEnd}`
+              : c.kind === "ClosePeriod" ? `closed ${c.periodEnd} (certified close ${c.closeId})` : c.kind === "ReopenPeriod" ? `reopened ${c.periodEnd}`
               : c.kind === "ResolveSuspense" ? `reversed ${c.journalId} as ${c.reversalJournalId}${c.newJournalId ? `, reposted as ${c.newJournalId}` : ""}` : `added ${c.account.accountId}`);
           } else if (a.type === "approveSchedule") {
             // FIN-MDM-04: the schedule runs under the authority of the person who approved it (re-checked on every run).
@@ -522,17 +525,34 @@ export function summarizePlan(plan: Plan, actions: Action[], action: "plan.commi
   const approved = (plan.data as { approvedAmount?: string } | undefined)?.approvedAmount;
   if (approved && /^\d+$/.test(approved) && BigInt(approved) > amount) amount = BigInt(approved);
   const payees = planParties(plan, actions).map((partyId) => ({ partyId, name: null as string | null }));
-  const periods = actions.flatMap((a) => (a.type === "gl" && a.command.kind === "LockPeriod" ? [{ periodEnd: a.command.periodEnd, level: a.command.level }] : []));
+  const periods = actions.flatMap((a) => (a.type === "gl" && a.command.kind === "LockPeriod" ? [{ periodEnd: a.command.periodEnd, level: a.command.level }]
+    : a.type === "gl" && a.command.kind === "ClosePeriod" ? [{ periodEnd: a.command.periodEnd, level: "certified close" }]
+    : a.type === "gl" && a.command.kind === "ReopenPeriod" ? [{ periodEnd: a.command.periodEnd, level: "reopen" }] : []));
   const rows = [...accounts.values()].sort((a, b) => a.accountId.localeCompare(b.accountId));
   const lines = [
     `${action === "plan.approve" ? "Approve" : "Approve and carry out"}: ${plan.title}`,
     `Book ${plan.bookId}`,
     ...(amount > 0n ? [`Amount ${rupees(amount)}`] : []),
     ...rows.map((a) => `${a.name} (${a.accountId}): ${a.debit ? `debit ${rupees(a.debit)}` : ""}${a.debit && a.credit ? ", " : ""}${a.credit ? `credit ${rupees(a.credit)}` : ""}`),
-    ...periods.map((p) => `Lock (${p.level}) everything up to ${p.periodEnd}`),
+    ...periods.map((p) => p.level === "certified close" ? `Certify the close of everything up to ${p.periodEnd} (nothing dated on or before it posts afterwards)`
+      : p.level === "reopen" ? `Reopen the certified close of ${p.periodEnd} (its certifications are withdrawn)` : `Lock (${p.level}) everything up to ${p.periodEnd}`),
   ];
   return { action, title: plan.title, book: plan.bookId, amountPaise: amount > 0n ? amount.toString() : null, payees,
     accounts: rows.map((a) => ({ accountId: a.accountId, name: a.name, debitPaise: a.debit.toString(), creditPaise: a.credit.toString() })), periods, lines };
+}
+
+/**
+ * FIN-CLS fence (Draft.fence): has the book changed, since `basisVersion`, in a way a plan about the
+ * period up to `periodEnd` depends on? A journal dated on or before it, a lock, close or reopen, a
+ * chart mapping change: yes. A journal dated after it, a new account, a confirmation or a reversal
+ * marker (its reversing journal carries its own date): no. Read in the commit's transaction.
+ */
+async function movedWithin(store: EventStore, tenant: string, book: string, basisVersion: number, periodEnd: string, tx: TransactionSql): Promise<boolean> {
+  const after = await store.readStream(tenant, `${tenant}/book/${book}`, basisVersion, tx);
+  return after.some((e) => {
+    if (e.type === "JournalPosted") return (e.data as EventData<"JournalPosted">).txnDate <= periodEnd;
+    return !["AccountAdded", "JournalConfirmed", "JournalReversed"].includes(e.type);
+  });
 }
 
 // ---------------------------------------------------------------- derived views of a plan

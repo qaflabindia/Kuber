@@ -20,6 +20,9 @@ importers:
       '@kuber/channels':
         specifier: workspace:*
         version: link:modules/channels
+      '@kuber/close':
+        specifier: workspace:*
+        version: link:modules/close
       '@kuber/consolidation':
         specifier: workspace:*
         version: link:modules/consolidation
@@ -105,6 +108,9 @@ importers:
       '@kuber/channels':
         specifier: workspace:*
         version: link:../../modules/channels
+      '@kuber/close':
+        specifier: workspace:*
+        version: link:../../modules/close
       '@kuber/consolidation':
         specifier: workspace:*
         version: link:../../modules/consolidation
@@ -214,6 +220,36 @@ importers:
       '@kuber/eventstore':
         specifier: workspace:*
         version: link:../../packages/eventstore
+
+  modules/close:
+    dependencies:
+      '@kuber/agent':
+        specifier: workspace:*
+        version: link:../agent
+      '@kuber/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@kuber/eventstore':
+        specifier: workspace:*
+        version: link:../../packages/eventstore
+      '@kuber/gl':
+        specifier: workspace:*
+        version: link:../gl
+      '@kuber/ops':
+        specifier: workspace:*
+        version: link:../ops
+      '@kuber/policy':
+        specifier: workspace:*
+        version: link:../policy
+      '@kuber/reporting':
+        specifier: workspace:*
+        version: link:../reporting
+      postgres:
+        specifier: ^3.4.7
+        version: 3.4.9
+      zod:
+        specifier: ^4.1.0
+        version: 4.6.5
 
   modules/consolidation:
     dependencies:

@@ -1,0 +1,20 @@
+{
+  "name": "@kuber/close",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@kuber/agent": "workspace:*",
+    "@kuber/contracts": "workspace:*",
+    "@kuber/eventstore": "workspace:*",
+    "@kuber/gl": "workspace:*",
+    "@kuber/ops": "workspace:*",
+    "@kuber/policy": "workspace:*",
+    "@kuber/reporting": "workspace:*",
+    "postgres": "^3.4.7",
+    "zod": "^4.1.0"
+  }
+}

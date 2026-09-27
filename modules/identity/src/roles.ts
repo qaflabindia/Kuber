@@ -108,6 +108,12 @@ const PERMISSIONS: Record<Role, ReadonlySet<Action>> = {
   guest: set(["self", "share.read"]),
 };
 
+/**
+ * FIN-CLS-03/04: operations only a superuser (Checker, top authority) may approve or commit: the
+ * certified close, its reopening and a restatement. A controller prepares them.
+ */
+export const SUPERUSER_OPS: ReadonlySet<string> = new Set(["certify_close", "reopen_period", "restate"]);
+
 /** Operations a treasurer may prepare and approve (payments, reconciliation, rebalance, cash allocation). */
 export const TREASURY_OPS: ReadonlySet<string> = new Set(["record", "post", "reconcile", "rebalance", "allocate"]);
 

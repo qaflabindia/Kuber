@@ -13,12 +13,13 @@ import { PolicyEngine } from "@kuber/policy";
 import { CHANNELS_MIGRATIONS, Channels, channelsGrants } from "@kuber/channels";
 import { AGENT_MIGRATIONS, Agent, type LlmClassifier } from "@kuber/agent";
 import { REPORTING_MIGRATIONS, Reporting } from "@kuber/reporting";
-import { Incidents, OPS_MIGRATIONS, Operations } from "@kuber/ops";
+import { Incidents, OPS_MIGRATIONS, Operations, type Services } from "@kuber/ops";
 import { EVIDENCE_MIGRATIONS, EvidenceService } from "@kuber/evidence";
 import { IDENTITY_MIGRATIONS, IDENTITY_SEAL_MIGRATION, Identity, type IdentityOptions } from "@kuber/identity";
 import { DREAM_MIGRATIONS, DreamService } from "@kuber/dream-rsi";
 import { join, resolve } from "node:path";
 import { CONSOLIDATION_MIGRATIONS, Consolidation, LinkedTenants, consolidationOperations } from "@kuber/consolidation";
+import { CLOSE_MIGRATIONS, CloseService, closeOperations } from "@kuber/close";
 import { sealIdentityColumns } from "./keys-admin.ts";
 import { Portal } from "./portal.ts";
 import { AGENT_GOVERNANCE_MIGRATIONS } from "./copilot/governance/recorder.ts";
@@ -61,7 +62,7 @@ export interface CellOptions {
   dream?: { evidenceDir?: string; artifactsDir?: string };
 }
 
-const SCHEMAS = ["es", "agent", "reporting", "ops", "keys", "evidence", "channels", "identity", "mdm", "dream", "consolidation"];
+const SCHEMAS = ["es", "agent", "reporting", "ops", "keys", "evidence", "channels", "identity", "mdm", "dream", "consolidation", "close"];
 const ident = (role: string) => { if (!/^[a-z_][a-z0-9_]*$/.test(role)) throw new Error(`invalid role name ${role}`); return role; };
 
 /** Every SQL migration of the cell, in order. */
@@ -71,7 +72,9 @@ export const CELL_MIGRATIONS = [...EVENTSTORE_MIGRATIONS, ...LIFECYCLE_MIGRATION
   // Dream-RSI (design 7.2): autonomy tuning, outcomes, proposals.
   ...DREAM_MIGRATIONS,
   // Group consolidation (FIN-GRP-01..04).
-  ...CONSOLIDATION_MIGRATIONS];
+  ...CONSOLIDATION_MIGRATIONS,
+  // Period close (FIN-CLS-01..04).
+  ...CLOSE_MIGRATIONS];
 
 /** Migration ids a started cell requires: the SQL migrations and the data migrations run after them. */
 export const requiredMigrationIds = (): string[] => [...CELL_MIGRATIONS.map((m) => m.id), IDENTITY_SEAL_MIGRATION];
@@ -140,6 +143,8 @@ export class Cell {
   dream!: DreamService;
   /** Group consolidation (FIN-GRP-01..04): register, intercompany, eliminations, group close, linked tenants. */
   consolidation!: Consolidation;
+  /** Period close (FIN-CLS-01..04): checklist, substantiation, certified close, reopen and restatement. */
+  periodClose!: CloseService;
 
   private constructor(
     public readonly cellId: string, public readonly sql: Sql, private readonly systemSql: Sql, public readonly store: EventStore, public readonly bus: Bus,
@@ -188,7 +193,8 @@ export class Cell {
     const reporting = new Reporting(sql, store);
     // Payments to a party with an unreleased bank-detail change are held (POL-501), in plans and in drafts.
     agent.paymentHolds = (t, ids, tx) => parties.holds(t, ids, tx);
-    const ops = new Operations(sql, store, { gl, reporting, agent, policies, parties, singlePasskeyPeople: (t) => identity.singlePasskeyPeople(t) }, o.clock, identity);
+    const opsServices: Services = { gl, reporting, agent, policies, parties, singlePasskeyPeople: (t) => identity.singlePasskeyPeople(t) };
+    const ops = new Operations(sql, store, opsServices, o.clock, identity);
     // Evidence records re-verify the approval's device signature offline (design 14.4/16.4).
     const evidence = new EvidenceService(store, (t, env, sig) => identity.verifyStoredSignature(t, env, sig));
     // FIN-MDM-04: an authority change invalidates approvals that relied on it, in the same transaction.
@@ -223,6 +229,22 @@ export class Cell {
     ops.register(consolidationOperations(consolidation));
     ops.registerExtension("consolidation", consolidation.extension);
     cell.consolidation = consolidation;
+    // Period close: its operations and checklist/substantiation/close actions go through the ops service;
+    // the `close` operation's hard close waits for a certified close in books that keep a checklist.
+    const close = new CloseService({ store, gl, reporting, ops, agent, policies, clock: o.clock ?? (() => new Date().toISOString().slice(0, 10)),
+      guard: { authorize: (t, p, a, sc, tx) => identity.authorize(t, p, a as never, sc, tx), member: (t, p) => identity.member(t, p) },
+      intercompanyActive: async (t, b) => {
+        for (const g of await consolidation.groups(t)) {
+          const st = await consolidation.group(t, g.groupId);
+          const entity = st.entities.find((e) => e.bookId === b);
+          if (entity && st.icLinks.some((l) => l.entityId === entity.entityId || l.counterpartyEntityId === entity.entityId)) return true;
+        }
+        return false;
+      } });
+    ops.register(closeOperations(close));
+    ops.registerExtension("close", close.extension);
+    opsServices.closeGate = (t, b, periodEnd) => close.gate(t, b, periodEnd);
+    cell.periodClose = close;
     return cell;
   }
 

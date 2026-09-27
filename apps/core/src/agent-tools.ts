@@ -78,9 +78,11 @@ export async function journalLifecycle(cell: Cell, tenant: string, book: string)
 
 /** What needs a person: drafts in review, ratifications (tenant-wide members only) and open plans. */
 export async function attentionCounts(cell: Cell, tenant: string, book: string, tenantWide: boolean) {
-  const [d, ratifications, plans] = await Promise.all([cell.agent.queueCounts(tenant, tenantWide ? undefined : book),
-    tenantWide ? cell.agent.openRatificationCount(tenant) : Promise.resolve(0), cell.ops.pendingCount(tenant, book)]);
-  return { drafts: d.open, awaitingApproval: d.awaitingApproval, ratifications, plans };
+  const [d, ratifications, plans, overdue] = await Promise.all([cell.agent.queueCounts(tenant, tenantWide ? undefined : book),
+    tenantWide ? cell.agent.openRatificationCount(tenant) : Promise.resolve(0), cell.ops.pendingCount(tenant, book),
+    cell.periodClose ? cell.periodClose.overdue(tenant, book) : Promise.resolve([])]);
+  // FIN-CLS-01: open close checklist tasks past their deadline.
+  return { drafts: d.open, awaitingApproval: d.awaitingApproval, ratifications, plans, closeTasksOverdue: overdue.length };
 }
 
 /** The read guard every read tool passes first: the ops guard for a read operation, in this book. */
@@ -405,6 +407,7 @@ export function readTools(cell: Cell, who: Who, clock: () => string = () => new 
         if (c.plans) items.push(["Plans waiting for approval", String(c.plans), "/"]);
         if (suspense.length) items.push(["Open suspense items", String(suspense.length), "/"]);
         if (matches.items.length) items.push(["Statement lines to match", `${matches.items.length}${matches.next ? "+" : ""}`, "/review"]);
+        if (c.closeTasksOverdue) items.push(["Close tasks overdue", String(c.closeTasksOverdue), "/close"]);
         const summary = items.length ? items.map(([k, n]) => `${k}: ${n}`).join("; ") + "." : "Nothing needs your attention right now.";
         const data = { ...c, suspense: suspense.length, matchReviews: matches.items.length };
         return answer(readCard(who, "attention", "What needs your attention", summary, [{ title: "Waiting for a person", kind: "kv", rows: items.length ? items.map(([k, n]) => [k, n]) : [["Nothing waiting", "0"]] }],

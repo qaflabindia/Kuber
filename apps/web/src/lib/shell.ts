@@ -3,7 +3,9 @@
  * test suite exercises it: tests/web-shell.test.ts). A call that failed arrives as null and stays
  * "unavailable": an unanswered control must never read as zero or as "nothing waiting" (F15).
  */
-export interface Attention { drafts: number; awaitingApproval: number; ratifications: number; plans: number }
+export interface Attention { drafts: number; awaitingApproval: number; ratifications: number; plans: number;
+  /** FIN-CLS-01: open close checklist tasks past their deadline (absent from cores before the close module). */
+  closeTasksOverdue?: number }
 
 export interface ShellInputs {
   attention: Attention | null;
@@ -19,6 +21,7 @@ export interface Shell {
   awaitingApproval: number | null;
   confirmCount: number | null;
   pendingPlans: number | null;
+  closeOverdue: number | null;
   hasJournals: boolean;
   /** true: chain verified; false: verification found a break; null: the check could not run. */
   intact: boolean | null;
@@ -34,6 +37,7 @@ export function shellState(r: ShellInputs, sessionRole: string): Shell {
     awaitingApproval: a?.awaitingApproval ?? null,
     confirmCount: a?.ratifications ?? null,
     pendingPlans: a?.plans ?? null,
+    closeOverdue: a?.closeTasksOverdue ?? null,
     hasJournals: (r.journals?.length ?? 0) > 0,
     intact: r.verify ? r.verify.intact : null,
     // From the core's answer for this member (role changes show at once), not the session.
@@ -50,6 +54,7 @@ export function waitingRail(sh: Shell): { state: "unavailable" } | { state: "ite
   const items: WaitingItem[] = [];
   if (sh.pendingPlans) items.push({ href: "/", label: sh.pendingPlans === 1 ? "Plan to approve" : "Plans to approve", icon: "confirm", count: sh.pendingPlans, tone: "brass" });
   if (sh.reviewCount) items.push({ href: "/review", label: "Entries to review", icon: "review", count: sh.reviewCount, tone: sh.awaitingApproval ? "clay" : "brass" });
+  if (sh.closeOverdue) items.push({ href: "/close", label: sh.closeOverdue === 1 ? "Close task overdue" : "Close tasks overdue", icon: "alert", count: sh.closeOverdue, tone: "clay" });
   if (sh.confirmCount) items.push({ href: "/confirm", label: "Postings to confirm", icon: "confirm", count: sh.confirmCount, tone: "brass" });
   return { state: "items", items };
 }
