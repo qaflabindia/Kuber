@@ -14,7 +14,7 @@
       "kind": "tool_register",
       "id": "tool_register",
       "version": "1.0.0",
-      "sha256": "2ebb45a2092c466a12d3b1f91fc37d8ee44d258fb5416b68181ef940312649d7",
+      "sha256": "01e032358cb1ecde457d5e388f578273fbf2264760748bbc895946038a49f7aa",
       "approver": "Pending — System Owner",
       "approvedAt": "pending",
       "file": "tools.register.json"

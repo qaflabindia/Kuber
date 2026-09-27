@@ -13,7 +13,7 @@ import { PolicyEngine } from "@kuber/policy";
 import { CHANNELS_MIGRATIONS, Channels, channelsGrants } from "@kuber/channels";
 import { AGENT_MIGRATIONS, Agent, type LlmClassifier } from "@kuber/agent";
 import { REPORTING_MIGRATIONS, Reporting } from "@kuber/reporting";
-import { Incidents, OPS_MIGRATIONS, Operations } from "@kuber/ops";
+import { Incidents, OPS_MIGRATIONS, Operations, REPORT_OPERATIONS } from "@kuber/ops";
 import { EVIDENCE_MIGRATIONS, EvidenceService } from "@kuber/evidence";
 import { IDENTITY_MIGRATIONS, IDENTITY_SEAL_MIGRATION, Identity, type IdentityOptions } from "@kuber/identity";
 import { DREAM_MIGRATIONS, DreamService } from "@kuber/dream-rsi";
@@ -223,6 +223,9 @@ export class Cell {
     ops.register(consolidationOperations(consolidation));
     ops.registerExtension("consolidation", consolidation.extension);
     cell.consolidation = consolidation;
+    // Mapped statements and KPIs (FIN-RPT-01/02): the book's framework, basis and fiscal year come from the GL's book state.
+    reporting.fin.bookInfo = async (t, b) => { const st = await gl.state(t, b); return st.exists ? { ...st.config } : null; };
+    ops.register(REPORT_OPERATIONS);
     return cell;
   }
 

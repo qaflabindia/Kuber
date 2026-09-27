@@ -18,7 +18,9 @@ export type OpName = "record" | "post" | "balance" | "reconcile" | "allocate" | 
   | "schedule_approve" | "schedule_cancel" | "schedules" | "resolve_suspense" | "suspense"
   // group consolidation (FIN-GRP-01..04, modules/consolidation), registered by the cell with Operations.register
   | "group_structure" | "group_ownership" | "group_ic_link" | "consolidate" | "certify_group" | "ic_adjust"
-  | "group_trial_balance" | "group_pnl" | "group_balance_sheet" | "ic_mismatches" | "nci" | "group_perimeter";
+  | "group_trial_balance" | "group_pnl" | "group_balance_sheet" | "ic_mismatches" | "nci" | "group_perimeter"
+  // mapped statements and KPIs (FIN-RPT-01/02), registered by the cell with Operations.register
+  | "financial_statements" | "cash_flow" | "equity_statement" | "kpis" | "kpi_drill";
 
 export interface Services { gl: GeneralLedger; reporting: Reporting; agent: Agent; policies: PolicyEngine;
   /** Party master payment holds (FIN-MDM-03). Without it, no party is treated as held. */

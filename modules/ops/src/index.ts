@@ -37,6 +37,7 @@ export { OPERATIONS } from "./operations.ts";
 export { OPS_FIN_MIGRATIONS, incidentDetailCtx } from "./fin-migrations.ts";
 export { IncidentError, Incidents, type Incident, type IncidentInput } from "./incidents.ts";
 export { FIN_OPERATIONS } from "./fin-operations.ts";
+export { REPORT_OPERATIONS, kpiSection, statementSection } from "./report-operations.ts";
 export { SCHEDULER, ScheduleError, ScheduleInput, Schedules, occurrencesOf, type RunResult, type ScheduleDef, type ScheduleView } from "./schedules.ts";
 export { balancesFromState, splitByWeights, rebalanceTransfers, financialYear, fiscalStart, paidParties, pctToBp } from "./math.ts";
 

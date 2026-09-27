@@ -1,0 +1,63 @@
+{
+  "id": "gross_margin",
+  "name": "Gross margin",
+  "version": 1,
+  "description": "Revenue from operations less cost of sales, as a share of revenue from operations.",
+  "unit": "percent",
+  "places": 2,
+  "inputs": {
+    "revenue": {
+      "measure": "flow",
+      "label": "Revenue from operations",
+      "lines": [
+        "PL.REVENUE"
+      ]
+    },
+    "cogs": {
+      "measure": "flow",
+      "label": "Cost of sales",
+      "lines": [
+        "PL.COGS"
+      ]
+    }
+  },
+  "formula": "(revenue - cogs) / revenue",
+  "unavailableWhen": [
+    {
+      "input": "revenue",
+      "op": "<=",
+      "value": "0",
+      "reason": "no revenue from operations in the period: gross margin is not defined"
+    }
+  ],
+  "grain": [
+    "book",
+    "period"
+  ],
+  "sign": "Percent of revenue; positive = revenue exceeds cost of sales, negative = sold below cost.",
+  "filters": {
+    "voucherTypes": "closing vouchers excluded from flows",
+    "provisional": "provisional (unconfirmed) journals included",
+    "entity": "one book"
+  },
+  "period": {
+    "type": "flow",
+    "semantics": "flows over the period from..to"
+  },
+  "source": [
+    "reporting.daily",
+    "reporting.lines",
+    "statement mapping (book framework)"
+  ],
+  "owner": "Financial Controller",
+  "freshness": {
+    "maxLagJournals": 0,
+    "note": "computed only from a projection that has caught up with the ledger"
+  },
+  "test": {
+    "fixture": "company-small",
+    "from": "2026-04-01",
+    "to": "2027-03-31",
+    "expected": "75.00"
+  }
+}

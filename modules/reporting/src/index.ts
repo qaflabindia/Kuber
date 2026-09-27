@@ -7,6 +7,9 @@ import type { Sql, TransactionSql } from "postgres";
 import { isToken, type TenantKeys } from "@kuber/crypto";
 import { canonical, formatINR, sha256, uuid, type Envelope, type EventData } from "@kuber/contracts";
 import { once, tenantRlsFor, type EventStore, type Migration, type Projection } from "@kuber/eventstore";
+import { CERTIFYING_KINDS, FinReports, METRIC_CERT_MIGRATION, SnapshotCertificationSource } from "./fin/index.ts";
+
+export * from "./fin/index.ts";
 
 export const REPORTING_MIGRATIONS: Migration[] = [{
   id: "reporting-001",
@@ -99,7 +102,9 @@ ALTER TABLE reporting.snapshots ADD COLUMN published_to_investors BOOLEAN NOT NU
   ADD COLUMN published_by TEXT, ADD COLUMN published_at TIMESTAMPTZ;
 CREATE INDEX snapshots_published ON reporting.snapshots (tenant_id, taken_at) WHERE published_to_investors;
 `,
-}];
+},
+// FIN-RPT-02: metric definition versions whose golden test passed (design 8.4).
+METRIC_CERT_MIGRATION];
 
 /** Largest drill-through page. */
 export const MAX_DRILL = 1000;
@@ -161,7 +166,19 @@ export function renderText(s: Statement): string {
 }
 
 export class Reporting {
-  constructor(private sql: Sql, private store: EventStore) {}
+  /**
+   * FIN-RPT-01/02: mapped statements, KPIs, drill-down and export. Certified periods come from
+   * `fin.certification` (reporting.snapshots of kind close/report until the close workflow sets its own).
+   */
+  readonly fin: FinReports;
+  constructor(private sql: Sql, private store: EventStore) {
+    const certification = new SnapshotCertificationSource(
+      (t, b) => this.store.tenantTx(t, (tx) => tx<{ snapshot_id: string; kind: string; seq: number; content_hash: string; body: string; taken_by: string; taken_at: Date }[]>`
+        SELECT snapshot_id, kind, seq, content_hash, body, taken_by, taken_at FROM reporting.snapshots
+        WHERE tenant_id = ${t} AND book_id = ${b} AND kind = ANY(${[...CERTIFYING_KINDS]}) ORDER BY seq DESC, taken_at DESC`),
+      async (t, id, body) => (await this.store.keys(t)).openText(body, snapshotCtx(id)));
+    this.fin = new FinReports(sql, (t, b, opts, fn) => this.inSnapshot(t, b, opts, fn as never), certification);
+  }
 
   handler = async (env: Envelope): Promise<void> => {
     if (!["BookOpened", "AccountAdded", "AccountControlsChanged", "JournalPosted", "JournalConfirmed"].includes(env.type)) return;

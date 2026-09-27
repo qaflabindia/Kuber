@@ -526,6 +526,71 @@
       "op": "group_perimeter"
     },
     {
+      "name": "kuber_financial_statements",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "financial_statements",
+      "note": "FIN-RPT-01 mapped balance sheet, P&L and notes; labelled preliminary/certified/unavailable."
+    },
+    {
+      "name": "kuber_cash_flow",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "cash_flow",
+      "note": "FIN-RPT-01 cash flow statement (indirect; direct where cash lines allow)."
+    },
+    {
+      "name": "kuber_equity_statement",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "equity_statement",
+      "note": "FIN-RPT-01 statement of changes in equity."
+    },
+    {
+      "name": "kuber_kpis",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "kpis",
+      "note": "FIN-RPT-02 metric catalogue values; unavailable never shown as zero."
+    },
+    {
+      "name": "kuber_kpi_drill",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "kpi_drill",
+      "note": "FIN-RPT-02 journals, balances and open items behind a metric."
+    },
+    {
       "name": "kuber_consolidate",
       "owner": "Group Controller",
       "reversibility": "simulation",

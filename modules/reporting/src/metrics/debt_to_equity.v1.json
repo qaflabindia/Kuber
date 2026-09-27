@@ -1,0 +1,64 @@
+{
+  "id": "debt_to_equity",
+  "name": "Debt to equity",
+  "version": 1,
+  "description": "Long-term and short-term borrowings divided by shareholders' funds (share capital plus reserves and surplus, including profit not yet closed).",
+  "unit": "ratio",
+  "places": 2,
+  "inputs": {
+    "debt": {
+      "measure": "closing",
+      "label": "Borrowings",
+      "lines": [
+        "NCL.BORROWINGS",
+        "CL.BORROWINGS"
+      ]
+    },
+    "equity": {
+      "measure": "closing",
+      "label": "Shareholders' funds",
+      "lines": [
+        "EQ.*"
+      ]
+    }
+  },
+  "formula": "debt / equity",
+  "unavailableWhen": [
+    {
+      "input": "equity",
+      "op": "<=",
+      "value": "0",
+      "reason": "shareholders' funds are nil or negative: debt to equity is not meaningful"
+    }
+  ],
+  "grain": [
+    "book",
+    "period"
+  ],
+  "sign": "Times; higher = more borrowed money per rupee of equity.",
+  "filters": {
+    "voucherTypes": "closing vouchers excluded from flows",
+    "provisional": "provisional (unconfirmed) journals included",
+    "entity": "one book"
+  },
+  "period": {
+    "type": "point",
+    "semantics": "balances at the period end (to)"
+  },
+  "source": [
+    "reporting.daily",
+    "reporting.lines",
+    "statement mapping (book framework)"
+  ],
+  "owner": "Financial Controller",
+  "freshness": {
+    "maxLagJournals": 0,
+    "note": "computed only from a projection that has caught up with the ledger"
+  },
+  "test": {
+    "fixture": "company-small",
+    "from": "2026-04-01",
+    "to": "2027-03-31",
+    "expected": "0.17"
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "id": "quick_ratio",
+  "name": "Quick ratio",
+  "version": 1,
+  "description": "Current assets less inventories, divided by current liabilities.",
+  "unit": "ratio",
+  "places": 2,
+  "inputs": {
+    "ca": {
+      "measure": "closing",
+      "label": "Current assets",
+      "lines": [
+        "CA.*"
+      ]
+    },
+    "inventory": {
+      "measure": "closing",
+      "label": "Inventories",
+      "lines": [
+        "CA.INVENTORIES"
+      ],
+      "optional": true
+    },
+    "cl": {
+      "measure": "closing",
+      "label": "Current liabilities",
+      "lines": [
+        "CL.*"
+      ]
+    }
+  },
+  "formula": "(ca - inventory) / cl",
+  "unavailableWhen": [
+    {
+      "input": "cl",
+      "op": "<=",
+      "value": "0",
+      "reason": "current liabilities are nil or in debit: the quick ratio is not meaningful"
+    }
+  ],
+  "grain": [
+    "book",
+    "period"
+  ],
+  "sign": "Times; higher = more liquid assets per rupee of current liabilities.",
+  "filters": {
+    "voucherTypes": "closing vouchers excluded from flows",
+    "provisional": "provisional (unconfirmed) journals included",
+    "entity": "one book"
+  },
+  "period": {
+    "type": "point",
+    "semantics": "balances at the period end (to)"
+  },
+  "source": [
+    "reporting.daily",
+    "reporting.lines",
+    "statement mapping (book framework)"
+  ],
+  "owner": "Financial Controller",
+  "freshness": {
+    "maxLagJournals": 0,
+    "note": "computed only from a projection that has caught up with the ledger"
+  },
+  "test": {
+    "fixture": "company-small",
+    "from": "2026-04-01",
+    "to": "2027-03-31",
+    "expected": "5.06"
+  }
+}

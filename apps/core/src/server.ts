@@ -39,6 +39,7 @@ import { registerPortalRoutes } from "./portal-routes.ts";
 import { createGovernance, type KuberGovernance } from "./copilot/governance/index.ts";
 import { registerAgentRoutes } from "./copilot/governance/routes.ts";
 import { registerGroupRoutes } from "./group-routes.ts";
+import { registerReportRoutes } from "./report-routes.ts";
 import { ConsolidationError } from "@kuber/consolidation";
 import { SigningRequest, actionLabel, amountReason, draftIntent, lockIntent, planIntent, ratifyIntent } from "./signing.ts";
 import type { Who } from "./tools.ts";
@@ -781,6 +782,8 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   registerPortalRoutes(app, cell, who);
   // ------------------------------------------------------------ group consolidation (FIN-GRP-01..04)
   registerGroupRoutes(app, cell, who);
+  // ------------------------------------------------------------ mapped statements and KPIs (FIN-RPT-01/02)
+  registerReportRoutes(app, cell, who, clock);
 
   return app;
 }

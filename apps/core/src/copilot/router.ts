@@ -228,6 +228,14 @@ export function route(text: string, today: string, accountsIn: (string | Account
   if (!QUESTION.test(l) && !l.includes("?") && amountIn(t) && /\b(paid|pay|spent|bought|received|got|transfer(red)?|deposit(ed)?|withdrew|salary|rent|emi)\b/.test(l)) return { kind: "chat", text: t };
 
   // ------------------------------------------------ reads
+  // Mapped statements and KPIs (FIN-RPT-01/02): read operations, before the cash / profit / schedule phrasings below.
+  const kpi = metricIn(l);
+  if (kpi && /\b(drill|behind|break ?down|what makes up|made up of|explain|why|details?|journals?|evidence)\b/.test(l)) return op("kpi_drill", { metric: kpi, ...period(p()) });
+  if (kpi) return op("kpis", { metrics: [kpi], ...period(p()) });
+  if (/\bkpis?\b|\bkey (metrics|ratios)\b|\b(financial|accounting) ratios\b|\bratio analysis\b|\bmetric catalogue\b/.test(l)) return op("kpis", period(p()));
+  if (/\bcash ?flows?( statement)?\b|\bstatement of cash ?flows?\b|\bfunds? flow\b/.test(l)) return op("cash_flow", period(p()));
+  if (/\b(statement of )?changes in equity\b|\bequity (statement|movements?|roll ?forward)\b|\bstatement of (shareholders'? )?equity\b/.test(l)) return op("equity_statement", period(p()));
+  if (/\bfinancial statements\b|\bschedule (iii|3)\b|\bmapped statements\b|\bnotes to (the )?(accounts|statements)\b/.test(l)) return op("financial_statements", period(p()));
   if (/\b(what|anything|something) (needs|requires) (my |our )?(attention|approval|action)|needs? my (attention|approval)|\bwhat('s| is) (pending|waiting|outstanding|open)\b|\banything (pending|waiting|to do|for me)\b|\bmy (to-?do|tasks|inbox)\b|\bwhat should i (do|look at)\b|\battention\b/.test(l)) return read("kuber_attention");
   if (/\bmatch(es|ing)? reviews?\b|\breview (the )?match|\bstatement lines? to match\b|\bpossible duplicates?\b|\bunmatched\b/.test(l)) return read("kuber_match_reviews");
   if (/\bpost\b/.test(l) && /\bdrafts?\b/.test(l)) return op("post");
@@ -291,6 +299,23 @@ export function route(text: string, today: string, accountsIn: (string | Account
     if (r.kind === "one" && matchAccounts(bare, accounts)[0]!.score >= 0.8) return read("kuber_ledger", { account: r.id, limit: 20 });
   }
   return { kind: "help", text: helpText("I didn't recognise that as something I can do from rules. Here is what I can do:"), reason: "unrecognised" };
+}
+
+/** The catalogue metric a phrase names (FIN-RPT-02), or null. "Runway" alone stays the cash position read. */
+export const METRIC_PHRASES: [RegExp, string][] = [
+  [/\bcurrent ratio\b/, "current_ratio"],
+  [/\b(quick|acid[- ]test) ratio\b/, "quick_ratio"],
+  [/\bdso\b|\bdays? sales outstanding\b|\bdebtors?'? days\b|\breceivables? days\b|\bdays to collect\b/, "dso"],
+  [/\bdpo\b|\bdays? payables? outstanding\b|\bcreditors?'? days\b|\bpayables? days\b/, "dpo"],
+  [/\bgross (profit )?margin\b/, "gross_margin"],
+  [/\boperating (profit )?margin\b|\bebit margin\b/, "operating_margin"],
+  [/\bworking capital\b/, "working_capital"],
+  [/\bdebt[- ]?(to[- ]?)?equity\b|\bd\/e ratio\b|\bgearing\b/, "debt_to_equity"],
+  [/\bcash runway (kpi|metric)\b|\brunway (kpi|metric|in months)\b/, "cash_runway"],
+];
+export function metricIn(l: string): string | null {
+  for (const [re, id] of METRIC_PHRASES) if (re.test(l)) return id;
+  return null;
 }
 
 /** An optional account filter for a breakdown: only a clear match among accounts of that nature; otherwise no filter (a read never guesses). */
