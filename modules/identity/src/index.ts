@@ -37,7 +37,7 @@ import type { CommandSignature, Envelope } from "@kuber/contracts";
 import type { OpsGuard, OpsGuardQuery, Plan } from "@kuber/ops";
 import type { PolicyEngine } from "@kuber/policy";
 import { ReplayCache } from "@kuber/auth";
-import { ACTIONS, EXTERNAL_ROLES, LEGACY_ALIASES, PARTY_BOUND_ROLES, POLICY_CHECKER, ROLE_MODEL_V2_REASON, TREASURY_OPS, can, isPersonRole, isRole, mayNot,
+import { ACTIONS, EXTERNAL_ROLES, LEGACY_ALIASES, PARTY_BOUND_ROLES, POLICY_CHECKER, ROLE_MODEL_V2_REASON, SUPERUSER_OPS, TREASURY_OPS, can, isPersonRole, isRole, mayNot,
   prefixMatchesRole, prefixOf, roleOf, type Action, type LegacyRole, type PersonRole, type Role } from "./roles.ts";
 import { Authority, type AuthorityChange, type AuthorityChangeHook, type IdentityHost } from "./authority.ts";
 import { AutonomySwitch } from "./autonomy.ts";
@@ -629,6 +629,8 @@ export class Identity implements OpsGuard, ModuleGuard {
     const { member: m } = await this.authority.approvalAuthority(tenant, principal, action, book, amount);
     // A treasurer approves treasury plans only (payments, reconciliation, rebalance, cash allocation).
     if (m.role === "treasurer" && !TREASURY_OPS.has(op.name)) throw denied(`a treasurer approves treasury plans only (${[...TREASURY_OPS].join(", ")}), not ${op.name}`);
+    // FIN-CLS-03/04: the certified close, a reopen and a restatement are approved by a superuser only.
+    if (SUPERUSER_OPS.has(op.name) && m.role !== "superuser") throw denied(`${op.name} is approved by a superuser only (FIN-CLS); ${principal} is a ${m.role}`);
     await this.authority.checkConflicts(tenant, principal, q.parties ?? []);
     // Conflict matrix: whoever verified a party's bank details does not also approve a payment to it (POL-501).
     for (const v of q.bankVerifiers ?? []) {

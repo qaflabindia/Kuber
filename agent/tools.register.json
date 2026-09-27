@@ -608,6 +608,90 @@
       "op": "ic_adjust",
       "note": "gate human: returns a plan on the group's consolidation book; a person commits it (plan.approve.period)",
       "onCommit": "reversible"
+    },
+    {
+      "name": "kuber_close_status",
+      "owner": "Financial Controller",
+      "reversibility": "none",
+      "permission": "read",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "close_status",
+      "note": "FIN-CLS: checklist, substantiation, completeness and certified closes of a period."
+    },
+    {
+      "name": "kuber_complete_close_task",
+      "owner": "Financial Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "complete_close_task",
+      "onCommit": "reversible",
+      "note": "FIN-CLS-01: the owner prepares with evidence refs; a different person commits (the review). Withdrawn by an approved reopen."
+    },
+    {
+      "name": "kuber_approve_substantiation",
+      "owner": "Financial Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial",
+        "counterparty"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "approve_substantiation",
+      "onCommit": "reversible",
+      "note": "FIN-CLS-02: the preparer prepares; independent approval on commit. Withdrawn by an approved reopen."
+    },
+    {
+      "name": "kuber_certify_close",
+      "owner": "Financial Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "certify_close",
+      "onCommit": "irreversible",
+      "note": "FIN-CLS-03: gate human, superuser only, signed approval; closes the period in the ledger (only a controlled reopen withdraws it)."
+    },
+    {
+      "name": "kuber_reopen_period",
+      "owner": "Financial Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "reopen_period",
+      "onCommit": "irreversible",
+      "note": "FIN-CLS-04: gate human, superuser only, signed approval; withdraws certifications visibly."
+    },
+    {
+      "name": "kuber_restate",
+      "owner": "Financial Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": false,
+      "enabled": true,
+      "op": "restate",
+      "onCommit": "irreversible",
+      "note": "FIN-CLS-04: gate human, superuser only; a controlled adjustment in an open period and a restated comparative version."
     }
   ]
 }

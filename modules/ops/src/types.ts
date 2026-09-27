@@ -18,13 +18,20 @@ export type OpName = "record" | "post" | "balance" | "reconcile" | "allocate" | 
   | "schedule_approve" | "schedule_cancel" | "schedules" | "resolve_suspense" | "suspense"
   // group consolidation (FIN-GRP-01..04, modules/consolidation), registered by the cell with Operations.register
   | "group_structure" | "group_ownership" | "group_ic_link" | "consolidate" | "certify_group" | "ic_adjust"
-  | "group_trial_balance" | "group_pnl" | "group_balance_sheet" | "ic_mismatches" | "nci" | "group_perimeter";
+  | "group_trial_balance" | "group_pnl" | "group_balance_sheet" | "ic_mismatches" | "nci" | "group_perimeter"
+  // period close (FIN-CLS-01..04, modules/close), registered by the cell with Operations.register
+  | "close_status" | "complete_close_task" | "approve_substantiation" | "certify_close" | "reopen_period" | "restate";
 
 export interface Services { gl: GeneralLedger; reporting: Reporting; agent: Agent; policies: PolicyEngine;
   /** Party master payment holds (FIN-MDM-03). Without it, no party is treated as held. */
   parties?: Pick<PartyMaster, "holds"> & Partial<Pick<PartyMaster, "entities" | "verifiers">>;
   /** Design 16.4: owners and controllers who have only one active passkey (the books-in-order check warns). */
-  singlePasskeyPeople?: (tenant: string) => Promise<string[]> }
+  singlePasskeyPeople?: (tenant: string) => Promise<string[]>;
+  /**
+   * FIN-CLS-03: extra blocking checks for the `close` operation (modules/close): a book that keeps a
+   * close checklist is hard-closed only after a current certified close of that period. Absent: none.
+   */
+  closeGate?: (tenant: string, book: string, periodEnd: string) => Promise<Check[]> }
 
 export interface OpContext {
   tenant: string; book: string; principal: string; today: string;
@@ -38,7 +45,7 @@ export interface OpContext {
 }
 
 export type Action =
-  | { type: "gl"; command: Extract<BookCommand, { kind: "PostJournal" | "LockPeriod" | "AddAccount" | "ResolveSuspense" }> }
+  | { type: "gl"; command: Extract<BookCommand, { kind: "PostJournal" | "LockPeriod" | "AddAccount" | "ResolveSuspense" | "ClosePeriod" | "ReopenPeriod" }> }
   | { type: "approveDraft"; draftId: string; accountId: string }
   /** FIN-GL-02/03: the one approval of a schedule; later occurrences execute under it. */
   | { type: "approveSchedule"; scheduleId: string; hash: string; approvedAmount: string }
@@ -84,6 +91,13 @@ export interface Draft {
   notes?: string[];
   /** Drill-down links into views: [label, path]. */
   links?: [string, string][];
+  /**
+   * FIN-CLS: the plan depends on the book only up to `periodEnd`. Commit then treats the plan as
+   * stale when anything dated on or before it was posted, a lock or close changed, or the chart
+   * mapping changed since simulation; a journal dated after it does not stale the plan. Absent:
+   * any change to the book stales it.
+   */
+  fence?: { periodEnd: string };
 }
 
 export interface Plan {
@@ -100,6 +114,8 @@ export interface Plan {
   blocked: boolean;
   /** Who may commit: a person always; an agent only when policy grants L3+ and the gate is "policy". */
   needsPerson: boolean;
+  /** See Draft.fence. */
+  fence?: { periodEnd: string };
 }
 
 export interface OpDef<I = unknown> {

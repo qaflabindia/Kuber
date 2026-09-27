@@ -184,6 +184,14 @@ export const GL = {
   PostingRejected: z.object({ bookId: Id, requestId: Id, reason: z.string(), source: z.string().optional() }),
   /** `signature`: a lock asked for directly (POST …/locks) is a signed command (design 16.4); a close plan's signature is on its PlanApproved. */
   PeriodLocked: z.object({ bookId: Id, periodEnd: IsoDate, level: z.enum(["soft", "hard"]), signature: CommandSignature.optional() }),
+  /**
+   * FIN-CLS-03: a certified close of the period (modules/close). Nothing dated on or before
+   * `periodEnd` posts afterwards, by anyone, until a controlled reopen (PeriodReopened).
+   * `populationHash`: the journal population the close certified (journals dated up to periodEnd).
+   */
+  PeriodClosed: z.object({ bookId: Id, periodEnd: IsoDate, closeId: Id, populationHash: z.string().length(64) }),
+  /** FIN-CLS-04: a certified (soft) close withdrawn by an approved reopen plan. Hard locks are never reopened. */
+  PeriodReopened: z.object({ bookId: Id, periodEnd: IsoDate, closeId: Id, reason: z.string().min(3) }),
   /** FIN-MDM-02: no new ordinary entries; reversals and corrections of earlier journals still post. */
   AccountClosed: z.object({ bookId: Id, accountId: Id, reason: z.string().min(1) }),
   /**
@@ -441,6 +449,32 @@ export const CONSOLIDATION = {
     prevPackHash: z.string().length(64), role: z.enum(["group", "subsidiary"]) }),
 } as const;
 
+// ------------------------------------------------------------------ Period close (FIN-CLS-01..04, modules/close)
+/**
+ * Stream `<tenant>/close/<book>/<periodEnd>`: the checklist, account substantiation, the certified
+ * close and its withdrawal on reopen, and restatements. Amounts are paise. Evidence is a reference
+ * {kind, id, hash}; its content lives with the module that produced it.
+ */
+export const CloseEvidenceRef = z.object({ kind: z.enum(["bank_reconciliation", "schedule_reconciliation", "suspense_roll_forward", "document"]), id: z.string().min(1).max(300),
+  hash: z.string().regex(/^[0-9a-f]{64}$/) });
+export const CLOSE = {
+  CloseChecklistCreated: z.object({ bookId: Id, periodEnd: IsoDate, periodStart: IsoDate, templateVersion: z.string(),
+    tasks: z.array(z.object({ taskId: Id, area: z.string(), owner: Principal.nullable(), deadline: IsoDate, dependsOn: z.array(Id), applicable: z.boolean(), reason: z.string().nullable() })) }),
+  CloseTaskAssigned: z.object({ bookId: Id, periodEnd: IsoDate, taskId: Id, owner: Principal, deadline: IsoDate }),
+  /** Completed by the owner (the plan's preparer) with its evidence, reviewed by a different person (the committer). */
+  CloseTaskCompleted: z.object({ bookId: Id, periodEnd: IsoDate, taskId: Id, completedBy: Principal, reviewedBy: Principal, evidence: z.array(CloseEvidenceRef), planId: Id }),
+  AccountSubstantiated: z.object({ bookId: Id, periodEnd: IsoDate, accountId: Id, glBalance: MinorString, source: z.string(), sourceBalance: MinorString.nullable(),
+    items: z.number().int().nonnegative(), preparedBy: Principal, approvedBy: Principal, hash: z.string().length(64), planId: Id }),
+  PeriodCloseCertified: z.object({ bookId: Id, periodEnd: IsoDate, closeId: Id, version: z.number().int().positive(), basisSeq: z.number().int().nonnegative(),
+    contentHash: z.string().length(64), populationHash: z.string().length(64), reportSnapshots: z.array(z.object({ kind: z.string(), snapshotId: Id, contentHash: z.string().length(64) })),
+    planId: Id }),
+  /** FIN-CLS-04: a certification withdrawn visibly (close snapshot, substantiation, bank reconciliation dated in the period). */
+  CloseCertificationWithdrawn: z.object({ bookId: Id, periodEnd: IsoDate, kind: z.enum(["close", "substantiation", "bank_reconciliation", "task"]), ref: z.string(), reason: z.string(), planId: Id }),
+  RestatementRecorded: z.object({ bookId: Id, restatementId: Id, comparativePeriodEnd: IsoDate, supersedesCloseId: Id, journalId: Id, framework: z.string(),
+    bridgeHash: z.string().length(64), changed: z.number().int().nonnegative(), planId: Id }),
+  CloseDocumentRegistered: z.object({ bookId: Id, documentId: Id, sha256: z.string().length(64), periodEnd: IsoDate.nullable() }),
+} as const;
+
 // ------------------------------------------------------------------ Evidence events
 export const EVIDENCE = {
   /**
@@ -535,12 +569,12 @@ export const DREAM = {
   DreamProposalRejected: z.object({ proposalId: Id, reason: z.string().min(1) }),
 } as const;
 
-export const ALL_EVENTS = { ...GL, ...PARTY, ...CHANNELS, ...AGENT, ...OPS, ...EVIDENCE, ...IDENTITY, ...DREAM, ...CONSOLIDATION } as const;
+export const ALL_EVENTS = { ...GL, ...PARTY, ...CHANNELS, ...AGENT, ...OPS, ...EVIDENCE, ...IDENTITY, ...DREAM, ...CONSOLIDATION, ...CLOSE } as const;
 export type EventType = keyof typeof ALL_EVENTS;
 export type EventData<T extends EventType> = z.infer<(typeof ALL_EVENTS)[T]>;
 
 /** Which module owns (may append) each event type. Enforced by the event store. */
-export type Module = "gl" | "channels" | "agent" | "ops" | "evidence" | "identity" | "dream" | "consolidation";
+export type Module = "gl" | "channels" | "agent" | "ops" | "evidence" | "identity" | "dream" | "consolidation" | "close";
 export const OWNER: Record<EventType, Module> = Object.fromEntries([
   ...Object.keys(GL).map((k) => [k, "gl"]),
   ...Object.keys(PARTY).map((k) => [k, "gl"]),                  // the GL owns master data (chart and parties)
@@ -551,6 +585,7 @@ export const OWNER: Record<EventType, Module> = Object.fromEntries([
   ...Object.keys(IDENTITY).map((k) => [k, "identity"]),
   ...Object.keys(DREAM).map((k) => [k, "dream"]),
   ...Object.keys(CONSOLIDATION).map((k) => [k, "consolidation"]),
+  ...Object.keys(CLOSE).map((k) => [k, "close"]),
 ]) as Record<EventType, Module>;
 
 export const SCHEMA_VERSION = 1;

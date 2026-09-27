@@ -415,11 +415,15 @@ export const close: OpDef<z.infer<typeof CloseInput>> = {
     checks.push({ label: "No postings in flight", ok: inFlight === 0, blocking: true, detail: inFlight ? `${inFlight} approved, awaiting the ledger` : undefined });
     const prov = [...openProvisional(s)].filter(([, j]) => j.txnDate <= i.periodEnd).length;
     checks.push({ label: "No entries awaiting a statement", ok: prov === 0, blocking: false, detail: prov ? `${prov} provisional; they will be frozen as entered` : undefined });
+    // FIN-CLS-03: a book that keeps a close checklist is hard-closed only after a certified close (modules/close).
+    if (ctx.svc.closeGate) checks.push(...await ctx.svc.closeGate(ctx.tenant, ctx.book, i.periodEnd));
 
     actions.push({ type: "gl", command: { kind: "LockPeriod", periodEnd: i.periodEnd, level: "soft" } });
     const rows: Section["rows"] = [];
     if (yearEnd) {
-      const year = balancesFromState(s, { from: fy.from, to: i.periodEnd, excludeVoucher: "closing" });
+      // What is left to close: a certified year-end close (FIN-CLS-03) may already have posted the
+      // closing voucher; only the remainder (normally nothing) is closed here, never the year twice.
+      const year = balancesFromState(s, { from: fy.from, to: i.periodEnd });
       const lines: Line[] = [];
       let surplus = 0n;
       for (const [id, v] of [...year.entries()].sort(([a], [b]) => a.localeCompare(b))) {

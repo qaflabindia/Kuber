@@ -26,20 +26,20 @@ export const BOOK_SNAPSHOT_SCHEMA = `book.${FORMAT}.${sha256(`${FORMAT}|${FOLD_S
 interface Stored {
   exists: boolean; bookId: string; entityId: string; accounts: Account[]; locks: BookState["locks"];
   seq: number; version: number; lastHash: string; journals: [string, JournalRecord][]; link: string | null;
-  config?: BookConfig; closed?: string[];
+  config?: BookConfig; closed?: string[]; closes?: { periodEnd: string; closeId: string }[];
 }
 
 const ctxOf = (stream: string, version: number, schema: string) => `es.snapshots|${stream}|${version}|${schema}`;
 
 export function serialize(s: BookState, link: string | null): Stored {
   return { exists: s.exists, bookId: s.bookId, entityId: s.entityId, accounts: [...s.accounts.values()], locks: s.locks,
-    seq: s.seq, version: s.version, lastHash: s.lastHash, journals: [...s.journals.entries()], link, config: s.config, closed: [...s.closed] };
+    seq: s.seq, version: s.version, lastHash: s.lastHash, journals: [...s.journals.entries()], link, config: s.config, closed: [...s.closed], closes: [...(s.closes ?? [])] };
 }
 
 export function deserialize(d: Stored): BookState {
   return { exists: d.exists, bookId: d.bookId, entityId: d.entityId, accounts: new Map(d.accounts.map((a) => [a.accountId, a])),
     locks: d.locks, seq: d.seq, version: d.version, lastHash: d.lastHash, journals: JournalMap.from(d.journals),
-    config: d.config ?? bookConfigOf({ entityId: d.entityId, entityType: "", basis: "statutory" }), closed: new Set(d.closed ?? []) };
+    config: d.config ?? bookConfigOf({ entityId: d.entityId, entityType: "", basis: "statutory" }), closed: new Set(d.closed ?? []), closes: d.closes ?? [] };
 }
 
 /** Rough in-memory size of a state, for the byte-bounded cache. */
