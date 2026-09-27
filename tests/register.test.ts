@@ -32,7 +32,13 @@ describe("requirements register (requirements/register.md)", () => {
     for (const id of expected) expect(ids).toContain(id);
     expect(new Set(ids).size).toBe(ids.length);
     const extra = ids.filter((id) => !expected.includes(id));
-    for (const id of extra) expect(id).toMatch(/^(TOL|AGT|PRM|GEN|CBJ|LOG|MON|FIN-GRP)-\d\d$/);
+    // G1 controlled pilot books (CFO requirements §5): close, cash, reporting and migration requirements.
+    for (const id of extra) expect(id).toMatch(/^(TOL|AGT|PRM|GEN|CBJ|LOG|MON|FIN-GRP|FIN-CLS|FIN-CASH|FIN-RPT|FIN-MIG)-\d\d$/);
+  });
+
+  it("has a row for each G1 close requirement (FIN-CLS-01..04)", () => {
+    const ids = rows.map((r) => r.id);
+    for (const n of [1, 2, 3, 4]) expect(ids).toContain(`FIN-CLS-0${n}`);
   });
 
   it("engineering has claimed nothing beyond verified, and nothing is signed off", () => {

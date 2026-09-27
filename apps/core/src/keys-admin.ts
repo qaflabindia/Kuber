@@ -32,6 +32,7 @@ import { IDENTITY_SEAL_MIGRATION, accessReviewNoteCtx, autonomyReasonCtx, enrolm
 import { incidentDetailCtx } from "@kuber/ops";
 import { bankChangeCtx, partyDetailCtx } from "@kuber/gl";
 import { disputeDetailCtx, groupNameCtx, groupSnapshotCtx, linkedPackCtx, positionNoteCtx, runStockCtx } from "@kuber/consolidation";
+import { closeBodyCtx, documentNameCtx, restatementCtx, substantiationCtx } from "@kuber/close";
 
 export interface SealedColumn {
   table: string; column: string; kind: "text" | "json"; keyCols: string[];
@@ -72,6 +73,12 @@ export const SEALED_COLUMNS: SealedColumn[] = [
   { table: "consolidation.runs", column: "stock", kind: "text", keyCols: ["run_id"], ctx: (r) => runStockCtx(r.run_id!) },
   { table: "consolidation.snapshots", column: "body", kind: "text", keyCols: ["snapshot_id"], ctx: (r) => groupSnapshotCtx(r.snapshot_id!) },
   { table: "consolidation.linked_packs", column: "body", kind: "text", keyCols: ["pack_id"], ctx: (r) => linkedPackCtx(r.pack_id!) },
+  // Period close (FIN-CLS-01..04): substantiation records, certified close bodies, document names, restatements.
+  { table: "close.substantiations", column: "body", kind: "text", keyCols: ["book_id", "period_end", "account_id", "version"],
+    ctx: (r) => substantiationCtx(r.book_id!, r.period_end!, r.account_id!, Number(r.version)) },
+  { table: "close.closes", column: "body", kind: "text", keyCols: ["close_id"], ctx: (r) => closeBodyCtx(r.close_id!) },
+  { table: "close.documents", column: "name", kind: "text", keyCols: ["document_id"], ctx: (r) => documentNameCtx(r.document_id!) },
+  { table: "close.restatements", column: "body", kind: "text", keyCols: ["restatement_id"], ctx: (r) => restatementCtx(r.restatement_id!) },
 ];
 
 /**
@@ -112,6 +119,10 @@ export const RETENTION: Record<string, "purge" | "sealed" | "keys" | "tombstone"
   // received linked packs. The facts are in sealed streams; a linked pack is also unreadable once its subsidiary is shredded.
   "consolidation.groups": "purge", "consolidation.ic_links": "purge", "consolidation.disputes": "purge", "consolidation.dispute_positions": "purge",
   "consolidation.runs": "purge", "consolidation.snapshots": "purge", "consolidation.links": "purge", "consolidation.linked_packs": "purge",
+  // Period close (FIN-CLS-01..04): checklist, substantiations, certified closes, document hashes and restatements.
+  // The facts are in the sealed <tenant>/close/... streams.
+  "close.checklists": "purge", "close.tasks": "purge", "close.substantiations": "purge", "close.closes": "purge",
+  "close.documents": "purge", "close.restatements": "purge",
   "evidence.balances": "purge", "evidence.records": "purge", "evidence.lookup": "purge",
   "es.outbox": "purge", "es.snapshots": "purge", "es.dead_letters": "purge", "es.commands": "purge", "es.verify_checkpoints": "purge",
   "es.events": "sealed", "keys.tenant_keys": "keys", "keys.shredded": "tombstone",

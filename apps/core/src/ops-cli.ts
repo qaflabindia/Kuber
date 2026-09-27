@@ -38,6 +38,11 @@
  *                                                 or copilot (AGT-09: the model-driven copilot only; System Owner)
  *   ops agent-turns [--tenant t] [--book b] [--since d] [--limit n]   TOL-05/AGT-07: recorded copilot turns (hashes, counts)
  *   ops agent-signals [--tenant t] [--since d]     TAGOF Part VII: copilot monitoring signals per month (also in ops status)
+ *   ops close <tenant> <book> [periodEnd]          FIN-CLS: checklists, closes and overdue tasks; with a period, its close status
+ *                                                 (checklist, substantiation, completeness, blockers)
+ *   ops close checklist <tenant> <book> <periodEnd> --owner p [--start d] --as p   FIN-CLS-01: create the period's checklist
+ *                                                 from the template (a superuser or controller; every task owned by --owner)
+ *   ops close reproduce <tenant> <closeId>         FIN-CLS-03: recompute a certified close from the ledger and compare; exit 1 on mismatch
  *   ops incident list <tenant> [--status s] | show <tenant> <id>        FIN-OPS-02: the incident register
  *   ops incident open <tenant> --title "…" --description "…" --books a,b --periods 2026-10 --loss <paise>
  *                    [--duplication] --owner p --as p
@@ -227,6 +232,24 @@ try {
       break;
     }
     case "consolidate": print(await groupCommand(cell, args)); break;
+    case "close": {
+      const [a, b, c, d] = positional;
+      if (a === "checklist") {
+        const as = flag("--as"), ownerP = flag("--owner");
+        if (!b || !c || !d || !as || !ownerP) throw new Error("usage: ops close checklist <tenant> <book> <periodEnd> --owner p [--start d] --as p");
+        print(await cell.periodClose.createChecklist(b, c, as, { periodEnd: d, defaultOwner: ownerP, ...(flag("--start") ? { periodStart: flag("--start") } : {}) }));
+      } else if (a === "reproduce") {
+        if (!b || !c) throw new Error("usage: ops close reproduce <tenant> <closeId>");
+        const r = await cell.periodClose.reproduce(b, c);
+        print(r);
+        process.exitCode = r.matches ? 0 : 1;
+      } else {
+        if (!a || !b) throw new Error("usage: ops close <tenant> <book> [periodEnd]");
+        print(c ? await cell.periodClose.status(a, b, c)
+          : { checklists: await cell.periodClose.checklists(a, b), closes: await cell.periodClose.closes(a, b), overdue: await cell.periodClose.overdue(a, b) });
+      }
+      break;
+    }
     case "drill-compare": {
       const source = flag("--source"), restored = flag("--restored");
       if (!source || !restored) throw new Error("usage: ops drill-compare --source <owner url> --restored <owner url> [--out file] [--meta json]");
@@ -240,7 +263,7 @@ try {
       break;
     }
     default:
-      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify, verify-signatures, bus-consumers, backfill-confirmations, run-schedules, access-review, autonomy, agent-turns, agent-signals, incident, consolidate, drill-compare");
+      console.error("ops commands: status, dead-letters, retry, discard, gaps, check, rebuild, prune-outbox, certify, snapshots, reproduce, verify, verify-signatures, bus-consumers, backfill-confirmations, run-schedules, access-review, autonomy, agent-turns, agent-signals, incident, consolidate, close, drill-compare");
       process.exitCode = 2;
   }
 } finally {

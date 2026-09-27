@@ -102,13 +102,38 @@ export const api = (s: Pick<Session, "tenant" | "principal" | "sid"> & { stepUpA
   ask: (book: string, text: string, history: { role: "user" | "assistant"; text: string }[]) => call<CopilotReply>(s, "POST", `/books/${book}/copilot`, { text, history }),
   plan: (book: string, op: string, input: unknown = {}) => call<Plan>(s, "POST", `/books/${book}/ops/${op}`, input),
   plans: (book: string) => call<Plan[]>(s, "GET", `/books/${book}/plans`),
-  attention: (book: string) => call<{ drafts: number; awaitingApproval: number; ratifications: number; plans: number }>(s, "GET", `/books/${book}/attention`),
+  attention: (book: string) => call<{ drafts: number; awaitingApproval: number; ratifications: number; plans: number; closeTasksOverdue?: number }>(s, "GET", `/books/${book}/attention`),
   /** `assertion`: the passkey signature over this plan (step-up-class plans; see signing options). */
   commit: (id: string, hash: string, assertion?: unknown) =>
     call<{ planId: string; status: string; steps?: string[]; message?: string }>(s, "POST", `/plans/${id}/commit`, { hash, ...(assertion ? { assertion } : {}) }),
   discard: (id: string) => call(s, "POST", `/plans/${id}/discard`, {}),
   verify: (book: string) => call<{ intact: boolean; firstBrokenJournal: string | null }>(s, "GET", `/books/${book}/verify`),
+  // Period close (FIN-CLS-01..04): plans returned here are committed through commit() like any other.
+  closeOverview: (book: string) => call<CloseOverview>(s, "GET", `/books/${book}/close`),
+  closeStatus: (book: string, periodEnd: string) => call<CloseStatus>(s, "GET", `/books/${book}/close/${periodEnd}`),
+  closeCertify: (book: string, periodEnd: string) => call<Plan>(s, "POST", `/books/${book}/close/${periodEnd}/certify`, {}),
+  closeReopen: (book: string, periodEnd: string, reason: string) => call<Plan>(s, "POST", `/books/${book}/close/${periodEnd}/reopen`, { reason }),
+  closeComplete: (book: string, periodEnd: string, taskId: string, evidence: EvidenceRef[]) => call<Plan>(s, "POST", `/books/${book}/close/${periodEnd}/tasks/${encodeURIComponent(taskId)}/complete`, { evidence }),
+  closeSubstantiate: (book: string, periodEnd: string, accountId: string, body: { sourceBalance?: string; evidence?: EvidenceRef[]; note?: string }) =>
+    call<Plan>(s, "POST", `/books/${book}/close/${periodEnd}/substantiations/${encodeURIComponent(accountId)}`, body),
 });
+
+// ---------------------------------------------------------------- period close (FIN-CLS-01..04)
+export interface EvidenceRef { kind: "bank_reconciliation" | "schedule_reconciliation" | "suspense_roll_forward" | "document"; id: string; hash: string }
+export interface CloseTask { taskId: string; area: string; title: string; owner: string | null; deadline: string; dependsOn: string[]; evidenceKinds: EvidenceRef["kind"][];
+  applicable: boolean; reason: string | null; status: "open" | "done" | "not_applicable"; state: "open" | "awaiting_review" | "done" | "not_applicable"; overdue: boolean;
+  evidence: EvidenceRef[]; completedBy: string | null; reviewedBy: string | null; withdrawnReason: string | null }
+export interface CloseRecord { closeId: string; periodEnd: string; version: number; status: "certified" | "withdrawn"; closeSeq: number; contentHash: string;
+  certifiedBy: string; certifiedAt: string; withdrawnReason: string | null }
+export interface CloseStatus {
+  bookId: string; periodEnd: string; periodStart: string;
+  checklist: { tasks: CloseTask[] } | null;
+  substantiations: { accountId: string; name: string; glBalance: string; status: "missing" | "stale" | "approved"; preparedBy: string | null; approvedBy: string | null; source: string | null }[];
+  findings: { code: string; label: string; detail: string; blocking: boolean }[];
+  certified: CloseRecord | null; closes: CloseRecord[]; blockers: string[]; hardLocked: boolean;
+}
+export interface CloseOverview { checklists: { periodEnd: string; periodStart: string }[]; closes: CloseRecord[]; overdue: { periodEnd: string; taskId: string; owner: string | null; deadline: string }[];
+  bankReconciliationService: boolean }
 
 // ---------------------------------------------------------------- identity (passkeys, members)
 export interface Member { tenant: string; principal: string; role: string; books: string[] | null; displayName: string; status: string; source: string }
