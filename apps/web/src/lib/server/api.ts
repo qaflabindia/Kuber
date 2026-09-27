@@ -78,6 +78,9 @@ export interface CopilotReply { reply: string; cards: Plan[]; suggestions?: stri
 export const api = (s: Pick<Session, "tenant" | "principal" | "sid"> & { stepUpAt?: number }) => ({
   /** Sign-out: the core revokes this session id, so a copied cookie stops working too. */
   signOut: () => call<void>(s, "POST", "/sessions/revoke", {}),
+  groups: () => call<{ groupId: string; bookId: string; name: string }[]>(s, "GET", "/groups"),
+  suspense: (book: string) => call<SuspenseItem[]>(s, "GET", `/books/${encodeURIComponent(book)}/suspense/items?status=open`),
+  assignSuspense: (id: string, owner: string) => call(s, "POST", `/suspense/items/${encodeURIComponent(id)}/assign`, { owner }),
   books: () => call<{ book_id: string; accounts: number }[]>(s, "GET", "/books"),
   openBook: (bookId: string, entityId: string, entityType: string) => call(s, "POST", "/books", { bookId, entityId, entityType }),
   accounts: (book: string) => call<Account[]>(s, "GET", `/books/${book}/accounts`),
@@ -205,3 +208,5 @@ export const portal = (s: Pick<Session, "tenant" | "principal" | "sid">) => ({
   snapshots: () => call<InvestorSnapshot[]>(s, "GET", "/portal/investor/snapshots"),
   shares: () => call<GuestShare[]>(s, "GET", "/shares/mine"),
 });
+
+export interface SuspenseItem { itemId: string; bookId: string; journalId: string; amount: string; openedOn: string; source: string; owner: string | null; status: string; ageDays: number }

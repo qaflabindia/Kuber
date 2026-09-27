@@ -29,7 +29,7 @@ for a in "$@"; do case "$a" in --keep) KEEP=true ;; *) BACKUP="$a" ;; esac; done
 set -a; . "$DIR/secrets.env"; set +a
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-DB="kuber_drill_$(date -u +%Y%m%d%H%M%S)"
+DB="kuber_drill_$(date -u +%Y%m%d%H%M%S)_$$"
 mkdir -p "$DIR/drills"; chmod 700 "$DIR/drills"
 EVIDENCE="drills/drill-$STAMP.json"               # relative to KUBER_HOME, mounted at /kuber in the tools container
 START=$(date +%s); STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -39,7 +39,9 @@ APP_URL="postgres://kuber_app:${APP_DB_PASSWORD}@postgres:5432/$DB?$PGQ"
 SYS_URL="postgres://kuber_system:${SYSTEM_DB_PASSWORD}@postgres:5432/$DB?$PGQ"
 LIVE_URL="postgres://kuber:${PG_PASSWORD}@postgres:5432/kuber?$PGQ"
 
+CREATED=false
 cleanup() {
+  [ "$CREATED" = true ] || return 0
   if [ "$KEEP" = true ]; then echo "kept drill database $DB"
   else ./kuber exec -T postgres dropdb -U kuber --if-exists --force "$DB" >/dev/null 2>&1 || echo "WARNING: could not drop $DB"; fi
 }
@@ -50,36 +52,40 @@ tools() {
   ./kuber run --rm -T -e DATABASE_URL="$APP_URL" -e MIGRATION_URL="$OWNER_URL" -e SYSTEM_DATABASE_URL="$SYS_URL" \
     -e NATS_URL= -e NATS_TOKEN= -e KUBER_DRILL=1 tools "$@"
 }
-declare -A STEP
+STEP_NAMES=(); STEP_CODES=()
+FAILED=""
 step() {                                           # step <name> <command...>: run, record its exit status
   local name="$1"; shift
   echo "== $name"
-  if "$@"; then STEP[$name]=0; else STEP[$name]=$?; echo "   FAILED ($name: exit ${STEP[$name]})"; fi
+  local code=0
+  if "$@"; then :; else code=$?; FAILED="$FAILED $name"; echo "   FAILED ($name: exit $code)"; fi
+  STEP_NAMES+=("$name"); STEP_CODES+=("$code")
+  LAST_STEP_CODE=$code
 }
 
 echo "restore drill: $BACKUP -> database $DB"
 step create ./kuber exec -T postgres createdb -U kuber "$DB"
+[ "$LAST_STEP_CODE" = 0 ] || { echo "database creation failed; refusing to restore"; exit 1; }
+CREATED=true
 restore() { ./kuber run --rm -T tools backup-decrypt < "$BACKUP" | ./kuber exec -T postgres pg_restore -U kuber -d "$DB" --no-owner --role=kuber --exit-on-error; }
 step restore restore
-[ "${STEP[restore]}" = 0 ] || { echo "restore failed; see above"; exit 1; }
+[ "$LAST_STEP_CODE" = 0 ] || { echo "restore failed; see above"; exit 1; }
 step reapply_shreds tools reapply-shreds
 for p in reporting agent evidence; do step "rebuild_$p" tools ops rebuild "$p"; done
 step keys_verify_full tools verify --full
 for p in reporting agent evidence; do step "check_$p" tools ops check "$p"; done
 
 ELAPSED=$(( $(date +%s) - START ))
-META="{\"backup\":\"$(basename "$BACKUP")\",\"backupBytes\":$(wc -c < "$BACKUP" | tr -d ' '),\"backupSha256\":\"$(sha256sum "$BACKUP" | cut -d' ' -f1)\""
+META="{\"backup\":\"$(basename "$BACKUP")\",\"backupBytes\":$(wc -c < "$BACKUP" | tr -d ' '),\"backupSha256\":\"$(shasum -a 256 "$BACKUP" | cut -d' ' -f1)\""
 META="$META,\"database\":\"$DB\",\"startedAt\":\"$STARTED_AT\",\"elapsedSecondsBeforeCompare\":$ELAPSED,\"steps\":{"
 first=true
-for k in create restore reapply_shreds rebuild_reporting rebuild_agent rebuild_evidence keys_verify_full check_reporting check_agent check_evidence; do
-  $first || META="$META,"; first=false; META="$META\"$k\":${STEP[$k]:-null}"
+for i in "${!STEP_NAMES[@]}"; do
+  $first || META="$META,"; first=false; META="$META\"${STEP_NAMES[$i]}\":${STEP_CODES[$i]}"
 done
 META="$META}}"
 step compare tools ops drill-compare --source "$LIVE_URL" --restored "$OWNER_URL" --out "/kuber/$EVIDENCE" --meta "$META"
 
 ELAPSED=$(( $(date +%s) - START ))
-FAILED=""
-for k in "${!STEP[@]}"; do [ "${STEP[$k]}" = 0 ] || FAILED="$FAILED $k"; done
 echo "restore drill finished in ${ELAPSED}s; evidence: $DIR/$EVIDENCE"
 if [ -n "$FAILED" ]; then echo "DRILL FAILED:$FAILED"; exit 1; fi
 echo "DRILL PASSED: restored cell matches the source"

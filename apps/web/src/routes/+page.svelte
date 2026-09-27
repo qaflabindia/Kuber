@@ -45,6 +45,7 @@
 <header class="hero">
   <h1>{greeting}, {first}.</h1>
   <p class="lede">{data.position?.summary ?? "Tell Kuber what you want done. Every change is shown to you before it is posted."}</p>
+  <a class="briefing-link panel" href="/cfo"><span><strong>Your CFO briefing</strong><br />Cash, accountable exceptions, downside scenarios and the board story.</span><span aria-hidden="true">→</span></a>
 </header>
 
 <form bind:this={form} method="POST" action="?/ask" class="ask panel"
@@ -110,6 +111,9 @@
 {/if}
 
 <style>
+  .briefing-link { display:flex; justify-content:space-between; align-items:center; gap:16px; padding:16px 20px; margin-top:20px; color:var(--text-2); line-height:1.6; }
+  .briefing-link strong { color:var(--brass-2); }
+  .briefing-link:hover { border-color:var(--brass); }
   .hero { margin-bottom: 22px; }
   .hero h1 { margin: 0 0 8px; font-size: 42px; }
   .lede { font-family: var(--serif); font-size: 19px; color: var(--text-2); margin: 0; max-width: 70ch; }
