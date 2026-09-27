@@ -26,6 +26,7 @@ describe("requirements register (requirements/register.md)", () => {
       ...[1, 2, 3].map((n) => `FIN-OPS-0${n}`), ...[1, 2, 3, 4].map((n) => `FIN-GRP-0${n}`), "UAT-COM",
       ...Array.from({ length: 18 }, (_, i) => `F${String(i + 1).padStart(2, "0")}`),
       ...Array.from({ length: 8 }, (_, i) => `ROLE-0${i + 1}`),                    // role model v2 (design 6.3)
+      ...[1, 2, 3].map((n) => `FIN-MIG-0${n}`),                                     // G1 legacy migration
     ];
     // Agent-governance controls (TAGOF TOL/AGT/PRM/GEN/CBJ/LOG) are listed too; every G0 id above must be present.
     const ids = rows.map((r) => r.id);
