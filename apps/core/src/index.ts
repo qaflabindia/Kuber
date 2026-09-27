@@ -16,3 +16,4 @@ export { providerFromEnv } from "./copilot/provider.ts";
 export { classifierFromEnv } from "./llm-classifier.ts";
 export * from "./copilot/governance/index.ts";
 export { groupCommand, GROUP_CLI_USAGE } from "./group-cli.ts";
+export { migrationCommand, MIGRATION_CLI_USAGE } from "./migration-cli.ts";

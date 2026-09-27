@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
-import { buildServer, RETENTION, SEALED_COLUMNS, type Cell } from "@kuber/core";
+import { buildServer, migrationCommand, RETENTION, SEALED_COLUMNS, type Cell } from "@kuber/core";
 import { MigrationError, XmlError, bookBalances, parseGenericCsv, parseTally, parseXml, strictPaise, type Migration } from "@kuber/migration";
 import { CORE_AUTH_SECRET, ROOT, SoftAuthenticator, enrol, signedInject, startCell, type SignedRequest } from "./helpers.ts";
 
@@ -369,5 +369,20 @@ describe("FIN-MIG-01/03 Zoho source and target-load rollback", () => {
     const again = await m.load(T, P.ctrl, zp);
     expect(again.loadId).not.toBe(l.loadId);
     expect(again.reconciliation.reconciled).toBe(true);
+  });
+});
+
+describe("FIN-MIG-01 CLI", () => {
+  it("FIN-MIG-01 ops migrate-import creates the project and imports a file; migrate-status and migrate-plan report it", async () => {
+    await cell.gl.openBook(T, "clibook", "cli-entity", "company", P.su);
+    const file = join(ROOT, "tests", "fixtures", "migration", "tally-masters.xml");
+    const r = await migrationCommand(cell, "migrate-import", ["--source", "tally", "--file", file, "--book", "clibook", "--cutoff", CUTOFF, "--tenant", T, "--as", P.ctrl]) as { counts: Record<string, number>; duplicate: boolean };
+    expect(r).toMatchObject({ duplicate: false, counts: { accounts: 9, parties: 2 } });
+    const status = await migrationCommand(cell, "migrate-status", [T, `mig-clibook-${CUTOFF}`]) as { sourceSystem: string; files: unknown[] };
+    expect(status).toMatchObject({ sourceSystem: "tally", files: [expect.anything()] });
+    const plan = await migrationCommand(cell, "migrate-plan", [T, `mig-clibook-${CUTOFF}`]) as { blocked: boolean; problems: { code: string }[] };
+    expect(plan.blocked).toBe(true);
+    expect(plan.problems.some((p) => p.code === "unmapped")).toBe(true);
+    await expect(migrationCommand(cell, "migrate-rehearse", [T, `mig-clibook-${CUTOFF}`])).rejects.toThrow(/--as/);
   });
 });

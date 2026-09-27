@@ -142,13 +142,14 @@ export interface Invitation { token: string; principal: string; role: string; bo
 export interface Separation { soloSuperuser?: boolean; soloOwner?: boolean; sodLimitPaise: string | null; requireTwoAuthenticators?: boolean }
 
 // ---------------------------------------------------------------- signed commands (design 14.4, 16.4)
-export type SignedAction = "plan.commit" | "plan.approve" | "draft.approve" | "journal.ratify" | "period.lock";
+export type SignedAction = "plan.commit" | "plan.approve" | "draft.approve" | "journal.ratify" | "period.lock" | "migration.golive";
 /** The command to sign, as the browser names it; the core derives everything else from the command itself. */
 export type SigningRequest =
   | { action: "plan.commit" | "plan.approve"; planId: string; hash: string }
   | { action: "draft.approve"; draftId: string; accountId?: string }
   | { action: "journal.ratify"; journalId: string }
-  | { action: "period.lock"; book: string; periodEnd: string; level: "soft" | "hard" };
+  | { action: "period.lock"; book: string; periodEnd: string; level: "soft" | "hard" }
+  | { action: "migration.golive"; projectId: string; comparisonId: string };
 /** What the person is shown before their passkey signs: rendered by the core from the command. Amounts are paise. */
 export interface CommandSummary {
   action: SignedAction; title: string; book: string; amountPaise: string | null;
@@ -205,3 +206,51 @@ export const portal = (s: Pick<Session, "tenant" | "principal" | "sid">) => ({
   snapshots: () => call<InvestorSnapshot[]>(s, "GET", "/portal/investor/snapshots"),
   shares: () => call<GuestShare[]>(s, "GET", "/shares/mine"),
 });
+
+// ---------------------------------------------------------------- legacy migration (FIN-MIG-01..03)
+export interface MigrationProject { projectId: string; bookId: string; sourceSystem: "tally" | "zoho" | "csv"; cutoff: string; scope: string[]; status: "open" | "live" | "closed";
+  bookOfRecord: "source" | "kuber"; goLive: string | null }
+export interface MigrationView extends MigrationProject {
+  files: { fileId: string; fileHash: string; purpose: string; asOf: string | null; bytes: number; counts: Record<string, number>; problems: number; name: string; at: string }[];
+  inventory: { categories: { category: string; inScope: boolean; count: number; detail: Record<string, unknown> }[] };
+  mapping: { total: number; approved: number; needed: number; unmapped: number };
+  loads: { loadId: string; bookId: string; kind: "rehearsal" | "target"; seq: number; status: "active" | "voided"; reconciled: boolean; voidMethod: string | null }[];
+  decisions: { decisionId: string; kind: string; principal: string; at: string; processes?: Record<string, string>[] }[];
+  comparisons: { comparisonId: string; from: string; to: string; differences: number; open: number; contentHash: string }[];
+}
+export interface MappingRowView { sourceKey: string; name: string; group: string | null; nature: string | null; party: string | null; control: string | null; bank: boolean;
+  cutoffBalance: string; usedAfterCutoff: boolean; status: "suggested" | "approved"; accountId: string | null; partyId: string | null;
+  newAccount: { accountId: string; name: string; nature: string } | null; suggestion: { accountId: string; score: number | null; reason: string | null } | null }
+export interface Reconciliation { loadId: string; bookId: string; kind: string; reconciled: boolean; checks: Record<string, boolean>;
+  trialBalance: { accountId: string; name: string; source: string; target: string; difference: string }[];
+  totals: { source: { debits: string; credits: string }; target: { debits: string; credits: string } };
+  openItems: { accountId: string; partyId: string; openItems: string; control: string; difference: string }[]; counts: Record<string, number>;
+  problems: { code: string; message: string; blocking: boolean }[] }
+export interface Comparison { comparisonId: string; from: string; to: string; contentHash: string; open: number; pnl: Record<"source" | "kuber", { income: string; expense: string; net: string }>;
+  differences: { key: string; section: string; accountId: string | null; name: string; source: string; kuber: string; difference: string; process: string; suggestion: string;
+    status: "open" | "explained"; explanation: { category: string; note: string; by: string } | null }[] }
+export interface GoLiveIntent { checklist: { label: string; ok: boolean; detail: string }[]; ready: boolean; summary: { title: string; lines: string[] } }
+
+/** Migration projects: the core authorizes each call (migration.manage in the book; the go-live authority.manage and a passkey signature). */
+export const migration = (s: Pick<Session, "tenant" | "principal" | "sid">) => {
+  const p = (id: string) => `/migrations/${encodeURIComponent(id)}`;
+  return {
+    list: () => call<MigrationProject[]>(s, "GET", "/migrations"),
+    create: (b: { bookId: string; sourceSystem: string; cutoff: string }) => call<MigrationProject>(s, "POST", "/migrations", b),
+    view: (id: string) => call<MigrationView>(s, "GET", p(id)),
+    upload: (id: string, f: { name: string; content: string; encoding: "base64"; purpose: string; asOf?: string }) =>
+      call<{ duplicate: boolean; counts: Record<string, number>; problems: string[] }>(s, "POST", `${p(id)}/files`, f),
+    mapping: (id: string) => call<{ rows: MappingRowView[]; summary: MigrationView["mapping"] }>(s, "GET", `${p(id)}/mapping`),
+    approve: (id: string, b: { rows?: { sourceKey: string; accountId: string }[]; acceptSuggested?: true | string[] }) => call<{ approved: number }>(s, "POST", `${p(id)}/mapping/approve`, b),
+    rehearse: (id: string) => call<{ loadId: string; bookId: string; reconciliation: Reconciliation }>(s, "POST", `${p(id)}/rehearse`, {}),
+    load: (id: string) => call<{ loadId: string; reconciliation: Reconciliation }>(s, "POST", `${p(id)}/load`, {}),
+    delta: (id: string, asOf?: string) => call<{ created: number; duplicates: number; changed: unknown[]; held: { number: string; reason: string }[] }>(s, "POST", `${p(id)}/delta`, asOf ? { asOf } : {}),
+    reconciliation: (id: string, load: string) => call<Reconciliation>(s, "GET", `${p(id)}/loads/${encodeURIComponent(load)}/reconciliation`),
+    rollback: (id: string, load: string, reason: string) => call<unknown>(s, "POST", `${p(id)}/loads/${encodeURIComponent(load)}/rollback`, { reason }),
+    compare: (id: string, from: string, to: string) => call<Comparison>(s, "POST", `${p(id)}/comparisons`, { from, to }),
+    comparison: (id: string, c: string) => call<Comparison>(s, "GET", `${p(id)}/comparisons/${encodeURIComponent(c)}`),
+    explain: (id: string, c: string, b: { key: string; category: string; note: string }) => call<Comparison>(s, "POST", `${p(id)}/comparisons/${encodeURIComponent(c)}/explain`, b),
+    goLiveIntent: (id: string, c: string) => call<GoLiveIntent>(s, "GET", `${p(id)}/go-live/${encodeURIComponent(c)}`),
+    goLive: (id: string, comparisonId: string, assertion?: unknown) => call<{ status: string }>(s, "POST", `${p(id)}/go-live`, { comparisonId, ...(assertion ? { assertion } : {}) }),
+  };
+};

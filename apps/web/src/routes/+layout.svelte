@@ -80,6 +80,10 @@
           <div class="who-name"><span class="faint as">Signed in as</span> {data.session?.name}</div>
           <div class="faint small"><span class="role">{roleLabel}</span> · {data.session?.book} · {data.session?.tenant}</div>
         </div>
+        {#if data.shell.canMigrate}
+          <a class="btn quiet sm icon-only" href="/migration" aria-label="Migration from Tally or Zoho" title="Migration from Tally or Zoho"
+            aria-current={page.url.pathname.startsWith("/migration") ? "page" : undefined}><Icon name="upload" size={16} /></a>
+        {/if}
         {#if data.shell.canSeeMembers}
           <a class="btn quiet sm icon-only" href="/settings/members" aria-label="Members and access" title="Members and access"
             aria-current={page.url.pathname.startsWith("/settings/members") ? "page" : undefined}><Icon name="members" size={16} /></a>
