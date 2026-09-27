@@ -39,6 +39,7 @@ import { registerPortalRoutes } from "./portal-routes.ts";
 import { createGovernance, type KuberGovernance } from "./copilot/governance/index.ts";
 import { registerAgentRoutes } from "./copilot/governance/routes.ts";
 import { registerGroupRoutes } from "./group-routes.ts";
+import { registerReportRoutes } from "./report-routes.ts";
 import { ConsolidationError } from "@kuber/consolidation";
 import { CloseError } from "@kuber/close";
 import { registerCloseRoutes } from "./close-routes.ts";
@@ -791,6 +792,8 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   registerCloseRoutes(app, cell, who);
   // ------------------------------------------------------------ cash and banks (FIN-CASH-01..03)
   registerBankRoutes(app, cell, who, attestFor, signatureRequired, Assertion);
+  // ------------------------------------------------------------ mapped statements and KPIs (FIN-RPT-01/02)
+  registerReportRoutes(app, cell, who, clock);
 
   return app;
 }

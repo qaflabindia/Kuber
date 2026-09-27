@@ -51,6 +51,7 @@
   {#each data.kinds as k}
     <a href="/reports/{k.kind}" class:active={k.kind === data.kind} aria-current={k.kind === data.kind ? "page" : undefined}>{k.label}</a>
   {/each}
+  <a href="/statements">Mapped statements &amp; KPIs</a>
 </nav>
 
 {#if check}

@@ -13,7 +13,7 @@ import { PolicyEngine } from "@kuber/policy";
 import { CHANNELS_MIGRATIONS, Channels, channelsGrants } from "@kuber/channels";
 import { AGENT_MIGRATIONS, Agent, type LlmClassifier } from "@kuber/agent";
 import { REPORTING_MIGRATIONS, Reporting } from "@kuber/reporting";
-import { Incidents, OPS_MIGRATIONS, Operations, type Services } from "@kuber/ops";
+import { Incidents, OPS_MIGRATIONS, Operations, REPORT_OPERATIONS, type Services } from "@kuber/ops";
 import { EVIDENCE_MIGRATIONS, EvidenceService } from "@kuber/evidence";
 import { IDENTITY_MIGRATIONS, IDENTITY_SEAL_MIGRATION, Identity, type IdentityOptions } from "@kuber/identity";
 import { DREAM_MIGRATIONS, DreamService } from "@kuber/dream-rsi";
@@ -260,6 +260,9 @@ export class Cell {
     await bus.subscribe({ name: "bank", filter: [s("gl", "JournalPosted")], handler: opened(bank.handler) });
     cell.consumers.bank = bank.handler;
     cell.bank = bank;
+    // Mapped statements and KPIs (FIN-RPT-01/02): the book's framework, basis and fiscal year come from the GL's book state.
+    reporting.fin.bookInfo = async (t, b) => { const st = await gl.state(t, b); return st.exists ? { ...st.config } : null; };
+    ops.register(REPORT_OPERATIONS);
     return cell;
   }
 

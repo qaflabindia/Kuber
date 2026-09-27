@@ -1,0 +1,362 @@
+{
+ "description": "Golden book for metric tests and FIN-RPT tie-outs: a small company, FY 2025-26 (comparative) and FY 2026-27. Hand-computed figures for FY 2026-27: revenue 12,00,000; cost of sales 3,00,000; profit 7,30,000; operating cash 4,00,000; investing 0 (equipment financed by the loan is non-cash); financing 30,000; cash 6,50,000 -> 10,80,000.",
+ "framework": "AS (ICAI)",
+ "accounts": [
+  {
+   "accountId": "CAPITAL",
+   "name": "Share capital",
+   "nature": "equity",
+   "taxonomyTag": "BS.share_capital"
+  },
+  {
+   "accountId": "RETAINED",
+   "name": "Retained surplus",
+   "nature": "equity",
+   "taxonomyTag": "BS.reserves"
+  },
+  {
+   "accountId": "LOAN",
+   "name": "Term loan",
+   "nature": "liability",
+   "taxonomyTag": "BS.long_term_borrowings"
+  },
+  {
+   "accountId": "OD",
+   "name": "Bank overdraft",
+   "nature": "liability",
+   "taxonomyTag": "BS.short_term_borrowings"
+  },
+  {
+   "accountId": "CREDITORS",
+   "name": "Trade payables",
+   "nature": "liability",
+   "taxonomyTag": "BS.trade_payables"
+  },
+  {
+   "accountId": "GSTOUT",
+   "name": "GST output",
+   "nature": "liability",
+   "taxonomyTag": "BS.statutory_dues"
+  },
+  {
+   "accountId": "PPE",
+   "name": "Equipment",
+   "nature": "asset",
+   "taxonomyTag": "BS.ppe"
+  },
+  {
+   "accountId": "ACCDEP",
+   "name": "Accumulated depreciation",
+   "nature": "asset",
+   "taxonomyTag": "BS.accumulated_depreciation"
+  },
+  {
+   "accountId": "STOCK",
+   "name": "Inventory",
+   "nature": "asset",
+   "taxonomyTag": "BS.inventories"
+  },
+  {
+   "accountId": "DEBTORS",
+   "name": "Trade receivables",
+   "nature": "asset",
+   "taxonomyTag": "BS.trade_receivables"
+  },
+  {
+   "accountId": "BANK",
+   "name": "Bank account",
+   "nature": "asset",
+   "taxonomyTag": "BS.cash"
+  },
+  {
+   "accountId": "SALES",
+   "name": "Sales",
+   "nature": "income",
+   "taxonomyTag": "PL.revenue"
+  },
+  {
+   "accountId": "INTINC",
+   "name": "Interest income",
+   "nature": "income",
+   "taxonomyTag": "PL.other_income"
+  },
+  {
+   "accountId": "PURCH",
+   "name": "Purchases",
+   "nature": "expense",
+   "taxonomyTag": "PL.purchases"
+  },
+  {
+   "accountId": "SALARY",
+   "name": "Salaries",
+   "nature": "expense",
+   "taxonomyTag": "PL.employee_benefits"
+  },
+  {
+   "accountId": "INTEREST",
+   "name": "Interest expense",
+   "nature": "expense",
+   "taxonomyTag": "PL.finance_costs"
+  },
+  {
+   "accountId": "DEPN",
+   "name": "Depreciation",
+   "nature": "expense",
+   "taxonomyTag": "PL.depreciation"
+  },
+  {
+   "accountId": "RENT",
+   "name": "Rent",
+   "nature": "expense",
+   "taxonomyTag": "PL.other_expenses"
+  }
+ ],
+ "journals": [
+  {
+   "journalId": "g-00",
+   "date": "2025-04-01",
+   "lines": [
+    {
+     "accountId": "BANK",
+     "amount": "50000000"
+    },
+    {
+     "accountId": "CAPITAL",
+     "amount": "-50000000"
+    }
+   ]
+  },
+  {
+   "journalId": "g-01",
+   "date": "2025-06-10",
+   "lines": [
+    {
+     "accountId": "BANK",
+     "amount": "20000000"
+    },
+    {
+     "accountId": "SALES",
+     "amount": "-20000000"
+    }
+   ]
+  },
+  {
+   "journalId": "g-02",
+   "date": "2025-09-01",
+   "lines": [
+    {
+     "accountId": "RENT",
+     "amount": "5000000"
+    },
+    {
+     "accountId": "BANK",
+     "amount": "-5000000"
+    }
+   ]
+  },
+  {
+   "journalId": "g-03",
+   "date": "2026-04-05",
+   "lines": [
+    {
+     "accountId": "PPE",
+     "amount": "30000000"
+    },
+    {
+     "accountId": "LOAN",
+     "amount": "-30000000"
+    }
+   ]
+  },
+  {
+   "journalId": "g-04",
+   "date": "2026-04-10",
+   "lines": [
+    {
+     "accountId": "BANK",
+     "amount": "10000000"
+    },
+    {
+     "accountId": "CAPITAL",
+     "amount": "-10000000"
+    }
+   ]
+  },
+  {
+   "journalId": "g-05",
+   "date": "2026-05-01",
+   "lines": [
+    {
+     "accountId": "PURCH",
+     "amount": "40000000"
+    },
+    {
+     "accountId": "CREDITORS",
+     "amount": "-40000000",
+     "partyId": "sup-1"
+    }
+   ]
+  },
+  {
+   "journalId": "g-06",
+   "date": "2026-06-15",
+   "lines": [
+    {
+     "accountId": "DEBTORS",
+     "amount": "118000000",
+     "partyId": "cus-1"
+    },
+    {
+     "accountId": "SALES",
+     "amount": "-100000000"
+    },
+    {
+     "accountId": "GSTOUT",
+     "amount": "-18000000"
+    }
+   ]
+  },
+  {
+   "journalId": "g-07",
+   "date": "2026-07-10",
+   "lines": [
+    {
+     "accountId": "BANK",
+     "amount": "20000000"
+    },
+    {
+     "accountId": "SALES",
+     "amount": "-20000000"
+    }
+   ]
+  },
+  {
+   "journalId": "g-08",
+   "date": "2026-08-20",
+   "lines": [
+    {
+     "accountId": "BANK",
+     "amount": "59000000"
+    },
+    {
+     "accountId": "DEBTORS",
+     "amount": "-59000000",
+     "partyId": "cus-1"
+    }
+   ]
+  },
+  {
+   "journalId": "g-09",
+   "date": "2026-09-30",
+   "lines": [
+    {
+     "accountId": "CREDITORS",
+     "amount": "25000000",
+     "partyId": "sup-1"
+    },
+    {
+     "accountId": "BANK",
+     "amount": "-25000000"
+    }
+   ]
+  },
+  {
+   "journalId": "g-10",
+   "date": "2026-10-31",
+   "lines": [
+    {
+     "accountId": "SALARY",
+     "amount": "12000000"
+    },
+    {
+     "accountId": "BANK",
+     "amount": "-12000000"
+    }
+   ]
+  },
+  {
+   "journalId": "g-11",
+   "date": "2026-12-31",
+   "lines": [
+    {
+     "accountId": "INTEREST",
+     "amount": "3000000"
+    },
+    {
+     "accountId": "BANK",
+     "amount": "-3000000"
+    }
+   ]
+  },
+  {
+   "journalId": "g-12",
+   "date": "2027-01-15",
+   "lines": [
+    {
+     "accountId": "LOAN",
+     "amount": "5000000"
+    },
+    {
+     "accountId": "BANK",
+     "amount": "-5000000"
+    }
+   ]
+  },
+  {
+   "journalId": "g-13",
+   "date": "2027-02-01",
+   "lines": [
+    {
+     "accountId": "RETAINED",
+     "amount": "2000000"
+    },
+    {
+     "accountId": "BANK",
+     "amount": "-2000000"
+    }
+   ]
+  },
+  {
+   "journalId": "g-14",
+   "date": "2027-03-10",
+   "lines": [
+    {
+     "accountId": "BANK",
+     "amount": "1000000"
+    },
+    {
+     "accountId": "INTINC",
+     "amount": "-1000000"
+    }
+   ]
+  },
+  {
+   "journalId": "g-15",
+   "date": "2027-03-31",
+   "lines": [
+    {
+     "accountId": "DEPN",
+     "amount": "3000000"
+    },
+    {
+     "accountId": "ACCDEP",
+     "amount": "-3000000"
+    }
+   ]
+  },
+  {
+   "journalId": "g-16",
+   "date": "2027-03-31",
+   "lines": [
+    {
+     "accountId": "STOCK",
+     "amount": "10000000"
+    },
+    {
+     "accountId": "PURCH",
+     "amount": "-10000000"
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,62 @@
+{
+  "id": "dso",
+  "name": "Days sales outstanding",
+  "version": 1,
+  "description": "Trade receivables at the period end divided by credit sales of the period, times the days in the period.",
+  "unit": "days",
+  "places": 1,
+  "inputs": {
+    "receivables": {
+      "measure": "closing",
+      "label": "Trade receivables",
+      "lines": [
+        "CA.TRADE_RECEIVABLES"
+      ]
+    },
+    "credit_sales": {
+      "measure": "credit_sales",
+      "label": "Credit sales",
+      "receivables": [
+        "CA.TRADE_RECEIVABLES"
+      ],
+      "revenue": [
+        "PL.REVENUE"
+      ],
+      "proxy": [
+        "PL.REVENUE"
+      ]
+    }
+  },
+  "formula": "receivables / credit_sales * days",
+  "grain": [
+    "book",
+    "period"
+  ],
+  "sign": "Days; higher = customers take longer to pay.",
+  "filters": {
+    "voucherTypes": "closing vouchers excluded from flows",
+    "provisional": "provisional (unconfirmed) journals included",
+    "entity": "one book"
+  },
+  "period": {
+    "type": "mixed",
+    "semantics": "receivables at the period end; credit sales over from..to; days = days in from..to inclusive"
+  },
+  "source": [
+    "reporting.daily",
+    "reporting.lines",
+    "statement mapping (book framework)"
+  ],
+  "owner": "Financial Controller",
+  "freshness": {
+    "maxLagJournals": 0,
+    "note": "computed only from a projection that has caught up with the ledger"
+  },
+  "basis": "Credit-sales basis: credit sales are the invoice value (incl. GST, like the receivable) debited to trade receivables by journals that credit revenue and move no cash; each journal counts once. Proxy: when no such journal exists in the period but receivables are open (e.g. receivables carried in by an opening or summary entry), revenue from operations for the period is used and the result says PROXY.",
+  "test": {
+    "fixture": "company-small",
+    "from": "2026-04-01",
+    "to": "2027-03-31",
+    "expected": "182.5"
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "id": "cash_runway",
+  "name": "Cash runway",
+  "version": 1,
+  "description": "Cash and cash equivalents at the period end divided by the average monthly net decrease in cash over the trailing three calendar months.",
+  "unit": "months",
+  "places": 1,
+  "inputs": {
+    "cash": {
+      "measure": "closing",
+      "label": "Cash and cash equivalents",
+      "lines": [
+        "CA.CASH"
+      ]
+    },
+    "decrease": {
+      "measure": "cash_decrease",
+      "label": "Net decrease in cash over 3 months",
+      "months": 3
+    }
+  },
+  "formula": "cash / (decrease / 3)",
+  "unavailableWhen": [
+    {
+      "input": "decrease",
+      "op": "<=",
+      "value": "0",
+      "reason": "cash did not decrease over the trailing 3 months: there is no burn, so runway is not defined"
+    },
+    {
+      "input": "cash",
+      "op": "<=",
+      "value": "0",
+      "reason": "no cash at the period end"
+    }
+  ],
+  "grain": [
+    "book",
+    "period"
+  ],
+  "sign": "Months; higher = longer before cash runs out at the recent burn rate.",
+  "filters": {
+    "voucherTypes": "closing vouchers excluded from flows",
+    "provisional": "provisional (unconfirmed) journals included",
+    "entity": "one book"
+  },
+  "period": {
+    "type": "mixed",
+    "semantics": "cash at the period end; burn over the 3 calendar months ending on the period end"
+  },
+  "source": [
+    "reporting.daily",
+    "reporting.lines",
+    "statement mapping (book framework)"
+  ],
+  "owner": "Financial Controller",
+  "freshness": {
+    "maxLagJournals": 0,
+    "note": "computed only from a projection that has caught up with the ledger"
+  },
+  "test": {
+    "fixture": "company-small",
+    "from": "2026-04-01",
+    "to": "2027-03-31",
+    "expected": "54.0"
+  }
+}

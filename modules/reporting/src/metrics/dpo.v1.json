@@ -1,0 +1,60 @@
+{
+  "id": "dpo",
+  "name": "Days payables outstanding",
+  "version": 1,
+  "description": "Trade payables at the period end divided by credit purchases of the period, times the days in the period.",
+  "unit": "days",
+  "places": 1,
+  "inputs": {
+    "payables": {
+      "measure": "closing",
+      "label": "Trade payables",
+      "lines": [
+        "CL.TRADE_PAYABLES"
+      ]
+    },
+    "credit_purchases": {
+      "measure": "credit_purchases",
+      "label": "Credit purchases",
+      "payables": [
+        "CL.TRADE_PAYABLES"
+      ],
+      "proxy": [
+        "PL.COGS",
+        "PL.OTHER_EXPENSES"
+      ]
+    }
+  },
+  "formula": "payables / credit_purchases * days",
+  "grain": [
+    "book",
+    "period"
+  ],
+  "sign": "Days; higher = the business takes longer to pay suppliers.",
+  "filters": {
+    "voucherTypes": "closing vouchers excluded from flows",
+    "provisional": "provisional (unconfirmed) journals included",
+    "entity": "one book"
+  },
+  "period": {
+    "type": "mixed",
+    "semantics": "payables at the period end; credit purchases over from..to; days = days in from..to inclusive"
+  },
+  "source": [
+    "reporting.daily",
+    "reporting.lines",
+    "statement mapping (book framework)"
+  ],
+  "owner": "Financial Controller",
+  "freshness": {
+    "maxLagJournals": 0,
+    "note": "computed only from a projection that has caught up with the ledger"
+  },
+  "basis": "Purchase basis: credit purchases are the bill value (incl. GST, like the payable) credited to trade payables by journals that move no cash, net of debit notes; each journal counts once. Proxy: when no such journal exists in the period but payables are open, cost of sales plus other expenses for the period is used and the result says PROXY.",
+  "test": {
+    "fixture": "company-small",
+    "from": "2026-04-01",
+    "to": "2027-03-31",
+    "expected": "136.9"
+  }
+}
