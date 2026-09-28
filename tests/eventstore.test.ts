@@ -96,6 +96,27 @@ describe("event store", () => {
     expect(await relay.drainAll()).toBe(0);
   });
 
+  it("publishes events written by an operator tool's cell under the relay's cell; a failing batch shows in health() (incident 2026-09-28)", async () => {
+    // identity-cli writes with cell "cli"; the broker only captures kuber.<relay cell>.>, so before the fix the
+    // relay retried the row forever and every consumer behind it starved (balance sheet at zero).
+    const cli = new EventStore(sql, "cli", null, sys);
+    await cli.append("channels", "t1", { streamId: "t1/s/cli", expected: "any", events: [signal("cli-1")] }, { principal: "owner:x" });
+    const [row] = await store.systemTx((tx) => tx<{ subject: string }[]>`SELECT subject FROM es.outbox WHERE published_at IS NULL ORDER BY id DESC LIMIT 1`);
+    expect(row!.subject).toMatch(/^kuber\.cli\./);
+    // A broker that only routes the core's cell, like the JetStream stream.
+    const routed: string[] = [];
+    const strict = async (subject: string) => { if (!subject.startsWith("kuber.test.")) throw new Error(`no responders: '${subject}'`); routed.push(subject); };
+    const stuck = new OutboxRelay(sys, strict);
+    await expect(stuck.drainOnce()).rejects.toThrow(/no responders/);
+    expect(stuck.health()).toMatchObject({ ok: false, consecutiveFailures: 1 });
+    expect(stuck.health().failingSince).not.toBeNull();
+    const relay = new OutboxRelay(sys, strict, 200, { cellId: "test" });
+    expect(await relay.drainAll()).toBeGreaterThan(0);
+    expect(routed.at(-1)).toMatch(/^kuber\.test\.channels\.SignalReceived\.t1$/);
+    expect(relay.health()).toMatchObject({ ok: true, consecutiveFailures: 0, failingSince: null });
+    expect(() => new OutboxRelay(sys, strict, 200, { cellId: "a.b" })).toThrow(/one subject token/);
+  });
+
   it("processes an event at most once per consumer", async () => {
     const [env] = await store.readStream("t1", "t1/s/a");
     let calls = 0;

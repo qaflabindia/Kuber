@@ -60,7 +60,8 @@ export function readCard(who: Who, op: string, title: string, summary: string, s
   };
 }
 // ---------------------------------------------------------------- completeness (context integrity: fragments)
-const WHY: Record<NonNullable<Completeness["truncatedBy"]>, string> = { page: "one page", top_n: "top-N cut", scope: "outside the reader's scope", row_limit: "row limit" };
+const WHY: Record<NonNullable<Completeness["truncatedBy"]>, string> = { page: "one page", top_n: "top-N cut", scope: "outside the reader's scope", row_limit: "row limit",
+  projection_lag: "the reporting projection is behind the ledger; the missing journals are not in these figures" };
 /** The one "Completeness:" line every read result carries in its text. */
 export function completenessLine(c: Completeness, noun: string, where = ""): string {
   if (c.complete) return `Completeness: complete (${c.returned}${c.total !== undefined ? ` of ${c.total}` : ""} ${noun})${where ? `${where}.` : "."}`;
@@ -84,6 +85,16 @@ export function withCompleteness(r: ToolResult, c: Completeness, noun: string, w
 const answer = (card: Plan, data: unknown, c: Completeness = { complete: true, returned: 0 }, noun = "rows", where = "", scopeTotals?: (string | bigint)[]): ToolResult =>
   withCompleteness({ text: planText(card), plan: card, data, summary: `${card.title}: ${card.summary}` }, c, noun, where, scopeTotals);
 const whole = (n: number): Completeness => ({ complete: true, returned: n, total: n });
+/** [completeness, noun]: the statement's own noun when whole, "journals" when the projection lags. */
+const lagOr = ([c, noun]: [Completeness, string], wholeNoun: string): [Completeness, string] => [c, c.complete ? wholeNoun : noun];
+/**
+ * A statement's completeness: whole when its projection has every journal of the ledger; otherwise PARTIAL
+ * in journals (projected of posted), so a statement from a lagging projection is never presented as complete.
+ */
+export const statementCompleteness = (st: { basis?: { fresh: boolean; projectedSeq: number; ledgerSeq: number } }, lines: number): [Completeness, string] =>
+  st.basis && !st.basis.fresh
+    ? [{ complete: false, returned: st.basis.projectedSeq, total: st.basis.ledgerSeq, truncatedBy: "projection_lag" }, "journals"]
+    : [whole(lines), "lines"];
 
 // ---------------------------------------------------------------- shared service reads (also used by HTTP routes)
 /** FIN-GL-01: one vocabulary over every path an entry takes (drafts, plans, ledger rejections, schedule exceptions). */
@@ -235,7 +246,7 @@ export function readTools(cell: Cell, who: Who, clock: () => string = () => new 
         const data = { asOf: a.asOf ?? null, rows: st.rows.map((r) => ({ ...r, amount: r.amount.toString() })), totals: Object.fromEntries(Object.entries(t).map(([k, v]) => [k, v.toString()])) };
         return answer(readCard(who, "trial_balance", st.title, summary, [{ title: "Trial balance", kind: "table", columns: ["Account", "Debit", "Credit"], money: [1, 2],
           rows: [...rows, ["Total", (t["Total debits"] ?? 0n).toString(), (t["Total credits"] ?? 0n).toString()]] }], data,
-          [["Open full report", `/reports/trial-balance${a.asOf ? `?to=${a.asOf}` : ""}`]]), data, whole(rows.length), "accounts");
+          [["Open full report", `/reports/trial-balance${a.asOf ? `?to=${a.asOf}` : ""}`]]), data, ...lagOr(statementCompleteness(st, rows.length), "accounts"));
       }),
 
     tool("kuber_profit_and_loss", "Profit and loss", "Income, expenses and surplus for a period (default: the book's fiscal year). Closed years still show what they earned and spent.",
@@ -247,7 +258,7 @@ export function readTools(cell: Cell, who: Who, clock: () => string = () => new 
         const data = { from: p.from, to: p.to, label: p.label, rows: st.rows.map((r) => ({ ...r, amount: r.amount.toString() })), totals: Object.fromEntries(Object.entries(st.totals).map(([k, v]) => [k, v.toString()])) };
         return answer(readCard(who, "profit_and_loss", `Profit and loss · ${p.label}`, summary, [{ title: "Profit and loss", kind: "table", columns: ["Line", "Amount"], money: [1],
           rows: [...st.rows.map((r) => [r.label, r.amount.toString()]), ...Object.entries(st.totals).map(([k, v]) => [k, v.toString()])] }], data,
-          [["Open full report", `/reports/profit-and-loss?from=${p.from}&to=${p.to}`]]), data, whole(st.rows.length), "lines");
+          [["Open full report", `/reports/profit-and-loss?from=${p.from}&to=${p.to}`]]), data, ...lagOr(statementCompleteness(st, st.rows.length), "lines"));
       }),
 
     tool("kuber_balance_sheet", "Balance sheet", "Assets, liabilities and equity as of a date (default today), with the surplus to date; the check line must be zero.",
@@ -258,7 +269,7 @@ export function readTools(cell: Cell, who: Who, clock: () => string = () => new 
         const data = { asOf: a.asOf ?? null, rows: st.rows.map((r) => ({ ...r, amount: r.amount.toString() })), totals: Object.fromEntries(Object.entries(st.totals).map(([k, v]) => [k, v.toString()])) };
         return answer(readCard(who, "balance_sheet", st.title, summary, [{ title: "Balance sheet", kind: "table", columns: ["Line", "Amount"], money: [1],
           rows: [...st.rows.map((r) => [r.label, r.amount.toString()]), ...Object.entries(st.totals).map(([k, v]) => [k, v.toString()])] }], data,
-          [["Open full report", `/reports/balance-sheet${a.asOf ? `?to=${a.asOf}` : ""}`]]), data, whole(st.rows.length), "lines");
+          [["Open full report", `/reports/balance-sheet${a.asOf ? `?to=${a.asOf}` : ""}`]]), data, ...lagOr(statementCompleteness(st, st.rows.length), "lines"));
       }),
 
     tool("kuber_ledger", "Account ledger", "One account's statement for a period: opening balance, every line (date, narration, debit, credit), totals and closing balance. `account` is an id or a name. Narrations are third-party text.",

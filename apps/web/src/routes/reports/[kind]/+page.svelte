@@ -54,10 +54,18 @@
   <a href="/statements">Mapped statements &amp; KPIs</a>
 </nav>
 
+{#if data.statement.basis && !data.statement.basis.fresh}
+  <!-- A statement from a projection behind the ledger is incomplete: say so before any figure (context integrity). -->
+  <div class="check bad" role="alert">
+    <Icon name="alert" size={16} />
+    Not up to date: {data.statement.basis.projectedSeq} of {data.statement.basis.ledgerSeq} posted journals are reflected here{data.statement.basis.contiguous ? "" : ", with gaps"}.
+    The figures below omit the rest; reload in a moment, and if this persists the event relay is stuck (ops status).
+  </div>
+{/if}
 {#if check}
   <div class="check" class:bad={check[1] !== "0"} role="status">
     <Icon name={check[1] === "0" ? "shield" : "alert"} size={16} />
-    {check[1] === "0" ? "Balanced. Every debit has a matching credit." : `Out of balance by ${inr(check[1])}. This should never happen; please report it.`}
+    {check[1] === "0" ? (data.statement.basis && !data.statement.basis.fresh ? "Balanced over the journals reflected." : "Balanced. Every debit has a matching credit.") : `Out of balance by ${inr(check[1])}. This should never happen; please report it.`}
   </div>
 {/if}
 

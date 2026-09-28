@@ -33,6 +33,14 @@ for i in $(seq 1 90); do
   sleep 2
 done
 echo "core healthy"
+# Events reach the modules (reporting, evidence, agent) only through the outbox relay; a stuck relay leaves
+# every statement at its last projected position. Wait for it to publish, and stop with a clear message if not.
+sleep 3   # let the relay attempt its first batches
+for i in $(seq 1 30); do
+  curl -sf --cacert "$DIR/certs/ca.crt" https://localhost:8080/healthz | grep -q '"relay":{"ok":true' && { echo "event relay publishing"; break; }
+  [ "$i" = 30 ] && { echo "event relay is failing: modules are not receiving events (see: ./kuber logs --tail 50 core | grep relay)"; exit 1; }
+  sleep 2
+done
 
 OPS=(./kuber run --rm -T --entrypoint "npx tsx apps/core/src/ops-cli.ts" tools)
 echo "5/7 key and projection checks"

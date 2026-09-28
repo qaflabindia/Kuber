@@ -190,7 +190,8 @@ export class Cell {
     const onDeadLetter = (d: { consumer: string; env: Envelope; error: unknown; attempts: number }) => deadLetters.record(d.consumer, d.env, d.attempts, d.error);
     const bus: Bus = !o.bus || o.bus === "memory" ? new MemoryBus(3, partitions, onDeadLetter)
       : await NatsBus.connect(o.bus.natsUrl, cellId, { caFile: o.bus.caFile, retentionDays: o.bus.retentionDays, token: o.bus.token, partitions, maxDeliver: o.bus.maxDeliver, onDeadLetter });
-    const relay = new OutboxRelay(systemSql, (subject, env) => bus.publish(subject, env));
+    // Every outbox row is published under this cell, whichever process wrote it (operator CLIs write with their own cell id).
+    const relay = new OutboxRelay(systemSql, (subject, env) => bus.publish(subject, env), 200, { cellId });
     const policies = PolicyEngine.fromDir(o.policyDir);
     // Memberships, passkeys and the authorization guard every operation passes through (F01/F02).
     // It also guards the agent's decisions and channel submissions at the module boundary.

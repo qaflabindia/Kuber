@@ -15,7 +15,7 @@ export interface Who { tenant: string; book: string; principal: string; onBehalf
  * holds. `returned` rows of `total` (when known); `truncatedBy` says why rows are missing: a page, a
  * top-N cut, the reader's scope (e.g. group entities outside it, listed in `excluded`) or a row limit.
  */
-export interface Completeness { complete: boolean; returned: number; total?: number; truncatedBy?: "page" | "top_n" | "scope" | "row_limit"; excluded?: string[] }
+export interface Completeness { complete: boolean; returned: number; total?: number; truncatedBy?: "page" | "top_n" | "scope" | "row_limit" | "projection_lag"; excluded?: string[] }
 /**
  * `summary`: one grounded line (figures exactly as in `text`), used for rules answers and grounded fallbacks.
  * `completeness`: every read tool declares it (also in `data.completeness` and as one "Completeness:" line in `text`);

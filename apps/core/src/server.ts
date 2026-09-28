@@ -173,7 +173,12 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     return reply.code(status).send({ error: status >= 500 ? "internal" : "bad_request", message: status >= 500 ? "internal error" : (err as Error).message });
   });
 
-  app.get("/healthz", async () => ({ ok: true, cell: cell.cellId }));
+  // Liveness stays true (restarting the core does not unstick a relay); `relay` shows whether events reach the
+  // modules. No error text here: this endpoint is unauthenticated and errors can name tenants.
+  app.get("/healthz", async () => {
+    const r = cell.relay.health();
+    return { ok: true, cell: cell.cellId, relay: { ok: r.ok, consecutiveFailures: r.consecutiveFailures, failingSince: r.failingSince } };
+  });
   app.get("/readyz", async () => { await cell.sql`SELECT 1`; return { ok: true }; });
 
   type P = { Params: { tenant: string; book: string } };

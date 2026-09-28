@@ -56,7 +56,9 @@ export async function coreFile(s: { tenant: string; principal: string | null; si
 }
 
 // ---------------------------------------------------------------- types returned by the core
-export interface Statement { title: string; rows: { label: string; amount: string; accountId?: string; section?: string }[]; totals: Record<string, string>; unit: "paise" }
+/** `basis`: how far the reporting projection has caught up with the ledger when the statement was computed. */
+export interface ReportBasis { projectedSeq: number; ledgerSeq: number; lag: number; contiguous: boolean; fresh: boolean; computedAt: string }
+export interface Statement { title: string; rows: { label: string; amount: string; accountId?: string; section?: string }[]; totals: Record<string, string>; unit: "paise"; basis?: ReportBasis }
 /** FIN-RPT-01/02: mapped statements and KPIs (paise strings; null = unavailable, never zero). */
 export type OutputStatus = "preliminary" | "certified" | "unavailable";
 export interface FinColumn { key: "current" | "comparative"; from: string; to: string; label: string; status: OutputStatus; reasons: string[] }
