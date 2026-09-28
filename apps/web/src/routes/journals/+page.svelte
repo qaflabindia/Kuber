@@ -3,6 +3,7 @@
   import Icon from "$lib/components/Icon.svelte";
   import { date, inr } from "$lib/format";
   import type { Journal } from "$lib/server/api";
+  import { voucherLabel } from "$lib/voucher";
 
   let { data } = $props();
 
@@ -51,7 +52,7 @@
 <div class="bar">
   <div class="search"><Icon name="search" size={16} /><input bind:value={q} placeholder="Search narration, account, party or amount" aria-label="Search journals" /></div>
   <div class="chips" role="group" aria-label="Voucher type">
-    {#each types as t}<button class:on={vt === t} onclick={() => (vt = t)}>{t === "all" ? "All" : t}</button>{/each}
+    {#each types as t}<button class:on={vt === t} onclick={() => (vt = t)}>{t === "all" ? "All" : voucherLabel(t)}</button>{/each}
   </div>
 </div>
 
@@ -74,7 +75,7 @@
         <div class="j" id="j-{j.journal_id}" class:open={isOpen} class:focus={data.focus === j.journal_id}>
           <button class="jrow" aria-expanded={isOpen} aria-controls="jl-{j.journal_id}" onclick={() => toggle(j.journal_id)}>
             <span class="chev" aria-hidden="true"><Icon name="chevron" size={14} /></span>
-            <span class="vt">{j.voucher_type ?? "journal"}</span>
+            <span class="vt">{voucherLabel(j.voucher_type)}</span>
             <span class="nar">{j.narration}</span>
             <span class="by muted">{who(j.principal)}</span>
             <span class="pill {st.c}">{st.t}</span>
@@ -123,7 +124,7 @@
   .day { display: flex; justify-content: space-between; padding: 14px 18px 6px; font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--text-3); }
   .j { border-top: 1px solid var(--line-soft); }
   .j.focus { box-shadow: inset 3px 0 0 var(--brass); }
-  .jrow { width: 100%; display: grid; grid-template-columns: 20px 86px minmax(0, 1fr) 90px 96px 130px; gap: 12px; align-items: center; padding: 11px 18px;
+  .jrow { width: 100%; display: grid; grid-template-columns: 20px 118px minmax(0, 1fr) 90px 96px 130px; gap: 12px; align-items: center; padding: 11px 18px;
     border: 0; background: none; color: var(--text); font: 500 13.5px var(--sans); text-align: left; cursor: pointer; }
   .jrow:hover { background: var(--ink-2); }
   .chev { color: var(--text-3); display: inline-flex; transition: transform .15s var(--ease); }

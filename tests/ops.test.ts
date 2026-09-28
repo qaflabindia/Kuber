@@ -94,6 +94,38 @@ describe("simulate, then commit exactly that", () => {
     expect([...st.journals.values()].some((j) => j.narration === "Office rent and GST (ref INV-77)")).toBe(true);
   });
 
+  it("sales and purchase returns: checked against the original voucher, its party and what is left to return", async () => {
+    await cell.parties.register(T, OWNER, { partyId: "C-ACME", entityId: "laksh", kind: "customer", name: "Acme Industries" });
+    await cell.parties.register(T, OWNER, { partyId: "C-OTHER", entityId: "laksh", kind: "customer", name: "Other Co" });
+    const sale = await plan("journal", { voucherType: "sales", date: "2026-10-10", narration: "Invoice 42",
+      lines: [{ account: "DEBTORS", debit: 1180, party: "C-ACME" }, { account: "FEES", credit: 1000 }, { account: "GSTOUT", credit: 180 }] });
+    expect(sale.blocked).toBe(false);
+    await commit(sale);
+    const saleId = sale.journals[0]!.journalId;
+    const ret = (amount: number, gst: number, party = "C-ACME", against: string | undefined = saleId) => plan("journal", { voucherType: "sales_return", date: "2026-10-12",
+      narration: "Credit note 7", ...(against ? { against } : {}),
+      lines: [{ account: "FEES", debit: amount }, ...(gst ? [{ account: "GSTOUT", debit: gst }] : []), { account: "DEBTORS", credit: amount + gst, party }] });
+    const wrongParty = await ret(500, 90, "C-OTHER");
+    expect(wrongParty.checks.find((c) => c.label === "Same customer or supplier as the original")).toMatchObject({ ok: false });
+    const first = await ret(500, 90);
+    expect(first.blocked).toBe(false);
+    expect(first.journals[0]).toMatchObject({ voucherType: "sales_return" });
+    expect(first.checks.find((c) => c.label.startsWith("Within what is left"))).toMatchObject({ ok: true, detail: expect.stringMatching(/left ₹1,180; this return ₹590/) });
+    await commit(first);
+    const tooMuch = await ret(600, 108);
+    expect(tooMuch.checks.find((c) => c.label.startsWith("Within what is left"))).toMatchObject({ ok: false, detail: expect.stringMatching(/returned before ₹590, left ₹590; this return ₹708/) });
+    const notASale = await ret(10, 0, "C-ACME", first.journals[0]!.journalId);
+    expect(notASale.checks.find((c) => c.label === "Returned against a sales voucher")).toMatchObject({ ok: false });
+    // Direction: a sales return must debit income; a purchase return must credit an expense or asset.
+    const backwards = await plan("journal", { voucherType: "sales_return", date: "2026-10-12", narration: "Wrong way",
+      lines: [{ account: "DEBTORS", debit: 100, party: "C-ACME" }, { account: "FEES", credit: 100 }] });
+    expect(backwards.checks.find((c) => c.label.startsWith("A sales return (credit note) debits"))).toMatchObject({ ok: false });
+    const pr = await plan("journal", { voucherType: "purchase_return", date: "2026-10-12", narration: "Returned chairs", reference: "DN-3",
+      lines: [{ account: "CASH", debit: 200 }, { account: "BIZEXP", credit: 200 }] });
+    expect(pr.blocked).toBe(false);
+    expect(pr.checks.find((c) => c.label === "Names the original purchase voucher")).toMatchObject({ ok: true, blocking: false });
+  });
+
   it("refuses a tampered hash and a plan the books have moved past", async () => {
     const a = await plan("record", { narration: "Tea", amount: 20, direction: "out", account: "LIVING", via: "CASH", date: "2026-10-06" });
     await expect(cell.ops.commit(T, a.planId, OWNER, "0".repeat(64))).rejects.toThrow(/not the plan on record/);

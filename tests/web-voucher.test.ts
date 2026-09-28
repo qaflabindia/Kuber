@@ -1,6 +1,6 @@
 /** The Record screen's voucher model: amounts in paise, live balance, line problems, and the core request it builds. */
 import { describe, expect, it } from "vitest";
-import { balanceOn, blankLine, evaluate, paise, rupees, template, toInput } from "../apps/web/src/lib/voucher.ts";
+import { balanceOn, blankLine, evaluate, mirrorOf, paise, rupees, template, toInput, voucherLabel } from "../apps/web/src/lib/voucher.ts";
 
 const accounts = [
   { account_id: "BANK", name: "Bank account", nature: "asset", is_cash_like: true },
@@ -47,5 +47,17 @@ describe("voucher model", () => {
       lines: [blankLine({ account: "BIZEXP", debit: "10,000", memo: "Oct" }), blankLine({ account: "BANK", credit: "10000" }), blankLine()] });
     expect(input).toEqual({ voucherType: "payment", date: "2026-10-09", narration: "Rent", reference: "INV-7",
       lines: [{ account: "BIZEXP", debit: "10000", memo: "Oct" }, { account: "BANK", credit: "10000" }] });
+  });
+
+  it("returns mirror the original voucher (debit ↔ credit, same party) and carry `against`", () => {
+    const sale = { lines: [{ accountId: "DEBTORS", amount: "118000", partyId: "acme" }, { accountId: "FEES", amount: "-100000" }, { accountId: "GSTOUT", amount: "-18000" }] };
+    const m = mirrorOf(sale);
+    expect(m.map((l) => [l.account, l.debit, l.credit, l.party])).toEqual([["DEBTORS", "", "1,180", "acme"], ["FEES", "1,000", "", ""], ["GSTOUT", "180", "", ""]]);
+    expect(evaluate(m, [...accounts, { account_id: "DEBTORS", name: "Trade receivables", nature: "asset", is_control: true }, { account_id: "GSTOUT", name: "GST output", nature: "liability" }], [{ partyId: "acme" }]).problems).toEqual([]);
+    const input = toInput({ type: "sales_return", date: "2026-10-12", narration: "Credit note", reference: "", lines: m, against: "j-42" });
+    expect(input).toMatchObject({ voucherType: "sales_return", against: "j-42" });
+    expect(toInput({ type: "payment", date: "", narration: "x", reference: "", lines: m, against: "j-42" })).not.toHaveProperty("against");
+    expect(template("purchase_return", accounts).map((l) => l.account)).toEqual(["CREDITORS", "", "GSTIN"]);
+    expect([voucherLabel("sales_return"), voucherLabel("opening"), voucherLabel(null)]).toEqual(["Sales return", "Opening", "Journal"]);
   });
 });

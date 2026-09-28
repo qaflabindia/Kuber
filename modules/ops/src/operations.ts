@@ -130,7 +130,9 @@ export const record: OpDef<z.infer<typeof RecordInput>> = {
 
 // ---------------------------------------------------------------- capture: vouchers (multi-line)
 /** Voucher types a person records from the Record screen (Tally/Zoho vocabulary). */
-export const VOUCHER_TYPES = ["payment", "receipt", "contra", "journal", "sales", "purchase"] as const;
+export const VOUCHER_TYPES = ["payment", "receipt", "contra", "journal", "sales", "purchase", "sales_return", "purchase_return"] as const;
+/** A return voucher and the voucher type it reverses (credit note against a sale, debit note against a purchase). */
+const RETURN_OF: Partial<Record<typeof VOUCHER_TYPES[number], "sales" | "purchase">> = { sales_return: "sales", purchase_return: "purchase" };
 const VoucherLine = z.object({
   account: AccountId,
   debit: Rupees.optional(), credit: Rupees.optional(),
@@ -143,6 +145,7 @@ const JournalInput = z.object({
   date: IsoDate.optional(),
   narration: z.string().min(2).max(200),
   reference: z.string().max(60).optional().describe("the source document: invoice, bill or cheque number"),
+  against: z.string().min(1).max(200).optional().describe("sales_return / purchase_return: the journal id of the sale or purchase being returned"),
   lines: z.array(VoucherLine).min(2).max(50),
   controlledAdjustment: z.object({ reason: z.string().min(3) }).optional()
     .describe("superuser or controller only: control-account lines that are not a registered party's own posting"),
@@ -162,13 +165,17 @@ function voucherChecks(s: BookState, type: typeof VOUCHER_TYPES[number], lines: 
     case "contra": return [{ label: "A contra moves money between bank, cash and card accounts only", ok: lines.every(cash), blocking: true }];
     case "sales": return [{ label: "A sale credits an income account", ok: lines.some((l) => l.cr > 0n && nat(l, "income")), blocking: true }];
     case "purchase": return [{ label: "A purchase debits an expense or asset account", ok: lines.some((l) => l.dr > 0n && (nat(l, "expense") || nat(l, "asset"))), blocking: true }];
+    case "sales_return": return [{ label: "A sales return (credit note) debits an income account", ok: lines.some((l) => l.dr > 0n && nat(l, "income")), blocking: true },
+      { label: "A sales return credits the customer or a bank, cash or card account", ok: lines.some((l) => l.cr > 0n && (!!acc(l.account)?.isControl || cash(l))), blocking: true }];
+    case "purchase_return": return [{ label: "A purchase return (debit note) credits an expense or asset account", ok: lines.some((l) => l.cr > 0n && (nat(l, "expense") || (nat(l, "asset") && !cash(l) && !acc(l.account)?.isControl))), blocking: true },
+      { label: "A purchase return debits the supplier or a bank, cash or card account", ok: lines.some((l) => l.dr > 0n && (!!acc(l.account)?.isControl || cash(l))), blocking: true }];
     default: return [];
   }
 }
 
 export const journal: OpDef<z.infer<typeof JournalInput>> = {
   name: "journal", title: "Record a voucher", kind: "write", gate: "policy", event: "EVT-TXN-INGESTED",
-  description: "Record a voucher of several lines (payment, receipt, contra, journal, sales, purchase): each line debits or credits one account; debits must equal credits. Returns the journal it would post; nothing is posted until committed (and approved, where policy requires).",
+  description: "Record a voucher of several lines (payment, receipt, contra, journal, sales, purchase, sales_return, purchase_return; a return may name the original voucher in `against`): each line debits or credits one account; debits must equal credits. Returns the journal it would post; nothing is posted until committed (and approved, where policy requires).",
   input: JournalInput,
   async plan(ctx, i) {
     const s = ctx.state, checks: Check[] = [];
@@ -182,6 +189,36 @@ export const journal: OpDef<z.infer<typeof JournalInput>> = {
     const dr = rows.reduce((a, r) => a + r.dr, 0n), cr = rows.reduce((a, r) => a + r.cr, 0n);
     checks.push({ label: "Debits equal credits", ok: dr === cr && dr > 0n, blocking: true, detail: dr === cr ? rs(dr) : `debits ${rs(dr)}, credits ${rs(cr)}: difference ${rs(dr - cr)}` });
     if (checks.every((c) => c.ok)) checks.push(...voucherChecks(s, i.voucherType, rows));
+
+    // Returns against the original voucher: it must exist, be of the returned type and not be reversed; the party
+    // must match; and this return plus earlier returns against it may not exceed it. Earlier returns are the
+    // journals whose lines carry `against` = the original's id (recorded below on every line of a return).
+    const returnOf = RETURN_OF[i.voucherType];
+    if (i.against && !returnOf) checks.push({ label: "Only a sales or purchase return is recorded against an original voucher", ok: false, blocking: true });
+    if (returnOf && i.against) {
+      const orig = s.journals.get(i.against);
+      const origTotal = orig ? orig.lines.reduce((a, l) => (BigInt(l.amount) > 0n ? a + BigInt(l.amount) : a), 0n) : 0n;
+      checks.push({ label: `Returned against a ${returnOf} voucher`, ok: !!orig && orig.voucherType === returnOf && !orig.reversedBy, blocking: true,
+        detail: !orig ? `No journal ${i.against} in this book` : orig.voucherType !== returnOf ? `${i.against} is a ${orig.voucherType} voucher` : orig.reversedBy ? `${i.against} was reversed by ${orig.reversedBy}` : `${orig.narration} (${orig.txnDate}, ${rs(origTotal)})` });
+      if (orig) {
+        const origParties = new Set(orig.lines.map((l) => l.partyId).filter((p): p is string => !!p));
+        const retParties = new Set(rows.map((r) => r.party).filter((p): p is string => !!p));
+        if (origParties.size) checks.push({ label: "Same customer or supplier as the original", ok: [...retParties].every((p) => origParties.has(p)) && retParties.size > 0, blocking: true,
+          detail: `original: ${[...origParties].join(", ")}${retParties.size ? `; return: ${[...retParties].join(", ")}` : "; the return names no party"}` });
+        if (date < orig.txnDate) checks.push({ label: "Not dated before the original", ok: false, blocking: true, detail: `original dated ${orig.txnDate}` });
+        let earlier = 0n;
+        for (const [jid2, j] of s.journals) {
+          if (jid2 === i.against || j.reversedBy || !j.lines.some((l) => l.dimensions?.against === i.against)) continue;
+          earlier += j.lines.reduce((a, l) => (BigInt(l.amount) > 0n ? a + BigInt(l.amount) : a), 0n);
+        }
+        const left = origTotal - earlier;
+        checks.push({ label: "Within what is left to return on the original", ok: dr <= left, blocking: true,
+          detail: `original ${rs(origTotal)}, returned before ${rs(earlier)}, left ${rs(left)}; this return ${rs(dr)}` });
+      }
+    } else if (returnOf) {
+      checks.push({ label: `Names the original ${returnOf} voucher`, ok: !!i.reference, blocking: false,
+        detail: i.reference ? `reference ${i.reference} (not linked: choose the original to check quantities left to return)` : "choose the original invoice or bill so the return is checked against it" });
+    }
 
     // Control accounts (FIN-GL-01): a line naming a registered party is that party's subledger posting; any other
     // control line is a manual entry, allowed only as a controlled adjustment by a superuser or controller.
@@ -199,12 +236,13 @@ export const journal: OpDef<z.infer<typeof JournalInput>> = {
     const narration = i.reference ? `${i.narration} (ref ${i.reference})` : i.narration;
     const lines: Line[] = rows.filter((r) => s.accounts.has(r.account)).map((r) => ({
       accountId: r.account, amount: (r.dr > 0n ? r.dr : -r.cr).toString(),
-      ...(r.party ? { partyId: r.party } : {}), dimensions: { ...(r.dimensions ?? {}), ...(r.memo ? { memo: r.memo } : {}) } }));
+      ...(r.party ? { partyId: r.party } : {}), dimensions: { ...(r.dimensions ?? {}), ...(r.memo ? { memo: r.memo } : {}), ...(returnOf && i.against ? { against: i.against } : {}) } }));
     if (checks.every((c) => c.ok)) validates(s, date, lines, checks);
-    const seed = `voucher/${i.voucherType}/${date}/${narration}/${lines.map((l) => `${l.accountId}:${l.amount}:${l.partyId ?? ""}`).join(",")}`;
+    const seed = `voucher/${i.voucherType}/${i.against ?? ""}/${date}/${narration}/${lines.map((l) => `${l.accountId}:${l.amount}:${l.partyId ?? ""}`).join(",")}`;
     const action = post(jid(ctx, seed, 0), date, narration, lines, i.voucherType);
     if (i.controlledAdjustment && manual.length && action.type === "gl" && action.command.kind === "PostJournal") action.command.controlledAdjustment = { reason: i.controlledAdjustment.reason };
-    const label = i.voucherType.charAt(0).toUpperCase() + i.voucherType.slice(1);
+    const LABEL: Record<string, string> = { sales_return: "Sales return (credit note)", purchase_return: "Purchase return (debit note)" };
+    const label = LABEL[i.voucherType] ?? i.voucherType.charAt(0).toUpperCase() + i.voucherType.slice(1);
     return {
       title: `${label} voucher · ${rs(dr)}`,
       summary: `${narration}: ${rows.length} lines, debits ${rs(dr)} = credits ${rs(cr)}, dated ${date}.`,

@@ -3,7 +3,7 @@
  * typed in rupees ("10,000.50") and held as paise (bigint): no floating point. The core re-checks everything
  * (ops `journal`); this model only gives the person immediate feedback while they type.
  */
-export const VOUCHER_TYPES = ["payment", "receipt", "contra", "journal", "sales", "purchase"] as const;
+export const VOUCHER_TYPES = ["payment", "receipt", "contra", "journal", "sales", "purchase", "sales_return", "purchase_return"] as const;
 export type VoucherType = (typeof VOUCHER_TYPES)[number];
 
 export interface AccountRef { account_id: string; name: string; nature: string; is_control?: boolean; is_cash_like?: boolean }
@@ -16,7 +16,19 @@ export const VOUCHER_INFO: Record<VoucherType, { label: string; hint: string; ke
   journal: { label: "Journal", key: "J", hint: "Any other entry: accruals, adjustments, depreciation, reclassifications. Debits must equal credits." },
   sales: { label: "Sales", key: "S", hint: "An invoice you raised: the customer owes you (debit Trade receivables) for income (credit), with output GST if any." },
   purchase: { label: "Purchase", key: "U", hint: "A bill you received: the expense or asset (debit), input GST if any, owed to the supplier (credit Trade payables)." },
+  sales_return: { label: "Sales return", key: "N", hint: "A credit note: goods or services returned by a customer. Choose the original invoice; Kuber reverses it line by line and checks you do not return more than was sold." },
+  purchase_return: { label: "Purchase return", key: "D", hint: "A debit note: goods returned to a supplier. Choose the original bill; Kuber reverses it line by line and checks you do not return more than was bought." },
 };
+
+/** The original voucher type a return reverses. */
+export const RETURN_OF: Partial<Record<VoucherType, "sales" | "purchase">> = { sales_return: "sales", purchase_return: "purchase" };
+
+/** How a stored voucher type reads ("sales_return" → "Sales return"). */
+export function voucherLabel(t: string | null | undefined): string {
+  const k = (t ?? "journal") as VoucherType;
+  if (VOUCHER_INFO[k]) return VOUCHER_INFO[k].label;
+  return (t ?? "journal").replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+}
 
 /** "10,000.50" → 1000050n; blank → 0n; anything else (letters, negative, more than 2 decimals) → null. */
 export function paise(text: string): bigint | null {
@@ -50,6 +62,8 @@ export function template(type: VoucherType, accounts: AccountRef[]): DraftLine[]
     case "contra": return [blankLine({ account: pick(accounts, "CASH", "BANK") }), blankLine({ account: cash === "CASH" ? "" : cash })];
     case "sales": return [blankLine({ account: pick(accounts, "DEBTORS") }), blankLine({ account: income }), blankLine({ account: pick(accounts, "GSTOUT") })];
     case "purchase": return [blankLine(), blankLine({ account: pick(accounts, "GSTIN") }), blankLine({ account: pick(accounts, "CREDITORS") })];
+    case "sales_return": return [blankLine({ account: income }), blankLine({ account: pick(accounts, "GSTOUT") }), blankLine({ account: pick(accounts, "DEBTORS") })];
+    case "purchase_return": return [blankLine({ account: pick(accounts, "CREDITORS") }), blankLine(), blankLine({ account: pick(accounts, "GSTIN") })];
     default: return [blankLine(), blankLine()];
   }
 }
@@ -57,7 +71,8 @@ export function template(type: VoucherType, accounts: AccountRef[]): DraftLine[]
 /** Which side a line's amount goes on by default for a type and position (so the person types one amount). */
 export function defaultSide(type: VoucherType, index: number, count: number): "debit" | "credit" {
   if (type === "payment" || type === "purchase") return index === count - 1 ? "credit" : "debit";
-  if (type === "receipt" || type === "sales") return index === 0 ? "debit" : "credit";
+  if (type === "receipt" || type === "sales" || type === "purchase_return") return index === 0 ? "debit" : "credit";
+  if (type === "sales_return") return index === count - 1 ? "credit" : "debit";
   return index % 2 === 0 ? "debit" : "credit";
 }
 
@@ -104,13 +119,25 @@ export function balanceOn(lines: DraftLine[], id: number): DraftLine[] {
   return lines.map((l) => l.id !== id ? l : diff > 0n ? { ...l, credit: rupees(diff), debit: "" } : diff < 0n ? { ...l, debit: rupees(-diff), credit: "" } : l);
 }
 
+/**
+ * A return's starting lines from its original voucher: every line mirrored (debit ↔ credit), with its party.
+ * The person then reduces amounts for a partial return; the core checks what is left to return.
+ */
+export function mirrorOf(original: { lines: { accountId: string; amount: string; partyId?: string | null }[] }): DraftLine[] {
+  return original.lines.map((l) => {
+    const a = BigInt(l.amount);
+    return blankLine({ account: l.accountId, party: l.partyId ?? "", ...(a > 0n ? { credit: rupees(a) } : { debit: rupees(-a) }) });
+  });
+}
+
 /** The body of the core's `journal` operation for these lines. */
-export function toInput(v: { type: VoucherType; date: string; narration: string; reference: string; lines: DraftLine[]; adjustmentReason?: string }) {
+export function toInput(v: { type: VoucherType; date: string; narration: string; reference: string; lines: DraftLine[]; adjustmentReason?: string; against?: string }) {
   const lines = v.lines.filter((l) => l.account && ((paise(l.debit) ?? 0n) > 0n || (paise(l.credit) ?? 0n) > 0n)).map((l) => {
     const dr = paise(l.debit) ?? 0n, cr = paise(l.credit) ?? 0n;
     return { account: l.account, ...(dr > 0n ? { debit: rupees(dr).replace(/,/g, "") } : { credit: rupees(cr).replace(/,/g, "") }),
       ...(l.party ? { party: l.party } : {}), ...(l.memo.trim() ? { memo: l.memo.trim() } : {}) };
   });
-  return { voucherType: v.type, ...(v.date ? { date: v.date } : {}), narration: v.narration.trim(), ...(v.reference.trim() ? { reference: v.reference.trim() } : {}), lines,
+  return { voucherType: v.type, ...(v.date ? { date: v.date } : {}), narration: v.narration.trim(), ...(v.reference.trim() ? { reference: v.reference.trim() } : {}),
+    ...(v.against && RETURN_OF[v.type] ? { against: v.against } : {}), lines,
     ...(v.adjustmentReason?.trim() ? { controlledAdjustment: { reason: v.adjustmentReason.trim() } } : {}) };
 }

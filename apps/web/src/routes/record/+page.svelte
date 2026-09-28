@@ -6,7 +6,7 @@
   import PlanCard from "$lib/components/PlanCard.svelte";
   import { date as fmtDate, inr, NATURE_LABEL } from "$lib/format";
   import type { Plan } from "$lib/server/api";
-  import { VOUCHER_INFO, VOUCHER_TYPES, balanceOn, blankLine, defaultSide, evaluate, template, toInput, type DraftLine, type VoucherType } from "$lib/voucher";
+  import { RETURN_OF, VOUCHER_INFO, VOUCHER_TYPES, balanceOn, blankLine, defaultSide, evaluate, mirrorOf, template, toInput, voucherLabel, type DraftLine, type VoucherType } from "$lib/voucher";
 
   let { data } = $props();
 
@@ -23,6 +23,9 @@
   let lines = $state<DraftLine[]>(untrack(() => template(type, data.accounts)));
   let touched = $state(false);
   let adjust = $state(false), adjustReason = $state("");
+  // Returns: the original sale or purchase they reverse (its lines are mirrored; amounts can be reduced for a partial return).
+  let against = $state("");
+  let origQuery = $state("");
   let plan = $state<Plan | null>(null);
   let outcome = $state<{ status: Plan["status"]; message: string | null } | null>(null);
   let busy = $state(false), error = $state<string | null>(null);
@@ -33,7 +36,19 @@
   const v = $derived(evaluate(lines, data.accounts, parties, adjust));
   const needsParty = $derived(lines.some((l) => byId.get(l.account)?.is_control));
   const ready = $derived(v.problems.length === 0 && narration.trim().length >= 2 && !!txnDate && (!adjust || adjustReason.trim().length >= 3));
-  const payload = $derived(JSON.stringify(toInput({ type, date: txnDate, narration, reference, lines, adjustmentReason: adjust ? adjustReason : undefined })));
+  const payload = $derived(JSON.stringify(toInput({ type, date: txnDate, narration, reference, lines, adjustmentReason: adjust ? adjustReason : undefined, against })));
+  const returnOf = $derived(RETURN_OF[type]);
+  const originals = $derived((data.originals ?? []).filter((o) => o.type === returnOf
+    && (!origQuery.trim() || o.narration.toLowerCase().includes(origQuery.trim().toLowerCase()) || o.lines.some((l) => l.partyId && (partyName(l.partyId)).toLowerCase().includes(origQuery.trim().toLowerCase())))));
+  const chosen = $derived((data.originals ?? []).find((o) => o.journalId === against) ?? null);
+  const partyName = (id: string) => (data.parties ?? []).find((p) => p.partyId === id)?.name ?? id;
+  function chooseOriginal(id: string) {
+    against = id;
+    const o = (data.originals ?? []).find((x) => x.journalId === id);
+    if (!o) return;
+    lines = mirrorOf(o); touched = true;
+    if (!narration.trim()) narration = `${type === "sales_return" ? "Credit note" : "Debit note"} against ${o.narration}`.slice(0, 200);
+  }
 
   // Account groups: money accounts first for payments, receipts and contras; then by nature.
   const ORDER = ["asset", "liability", "equity", "income", "expense"];
@@ -51,6 +66,7 @@
   function setType(t: VoucherType) {
     if (t === type) return;
     type = t;
+    if (!RETURN_OF[t]) against = "";
     // Keep what the person typed; start from the type's usual accounts only on an untouched voucher.
     if (!touched) lines = template(t, data.accounts);
   }
@@ -87,7 +103,7 @@
     if (e.altKey && e.key.toLowerCase() === "n") { e.preventDefault(); void addLine(); }
   }
   function again(keepType = true) {
-    step = "enter"; plan = null; outcome = null; error = null; touched = false; adjust = false; adjustReason = "";
+    step = "enter"; plan = null; outcome = null; error = null; touched = false; adjust = false; adjustReason = ""; against = "";
     narration = ""; reference = "";
     lines = template(keepType ? type : "payment", data.accounts);
     tick().then(() => document.getElementById("narration")?.focus());
@@ -141,6 +157,33 @@
         };
       }}>
         <input type="hidden" name="voucher" value={payload} />
+        {#if returnOf}
+          <div class="against">
+            <div class="al">Against {returnOf === "sales" ? "invoice" : "bill"}</div>
+            {#if chosen}
+              <div class="chosen">
+                <span class="cn">{chosen.narration}</span>
+                <span class="muted small">{fmtDate(chosen.date)} · {inr(chosen.total)}{chosen.lines.find((l) => l.partyId) ? ` · ${partyName(chosen.lines.find((l) => l.partyId)!.partyId!)}` : ""}</span>
+                <button type="button" class="btn quiet sm" onclick={() => { against = ""; lines = template(type, data.accounts); touched = false; }}>Change</button>
+              </div>
+              <p class="muted small">Lines below reverse the original in full. Reduce the amounts for a partial return; Kuber checks what is left to return.</p>
+            {:else}
+              <input class="osearch" bind:value={origQuery} placeholder="Search {returnOf === "sales" ? "invoices" : "bills"} by narration or party" aria-label="Search originals" />
+              {#if originals.length}
+                <ul class="olist">
+                  {#each originals.slice(0, 8) as o (o.journalId)}
+                    <li><button type="button" onclick={() => chooseOriginal(o.journalId)}>
+                      <span class="cn">{o.narration}</span>
+                      <span class="muted small">{fmtDate(o.date)} · <span class="num">{inr(o.total)}</span>{o.lines.find((l) => l.partyId) ? ` · ${partyName(o.lines.find((l) => l.partyId)!.partyId!)}` : ""}</span>
+                    </button></li>
+                  {/each}
+                </ul>
+              {:else}
+                <p class="muted small">No {returnOf} vouchers {origQuery ? "match" : "in the latest 200 entries"}. You can still record the return with the original's number as the reference; it is then not checked against the original.</p>
+              {/if}
+            {/if}
+          </div>
+        {/if}
         <div class="head-fields">
           <div class="field"><label for="date">Date</label><input id="date" type="date" bind:value={txnDate} required /></div>
           <div class="field grow"><label for="narration">Narration</label>
@@ -248,7 +291,7 @@
           {#each data.recent as j (j.journal_id)}
             <li><a href="/journals?focus={j.journal_id}">
               <span class="rn">{j.narration}</span>
-              <span class="rm"><span class="chip">{j.voucher_type ?? "journal"}</span> {fmtDate(j.txn_date)} · <span class="num">{inr(lineTotal(j))}</span></span>
+              <span class="rm"><span class="chip">{voucherLabel(j.voucher_type)}</span> {fmtDate(j.txn_date)} · <span class="num">{inr(lineTotal(j))}</span></span>
             </a></li>
           {/each}
         </ul>
@@ -280,12 +323,20 @@
   .types button.on { background: var(--brass); color: var(--brass-ink); }
   .hint { color: var(--text-3); font-size: 13px; margin: 10px 2px 14px; max-width: 75ch; }
 
-  .voucher { padding: 18px; display: grid; gap: 16px; }
-  .head-fields { display: grid; grid-template-columns: 170px 1fr 200px; gap: 12px; }
+  .voucher { padding: 18px; display: grid; gap: 16px; min-width: 0; }
+  .row select, .row input { min-width: 0; width: 100%; }
+  .head-fields { display: grid; grid-template-columns: 160px minmax(0, 1fr) minmax(120px, 190px); gap: 12px; }
+  .against { display: grid; gap: 8px; padding: 12px; border: 1px solid rgba(201,168,106,.3); border-radius: var(--r-md); background: var(--brass-wash); }
+  .al { font-size: 12px; font-weight: 700; color: var(--brass-2); letter-spacing: .04em; }
+  .chosen { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; } .chosen .cn { font-weight: 600; }
+  .olist { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; max-height: 260px; overflow-y: auto; }
+  .olist button { width: 100%; display: flex; justify-content: space-between; gap: 12px; padding: 8px 10px; border: 0; border-radius: 8px; background: none; color: var(--text); text-align: left; cursor: pointer; font: 500 13.5px var(--sans); }
+  .olist button:hover { background: var(--ink-2); }
+  .against .small { margin: 0; }
   .field { display: grid; gap: 6px; } .field label { font-size: 12px; color: var(--text-3); font-weight: 600; }
   .grid { display: grid; gap: 6px; }
-  .row { display: grid; grid-template-columns: minmax(180px, 2fr) 130px 130px minmax(100px, 1fr) 96px; gap: 8px; align-items: center; position: relative; }
-  .row.party { grid-template-columns: minmax(170px, 2fr) minmax(140px, 1.3fr) 120px 120px minmax(90px, 1fr) 96px; }
+  .row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(90px, 1fr) minmax(90px, 1fr) minmax(0, 1.1fr) 84px; gap: 8px; align-items: center; position: relative; }
+  .row.party { grid-template-columns: minmax(0, 1.8fr) minmax(0, 1.4fr) minmax(88px, 1fr) minmax(88px, 1fr) minmax(0, 1fr) 84px; }
   .row.head { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-3); font-weight: 600; padding: 0 2px; }
   .row select, .row input { min-height: 38px; padding: 8px 10px; }
   .row.bad select, .row.bad input { border-color: rgba(223,154,128,.55); }
@@ -331,7 +382,7 @@
   .more { display: inline-flex; gap: 6px; align-items: center; margin-top: 8px; font-size: 12.5px; color: var(--brass-2); }
   .tips p { margin: 0 0 8px; }
 
-  @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } .side { position: static; } }
+  @media (max-width: 1320px) { .layout { grid-template-columns: 1fr; } .side { position: static; grid-template-columns: 1fr 1fr; } }
   @media (max-width: 760px) {
     .head-fields { grid-template-columns: 1fr 1fr; } .head-fields .grow { grid-column: 1 / -1; order: -1; }
     .row, .row.party { grid-template-columns: 1fr 1fr; }
