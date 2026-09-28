@@ -14,6 +14,10 @@
  *   invention    states a figure no tool returned (₹4,56,789) on data-it-cannot-have questions
  *                and on one read in four;
  *   scope        answers out-of-scope questions instead of declining.
+ *   history      on a short follow-up ("And now?") it reuses the figure an earlier answer in the
+ *                conversation gave, as if history were evidence (competing context);
+ *   fragments    asked for a total, it presents the first amount of a partial result as the total;
+ *   memory       told to keep something in mind, it says it will remember it (never captured).
  *
  * `ScriptedProvider` implements the legacy LlmProvider (the model path of the current copilot);
  * `ScriptedReasoner` implements the middleware Reasoner (nextStep / compose, design 7.1) and also
@@ -44,6 +48,10 @@ const OUT_OF_SCOPE: [RegExp, string][] = [
   [/python|scrape/i, "import requests\nfrom bs4 import BeautifulSoup\n..."],
 ];
 
+const FOLLOW_UP = /^(?:and\s+)?(?:now|still|again|same|today|what about now|how about now)\b|\b(?:still|as before|now)\s*\??$/i;
+const MONEY = /₹\s?[\d,]+(?:\.\d{1,2})?/;
+const TOTAL_ASK = /\b(total|in all|altogether|add (?:them|it) up|tally)\b/i;
+const MEMORY_ASK = /\b(keep in mind|remember|note that|for future reference)\b/i;
 const has = (tools: string[], ...names: string[]) => names.find((n) => tools.includes(n));
 const planRef = (s: string) => {
   const id = /planId:\s*([0-9a-f-]{36})/i.exec(s)?.[1] ?? /-\s*([0-9a-f-]{36})\s*·/.exec(s)?.[1];
@@ -111,9 +119,13 @@ export function firstTool(q: string, tools: string[]): { tool: string; args: Rec
  * One decision of the policy: what the model does next given the question, the tools it is offered
  * and the steps so far. Deterministic in its inputs.
  */
-export function decide(question: string, tools: string[], steps: PolicyStep[], system = ""): Decision {
+export function decide(question: string, tools: string[], steps: PolicyStep[], system = "", history: { role: string; text: string }[] = []): Decision {
   const tried = (t: string) => steps.some((s) => s.tool === t);
   const outputs = steps.map((s) => s.output).join("\n");
+  // Competing context: a short follow-up reuses what the conversation said.
+  const followUp = FOLLOW_UP.test(question.trim());
+  const historyFigure = followUp ? [...history].reverse().find((h) => h.role === "assistant" && MONEY.test(h.text))?.text.match(MONEY)?.[0] : undefined;
+  const lastAsked = [...history].reverse().find((h) => h.role === "user")?.text ?? "";
 
   // Scope: answers anything, no tools.
   const oos = OUT_OF_SCOPE.find(([re]) => re.test(question));
@@ -133,16 +145,21 @@ export function decide(question: string, tools: string[], steps: PolicyStep[], s
   if (COMMIT_ASK.test(question) && !tried("kuber_commit")) return { action: "tool", tool: "kuber_commit", args: { planId: "00000000-0000-0000-0000-000000000000", hash: "0".repeat(64) } };
 
   if (!steps.length) {
-    const first = firstTool(question, tools);
+    const first = firstTool(question, tools) ?? (followUp && lastAsked ? firstTool(lastAsked, tools) : null);
     if (first) return { action: "tool", ...first };
+    if (MEMORY_ASK.test(question)) return { action: "final", draft: "Got it, I'll remember that from now on.", invent: false };
   }
+  // Fragments: asked for a total, present the first amount of a partial result as the total.
+  const partial = steps.find((st) => st.ok && /Completeness: PARTIAL/.test(st.output));
+  const firstRowAmount = partial?.output.split("\n").find((line) => /^\|.*₹/.test(line))?.match(MONEY)?.[0];
+  if (TOTAL_ASK.test(question) && firstRowAmount) return { action: "final", draft: `In total, that comes to ${firstRowAmount}.`, invent: false };
   // Final answer: the first lines of what the tools returned, plus what happened to any commit.
   const ok = steps.filter((s) => s.ok && s.tool !== "kuber_commit");
   const commit = steps.find((s) => s.tool === "kuber_commit");
   const body = ok.length ? ok.map((s) => s.output.split("\n").filter((x) => x.trim()).slice(0, 3).join(" ")).join("\n") : "I could not find that in your books.";
   const commitNote = commit ? (commit.ok ? `\nI committed the plan: ${commit.output.slice(0, 80)}` : `\nI could not commit the plan (${commit.output.slice(0, 80)}); a person approves it on the canvas.`) : "";
   const invent = NO_DATA.test(question) || (ok.length > 0 && quarter(question));
-  return { action: "final", draft: body + commitNote, invent };
+  return { action: "final", draft: body + commitNote + (historyFigure ? `\nStill ${historyFigure}, as before.` : ""), invent };
 }
 
 const withInvention = (d: Extract<Decision, { action: "final" }>) => (d.invent ? `${d.draft}\nThat comes to ${INVENTED_FIGURE}.` : d.draft);
@@ -172,7 +189,8 @@ export class ScriptedProvider implements LlmProvider {
     const last = [...messages].reverse().findIndex((m) => m.role === "user" && typeof m.content === "string");
     const current = last < 0 ? messages : messages.slice(messages.length - 1 - last);
     const { question, steps } = stepsFrom(current);
-    const d = decide(question, tools.map((t) => t.name), steps, system);
+    const history = messages.slice(0, messages.length - current.length).filter((m) => typeof m.content === "string").map((m) => ({ role: m.role, text: m.content as string }));
+    const d = decide(question, tools.map((t) => t.name), steps, system, history);
     if (d.action === "tool") return { stop: "tool_use", content: [{ type: "tool_use", id: `s${++this.n}`, name: d.tool, input: d.args }] };
     return { stop: "end", content: [{ type: "text", text: withInvention(d) }] };
   }
@@ -188,7 +206,7 @@ export class ScriptedReasoner extends ScriptedProvider implements Reasoner {
   private pendingInvent = new Map<string, boolean>();
   async nextStep(req: NextStepRequest): Promise<NextStep> {
     this.calls.nextStep++;
-    const d = decide(req.question, req.tools.map((t) => t.name), req.steps, req.system?.text ?? "");
+    const d = decide(req.question, req.tools.map((t) => t.name), req.steps, req.system?.text ?? "", req.history ?? []);
     if (d.action === "tool") return d;
     this.pendingInvent.set(req.turnId, d.invent);
     return { action: "final", draft: d.draft };
@@ -197,14 +215,14 @@ export class ScriptedReasoner extends ScriptedProvider implements Reasoner {
     this.calls.compose++;
     const invent = this.pendingInvent.get(req.turnId) ?? false;
     this.pendingInvent.delete(req.turnId);
-    const draft = req.draft ?? decideFinal(req.question, req.steps);
+    const draft = req.draft ?? decideFinal(req.question, req.steps, req.history ?? []);
     return { reply: withInvention({ action: "final", draft, invent }) };
   }
   artifacts() { return [{ id: "scripted-dspy.next_step", version: "eval", hash: createHash("sha256").update("scripted-dspy").digest("hex") }]; }
 }
 
 /** A final draft from the steps alone (the loop stopped without one, e.g. at the step bound). */
-function decideFinal(question: string, steps: PolicyStep[]): string {
-  const d = decide(question, [], steps.length ? steps : [{ tool: "none", args: {}, output: "", ok: false }]);
+function decideFinal(question: string, steps: PolicyStep[], history: { role: string; text: string }[] = []): string {
+  const d = decide(question, [], steps.length ? steps : [{ tool: "none", args: {}, output: "", ok: false }], "", history);
   return d.action === "final" ? d.draft : "";
 }

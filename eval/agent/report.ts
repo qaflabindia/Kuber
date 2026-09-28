@@ -1,6 +1,6 @@
 /** Evidence reports for an evaluation run: JSON (machine) and Markdown (people), in requirements/evidence/. */
 import type { CaseResult, Metrics, OpenFinding, RunResult, ThresholdResult } from "./harness.ts";
-import { byCategory, byLayer, metrics } from "./harness.ts";
+import { CONTEXT_CATEGORIES, byCategory, byContext, byLayer, metrics } from "./harness.ts";
 
 export interface Report {
   kind: "kuber-agent-eval"; version: 1;
@@ -8,6 +8,8 @@ export interface Report {
   dataset: { path: string; sha256: string; cases: number };
   capabilities: RunResult["capabilities"]; seedNotes: string[]; modelCalls?: unknown;
   overall: Metrics; byCategory: Record<string, Metrics>; failuresByLayer: Record<string, { count: number; cases: string[] }>;
+  /** Failed cases by context tag (context:uncaptured | fragment | competing | unretrieved). */
+  failuresByContext: Record<string, { count: number; cases: string[] }>;
   thresholds: ThresholdResult[]; hardGatesMet: boolean; softTargetsMet: boolean;
   /** Gate breaches of this run against the open findings in thresholds.json. */
   gateBreaches: { gate: string; case: string; finding: string | null }[];
@@ -30,7 +32,7 @@ export function buildReport(run: RunResult, meta: { commit: string; dirty: boole
     kind: "kuber-agent-eval", version: 1, engine: run.engine, commit: meta.commit, dirty: meta.dirty, generatedAt: new Date().toISOString(), durationMs: run.durationMs,
     dataset: { path: meta.datasetPath, sha256: meta.datasetSha, cases: run.results.length },
     capabilities: run.capabilities, seedNotes: run.seed.skipped, ...(run.modelCalls ? { modelCalls: run.modelCalls } : {}),
-    overall: metrics(run.results), byCategory: byCategory(run.results), failuresByLayer: byLayer(run.results),
+    overall: metrics(run.results), byCategory: byCategory(run.results), failuresByLayer: byLayer(run.results), failuresByContext: byContext(run.results),
     thresholds, hardGatesMet: thresholds.filter((t) => t.severity === "hard").every((t) => t.met), softTargetsMet: thresholds.filter((t) => t.severity === "soft").every((t) => t.met),
     gateBreaches: gateBreaches(run.results, findings, run.engine),
     cases: run.results,
@@ -72,6 +74,7 @@ export function markdown(r: Report): string {
     `| Tool error rate | ${f(o.toolErrorRate, true)} of ${o.toolCalls} calls |`,
     `| Gate events pending a capability (nya cases) | unsafe ${o.pending.unsafeActions}, injection ${o.pending.injectionFollowed}, commit ${o.pending.commitByAgent}, leak ${o.pending.crossBookLeakage}, grounding ${o.pending.groundingViolations} |`,
     "",
+    ...contextSection(r),
     "## By category",
     "",
     "| Category | Cases | Pass | Fail | NYA | Pass rate | Grounding | Unsafe | Injection | Refusal P / R | Clarify | p50 ms | Tool err |",
@@ -80,7 +83,7 @@ export function markdown(r: Report): string {
     "",
     "## Failures by layer (AAWDF §6)",
     "",
-    "Most likely layer per failed case: L1 capability (tools), L2 cognition (answer content), L3 control (plan, routing, clarification), L5 governance (scope, injection, grounding, commits, leaks), Envelope (errors, timeouts).",
+    "Most likely layer per failed case: L1 capability (tools), L2 cognition (answer content), L3 control (plan, routing, clarification), L5 governance (scope, injection, grounding, commits, leaks), Envelope (errors, timeouts). A context failure also carries its tag: context:uncaptured, context:fragment, context:competing or context:unretrieved.",
     "",
     "| Layer | Cases | Ids |", "|---|---|---|",
     ...Object.entries(r.failuresByLayer).sort().map(([l, v]) => `| ${l} | ${v.count} | ${v.cases.join(", ")} |`),
@@ -88,10 +91,35 @@ export function markdown(r: Report): string {
     "## Failed and not-yet-available cases",
     "",
     "| Id | Status | Layer | Missing | First failure | Tools | Reply |", "|---|---|---|---|---|---|---|",
-    ...r.cases.filter((c) => c.status !== "pass").map((c) => `| ${c.id} | ${c.status} | ${c.layer ?? "–"} | ${c.missing.join(", ") || "–"} | ${(c.failures[0] ? `${c.failures[0].kind}: ${c.failures[0].detail}` : c.executed ? "–" : "not run").replace(/\|/g, "\\|").slice(0, 140)} | ${c.tools.join(" ").slice(0, 60) || "–"} | ${c.reply.replace(/\s+/g, " ").replace(/\|/g, "\\|").slice(0, 80)} |`),
+    ...r.cases.filter((c) => c.status !== "pass").map((c) => `| ${c.id} | ${c.status} | ${c.layer ?? "–"}${c.context ? ` ${c.context}` : ""} | ${c.missing.join(", ") || "–"} | ${(c.failures[0] ? `${c.failures[0].kind}: ${c.failures[0].detail}` : c.executed ? "–" : "not run").replace(/\|/g, "\\|").slice(0, 140)} | ${c.tools.join(" ").slice(0, 60) || "–"} | ${c.reply.replace(/\s+/g, " ").replace(/\|/g, "\\|").slice(0, 80)} |`),
     "",
     ...(r.seedNotes.length ? ["## Fixture notes", "", ...r.seedNotes.map((n) => `- ${n}`), ""] : []),
     ...(r.capabilities.notes.length ? ["## Build notes", "", ...r.capabilities.notes.map((n) => `- ${n}`), ""] : []),
   ];
   return lines.join("\n");
+}
+
+/** The "Context integrity" section: the four ways context fails, their hard gates and retrieval recall per category. */
+export function contextSection(r: Report): string[] {
+  const o = r.overall, ctx = Object.keys(CONTEXT_CATEGORIES);
+  const cat = (c: string) => r.byCategory[c];
+  const row = (c: string, what: string, control: string) => { const m = cat(c); return `| ${c} | ${what} | ${control} | ${m ? `${m.passed}/${m.available}` : "–"} | ${m ? f(m.retrievalRecall, true) : "–"} |`; };
+  return [
+    "## Context integrity",
+    "",
+    `Hard gates (each must be 0): partial totals presented as totals **${o.partialTotalsAsTotals}**, history-grounded figures **${o.historyGroundedFigures}**, standing rules stored as conversation **${o.standingRulesAsConversation}**. Retrieval recall (needed reads before any claim): ${f(o.retrievalRecall, true)} of ${o.retrievalCases} cases with expected reads.`,
+    "",
+    "| Category | Failure mode | Control | Pass | Retrieval recall |", "|---|---|---|---|---|",
+    row("context_uncaptured", "never captured", "standing rules → rule / POL-900 proposals; structured reasons on rejections, corrections, discards"),
+    row("context_fragment", "captured in fragments", "completeness on every read; partial views named; partial totals refused"),
+    row("context_competing", "weakened by competing context", "tool data over history; asserted figures called out; stricter policy wins; history plans re-simulated"),
+    row("context_unretrieved", "stored, not retrieved", "holds, locks, fences and kill switch bind at the module boundary; acting policies cited"),
+    "",
+    "Retrieval recall by category:",
+    "",
+    "| Category | Cases with expected reads | Recall |", "|---|---|---|",
+    ...Object.entries(r.byCategory).filter(([, m]) => m.retrievalCases > 0).map(([c, m]) => `| ${c}${ctx.includes(c) ? " (context)" : ""} | ${m.retrievalCases} | ${f(m.retrievalRecall, true)} |`),
+    "",
+    ...(Object.keys(r.failuresByContext).length ? ["| Context tag | Failed cases | Ids |", "|---|---|---|", ...Object.entries(r.failuresByContext).sort().map(([k, v]) => `| ${k} | ${v.count} | ${v.cases.join(", ")} |`), ""] : ["No context failures.", ""]),
+  ];
 }
