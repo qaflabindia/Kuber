@@ -24,10 +24,10 @@
 import { canonical, sha256 } from "@kuber/contracts";
 import type { Nature } from "./types.ts";
 import type { IcSchedule } from "./ic.ts";
-import { bp, minus, one, pct, share, type Fraction, type GroupState, type PerimeterEntry } from "./register.ts";
+import { bp, minus, one, pct, share, type Fraction, type GroupState, type PerimeterEntry, ownershipOn } from "./register.ts";
 
 /** Version of these rules: part of every run's input hash and every group snapshot. */
-export const RULES_VERSION = "kuber-consolidation/1";
+export const RULES_VERSION = "kuber-consolidation/2";
 
 export interface TbRow { accountId: string; name: string; nature: Nature; taxonomyTag: string | null; balance: bigint }
 /** One entity's input: its trial balance at the period end and its IC schedule at the same ledger position. */
@@ -96,6 +96,21 @@ export const journalContentHash = (j: Pick<ConsolJournal, "key" | "narration" | 
 
 export function consolidate(g: GroupState, periodEnd: string, periodStart: string, perim: PerimeterEntry[], packs: Map<string, EntityPack>, stock: StockInput[]): EngineResult {
   const problems: string[] = [];
+  // End-of-period packs cannot separate pre-acquisition results or calculate disposal gains.
+  // Block these cases instead of silently consolidating a whole year's results at closing ownership.
+  for (const r of g.ownership) {
+    if (r.effectiveFrom <= periodStart || r.effectiveFrom > periodEnd) continue;
+    const opening = ownershipOn(g, periodStart, r.childEntityId);
+    if (!opening || opening.parentEntityId !== r.parentEntityId || opening.ownershipBp !== r.ownershipBp || opening.method !== r.method) {
+      problems.push(`${r.childEntityId}: mid-period ownership change on ${r.effectiveFrom} needs acquisition/disposal stub-period packs; consolidation is blocked until these are supported`);
+    }
+  }
+  for (const p of perim) {
+    const acquired = p.record?.acquisition?.date;
+    if (p.method !== "excluded" && acquired && acquired > periodStart && acquired <= periodEnd) {
+      problems.push(`${p.entityId}: acquisition on ${acquired} needs a post-acquisition stub-period pack; consolidation is blocked until these are supported`);
+    }
+  }
   const groupAccounts = new Map<string, GroupAccount>();
   const aggregate = new Map<string, { total: bigint; byEntity: Record<string, bigint> }>();
   const exclusions = perim.filter((p) => p.method === "excluded").map((p) => ({ entityId: p.entityId, reason: p.exclusion ?? "excluded" }));
@@ -218,7 +233,33 @@ export function consolidate(g: GroupState, periodEnd: string, periodStart: strin
   for (const st of stock) {
     const seller = byId.get(st.sellerEntityId), buyer = byId.get(st.buyerEntityId);
     const inFull = (p: PerimeterEntry | undefined) => !!p && (p.method === "parent" || p.method === "full");
-    if (!inFull(seller) || !inFull(buyer)) { problems.push(`unrealised profit ${st.sellerEntityId} → ${st.buyerEntityId}: both entities must be consolidated in full (associates' unrealised profit is not supported)`); continue; }
+    if (st.sellerEntityId === st.buyerEntityId || st.closingStockPaise < 0n) {
+      problems.push(`unrealised profit ${st.sellerEntityId} → ${st.buyerEntityId}: needs different entities and non-negative closing stock`); continue;
+    }
+    const associate = seller?.method === "equity" ? seller : buyer?.method === "equity" ? buyer : undefined;
+    if (associate) {
+      const other = associate === seller ? buyer : seller;
+      // The current packs do not carry subsidiary attribution for an associate held through a chain.
+      if (other?.method !== "parent" || associate.investor !== other.entityId) {
+        problems.push(`unrealised profit ${st.sellerEntityId} → ${st.buyerEntityId}: associate stock elimination currently requires its direct group parent`); continue;
+      }
+      const margin = st.marginBp ?? seller?.record?.marginBp;
+      if (margin === undefined || !Number.isInteger(margin) || margin < 0 || margin > 10000) {
+        problems.push(`unrealised profit ${st.sellerEntityId} → ${st.buyerEntityId}: needs a margin between 0 and 10000 basis points`); continue;
+      }
+      const totalProfit = share(st.closingStockPaise, bp(margin));
+      const eliminated = share(totalProfit, associate.interest);
+      const upstream = associate === seller;
+      const creditAccount = upstream ? gaOf(st.buyerEntityId, st.buyerInventoryAccount, "asset") : "GRP.equity_investees";
+      add("urp-associate", `${st.sellerEntityId}>${st.buyerEntityId}`, `Eliminate the group's share of unrealised profit on ${upstream ? "upstream" : "downstream"} stock with associate ${associate.entityId}`,
+        [[upstream ? "GRP.share_of_associates" : "GRP.unrealised_profit", eliminated], [creditAccount, -eliminated]], [
+          `closing stock at transfer price ${rs(st.closingStockPaise)} × margin ${(margin / 100).toFixed(2)}% = unrealised profit ${rs(totalProfit)}`,
+          `group interest in ${associate.entityId} ${pct(associate.interest)} × ${rs(totalProfit)} = ${rs(eliminated)} eliminated`,
+          upstream ? "reduce share of associate profit and the parent's inventory" : "reduce group profit and the investment in the associate",
+        ]);
+      continue;
+    }
+    if (!inFull(seller) || !inFull(buyer)) { problems.push(`unrealised profit ${st.sellerEntityId} → ${st.buyerEntityId}: entities must be inside the consolidation perimeter`); continue; }
     const margin = st.marginBp ?? seller!.record?.marginBp;
     if (margin === undefined) { problems.push(`unrealised profit ${st.sellerEntityId} → ${st.buyerEntityId}: no margin in the register or the input`); continue; }
     const urp = share(st.closingStockPaise, bp(margin));

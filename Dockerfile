@@ -17,6 +17,7 @@ COPY modules/reporting/package.json modules/reporting/
 COPY modules/ops/package.json modules/ops/
 COPY modules/evidence/package.json modules/evidence/
 COPY modules/identity/package.json modules/identity/
+COPY modules/consolidation/package.json modules/consolidation/
 COPY apps/core/package.json apps/core/
 COPY apps/web/package.json apps/web/
 RUN pnpm install --frozen-lockfile

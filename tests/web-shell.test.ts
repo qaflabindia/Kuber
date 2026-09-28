@@ -44,7 +44,7 @@ describe("navigation menu: role-aware, with waiting counts as badges", () => {
 
   it("a reader sees the books, cash, close and reports, but not import or administration", () => {
     const h = hrefs(["read"]);
-    expect(h).toEqual(expect.arrayContaining(["/", "/review", "/confirm", "/ledger", "/bank", "/close", "/statements", "/reports/balance-sheet"]));
+    expect(h).toEqual(expect.arrayContaining(["/", "/cfo", "/review", "/confirm", "/ledger", "/bank", "/close", "/statements", "/reports/balance-sheet"]));
     expect(h).not.toContain("/import");
     expect(h).not.toContain("/settings/members");
     expect(h).not.toContain("/migration");

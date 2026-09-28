@@ -330,7 +330,7 @@ describe("FIN-GRP-04 certified group close", () => {
     const body = data<{ contentHash: string; body: { inputs: { entityId: string; packHash: string; source: string }[]; registerVersion: number; rulesVersion: string; eliminations: unknown[] } }>(c);
     expect(body.body.inputs.map((i) => [i.entityId, i.source])).toEqual([["A", "certified"], ["P", "certified"], ["S", "certified"]]);
     expect(body.body.inputs.every((i) => /^[0-9a-f]{64}$/.test(i.packHash))).toBe(true);
-    expect(body.body.rulesVersion).toBe("kuber-consolidation/1");
+    expect(body.body.rulesVersion).toBe("kuber-consolidation/2");   // rules v2: mid-period ownership blocks, associate URP
     expect(body.body.eliminations).toHaveLength(6);
     expect((await commit(c)).status).toBe("committed");
     const closes = await cell.consolidation.closes(T, "g1");

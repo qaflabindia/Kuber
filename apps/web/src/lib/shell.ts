@@ -100,6 +100,7 @@ export function navSections(sh: Shell): NavSection[] {
     { id: "workspace", label: "Workspace", items: [
       { href: "/", label: "Canvas", icon: "home", match: [], keywords: "home ask kuber copilot plans approve",
         badge: badge(sh.pendingPlans, "brass") },
+      ...(has("read") ? [{ href: "/cfo", label: "CFO briefing", icon: "today", keywords: "focus cash exceptions scenarios board group consolidation" }] : []),
     ] },
   ];
   if (reads) {
