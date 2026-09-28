@@ -7,8 +7,8 @@ import type { LayoutServerLoad } from "./$types";
 const EXTERNAL_HOME: Record<string, string> = { customer: "/portal", supplier: "/portal", investor: "/investor", guest: "/investor" };
 
 /**
- * The shell's data. There is no menu: the rail shows only what is waiting for the person
- * (plans to approve, drafts to review, postings to confirm); everything else is reached from the canvas.
+ * The shell's data: the member's permissions (for the role-aware menu, lib/shell.ts navSections) and
+ * the counts of what is waiting for them (shown as badges on the pages that hold the work).
  */
 export const load: LayoutServerLoad = async ({ locals, url }) => {
   const s = locals.session;

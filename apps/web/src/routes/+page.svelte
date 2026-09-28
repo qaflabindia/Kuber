@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { takePendingAsk } from "$lib/ask.svelte";
   import { enhance } from "$app/forms";
   import { page } from "$app/state";
   import { tick } from "svelte";
@@ -31,7 +32,13 @@
   /** "kuber_income_breakdown" -> "income breakdown" for the trace line. */
   const toolLabel = (t: string) => t.replace(/^kuber_/, "").replace(/^ext_/, "external ").replace(/_/g, " ");
 
-  $effect(() => { if (page.url.searchParams.has("ask")) input?.focus(); });
+  $effect(() => {
+    if (!page.url.searchParams.has("ask")) return;
+    input?.focus();
+    // A question typed in the command palette (lib/ask.svelte.ts): submit it once, as if typed here.
+    const handed = takePendingAsk();
+    if (handed) ask(handed);
+  });
 
   async function ask(t: string) { text = t; await tick(); form.requestSubmit(); }
   function onKey(e: KeyboardEvent) {
