@@ -13,8 +13,8 @@
     {
       "kind": "tool_register",
       "id": "tool_register",
-      "version": "1.1.0",
-      "sha256": "49a9c10b6d6818c3442568199c35a4c9d5a14ef0ea351e2bd778ebc90733e43b",
+      "version": "1.2.0",
+      "sha256": "6313f795cbe47bae273989cb0281e8d343a370254843e9e1f6485ab9fe0de2df",
       "approver": "Pending — System Owner",
       "approvedAt": "pending",
       "file": "tools.register.json"

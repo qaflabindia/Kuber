@@ -227,6 +227,18 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
       effectiveFrom: IsoDate.optional(), terms: PartyTerms.optional(), taxStatus: TaxStatus.optional() }).parse(req.body);
     return reply.code(201).send(await cell.parties.register(tenant, principal, b));
   });
+  // The party picker (Record screen): id, name, kind and payment hold of each party, no bank details.
+  app.get<{ Params: { tenant: string }; Querystring: { kind?: string } }>("/v1/tenants/:tenant/parties", async (req) => {
+    const { tenant } = await who(req, "read", { allBooks: true });
+    const kind = z.enum(["vendor", "customer", "both"]).optional().parse(req.query.kind || undefined);
+    const rows = await cell.parties.list(tenant, { kind, limit: 500 });
+    const named: { partyId: string; name: string; kind: string; entityId: string; hold: boolean }[] = [];
+    for (let i = 0; i < rows.length; i += 25) {
+      const views = await Promise.all(rows.slice(i, i + 25).map((r) => cell.parties.get(tenant, r.partyId)));
+      views.forEach((v, j) => { const r = rows[i + j]!; named.push({ partyId: r.partyId, name: (v as { name?: string } | null)?.name ?? r.partyId, kind: r.kind, entityId: r.entityId, hold: r.hold }); });
+    }
+    return named;
+  });
   app.get<{ Params: { tenant: string } }>("/v1/tenants/:tenant/parties/reviews", async (req) => {
     const { tenant } = await who(req, "read", { allBooks: true });
     return cell.parties.reviews(tenant);
@@ -510,10 +522,20 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     const { tenant, member } = await who(req, "read");
     return (await cell.reporting.books(tenant) as unknown as { book_id: string }[]).filter((b) => inScope(member, b.book_id));
   });
-  app.get<P>("/v1/tenants/:tenant/books/:book/accounts", async (req) => cell.reporting.accounts((await who(req, "read")).tenant, req.params.book));
+  // Accounts with their balance (reporting) and the GL's control and money-account flags (the Record screen needs them).
+  app.get<P>("/v1/tenants/:tenant/books/:book/accounts", async (req) => {
+    const { tenant } = await who(req, "read");
+    const [rows, st] = await Promise.all([cell.reporting.accounts(tenant, req.params.book), cell.gl.state(tenant, req.params.book)]);
+    return (rows as unknown as { account_id: string }[]).map((r) => {
+      const a = st.accounts.get(r.account_id);
+      return { ...r, is_control: !!a?.isControl, is_cash_like: !!a?.isCashLike, required_dims: a?.requiredDims ?? [] };
+    });
+  });
   app.get<R>("/v1/tenants/:tenant/books/:book/journals", async (req) => {
-    const limit = Number((req.query as { limit?: string }).limit ?? 20);
-    return cell.reporting.recentJournals((await who(req, "read")).tenant, req.params.book, Number.isFinite(limit) ? limit : 20);
+    const q = req.query as { limit?: string; before?: string };
+    const limit = Number(q.limit ?? 20), before = q.before ? Number(q.before) : undefined;
+    return cell.reporting.recentJournals((await who(req, "read")).tenant, req.params.book, Number.isFinite(limit) ? limit : 20,
+      before !== undefined && Number.isInteger(before) && before > 0 ? before : undefined);
   });
   // ------------------------------------------------------------ copilot and MCP
   app.get<P>("/v1/tenants/:tenant/copilot", async (req) => { await who(req, "read"); return { engine: copilot.engine, suggestions: HELP, groups: HELP_GROUPS }; });

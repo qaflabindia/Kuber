@@ -100,6 +100,7 @@ export function navSections(sh: Shell): NavSection[] {
     { id: "workspace", label: "Workspace", items: [
       { href: "/", label: "Canvas", icon: "home", match: [], keywords: "home ask kuber copilot plans approve",
         badge: badge(sh.pendingPlans, "brass") },
+      ...(has("plan.prepare") ? [{ href: "/record", label: "Record", icon: "edit", keywords: "new transaction voucher payment receipt contra journal sales purchase invoice bill entry" }] : []),
       ...(has("read") ? [{ href: "/cfo", label: "CFO briefing", icon: "today", keywords: "focus cash exceptions scenarios board group consolidation" }] : []),
     ] },
   ];
@@ -108,7 +109,8 @@ export function navSections(sh: Shell): NavSection[] {
       { href: "/review", label: "Review", icon: "review", keywords: "drafts entries approve reject",
         badge: badge(sh.reviewCount, sh.awaitingApproval ? "clay" : "brass") },
       { href: "/confirm", label: "Confirm", icon: "confirm", keywords: "ratify automatic postings", badge: badge(sh.confirmCount, "brass") },
-      { href: "/ledger", label: "Ledger", icon: "ledger", keywords: "accounts chart journals balances" },
+      { href: "/journals", label: "Day book", icon: "list", keywords: "journals entries vouchers transactions history" },
+      { href: "/ledger", label: "Ledger", icon: "ledger", keywords: "accounts chart balances" },
       ...(has("capture") ? [{ href: "/import", label: "Import", icon: "import", keywords: "statement upload csv bank file" }] : []),
     ] });
     sections.push({ id: "cash", label: "Cash & close", items: [

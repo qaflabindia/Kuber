@@ -1,9 +1,9 @@
 {
-  "version": "1.1.0",
+  "version": "1.2.0",
   "owner": "System Owner (Unassigned)",
-  "approvedBy": "Pending \u2014 System Owner",
+  "approvedBy": "Pending — System Owner",
   "approvedAt": "pending",
-  "changeNote": "Initial register: every ops operation, kuber_commit (disabled for the copilot) and the read tools. External ext_* tools are denied until listed here by exact name (F17). 1.1.0: kuber_propose_rule and kuber_propose_policy_change (standing rules stated in chat become governed proposals).",
+  "changeNote": "Initial register: every ops operation, kuber_commit (disabled for the copilot) and the read tools. External ext_* tools are denied until listed here by exact name (F17). 1.1.0: kuber_propose_rule and kuber_propose_policy_change (standing rules stated in chat become governed proposals). 1.2.0: kuber_journal (multi-line vouchers from the Record screen).",
   "policy": "Default deny: a tool not listed here, or listed with enabled false, is refused. The copilot may run only tools whose reversibility is none or simulation.",
   "tools": [
     {
@@ -20,6 +20,21 @@
       "op": "record",
       "onCommit": "reversible",
       "note": "Plan one transaction; commit posts a journal, undone by a reversing entry."
+    },
+    {
+      "name": "kuber_journal",
+      "owner": "Financial Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial",
+        "counterparty"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "op": "journal",
+      "onCommit": "reversible",
+      "note": "Plan a multi-line voucher (payment, receipt, contra, journal, sales, purchase); commit posts one journal, undone by a reversing entry."
     },
     {
       "name": "kuber_post",

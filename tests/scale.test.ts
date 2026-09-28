@@ -340,6 +340,7 @@ describe("snapshots, cache and indexed queries on PostgreSQL (F10, F11)", () => 
       rebalance: { targets: [{ account: "BANK", pct: "70" }, { account: "CASH", pct: "30" }] },
       close: { periodEnd: "2026-03-31" }, carry_forward: { yearEnd: "2026-03-31" },
       record: { narration: "Plumber", amount: "450", direction: "out", account: "living", via: "CASH" },
+      journal: { voucherType: "payment", narration: "Rent and GST", lines: [{ account: "BIZEXP", debit: "1000" }, { account: "GSTIN", debit: "180" }, { account: "BANK", credit: "1180" }] },
       simulate: { entries: [{ narration: "Laptop", amount: "90000", direction: "out", account: "bizexp", via: "BANK" }], monthlyChange: { expenses: 15000 } },
       post: {},
     };
@@ -381,8 +382,8 @@ describe("snapshots, cache and indexed queries on PostgreSQL (F10, F11)", () => 
   it("recent journals and drill-through match the whole-history queries they replace", async () => {
     const old = await cell.store.tenantTx(T, (tx) => tx`
       SELECT journal_id, max(seq) AS seq, max(txn_date)::text AS txn_date, max(narration) AS narration,
-             bool_or(provisional) AS provisional, max(reverses) AS reverses, max(principal) AS principal,
-             json_agg(json_build_object('accountId', account_id, 'amount', amount::text, 'partyId', party_id) ORDER BY line_no) AS lines
+             bool_or(provisional) AS provisional, max(reverses) AS reverses, max(principal) AS principal, max(voucher_type) AS voucher_type,
+             json_agg(json_build_object('accountId', account_id, 'amount', amount::text, 'partyId', party_id, 'memo', dimensions->>'memo') ORDER BY line_no) AS lines
       FROM reporting.lines WHERE tenant_id = ${T} AND book_id = ${B}
       GROUP BY journal_id ORDER BY max(seq) DESC LIMIT 7`);
     const now = await cell.reporting.recentJournals(T, B, 7);

@@ -72,9 +72,11 @@ export interface StatementBundle {
 }
 export interface KpiColumn { key: string; from: string; to: string; status: OutputStatus; value: string | null; exact: string | null; reasons: string[]; notes: string[] }
 export interface KpiReport { periods: { from: string; to: string }[]; periodStatus: FinColumn[]; metrics: { id: string; name: string; version: number; unit: string; owner: string; definitionStatus: string; basis?: string; columns: KpiColumn[] }[] }
-export interface Account { account_id: string; name: string; nature: "asset" | "liability" | "equity" | "income" | "expense"; parent_id: string | null; balance: string }
-export interface Line { accountId: string; amount: string; partyId?: string | null }
-export interface Journal { journal_id: string; seq: number; txn_date: string; narration: string; provisional: boolean; reverses: string | null; principal: string; lines: Line[] }
+export interface Account { account_id: string; name: string; nature: "asset" | "liability" | "equity" | "income" | "expense"; parent_id: string | null; balance: string;
+  is_control?: boolean; is_cash_like?: boolean; required_dims?: string[] }
+export interface Line { accountId: string; amount: string; partyId?: string | null; memo?: string | null }
+export interface Journal { journal_id: string; seq: number; txn_date: string; narration: string; provisional: boolean; reverses: string | null; principal: string; voucher_type?: string; lines: Line[] }
+export interface PartyOption { partyId: string; name: string; kind: string; entityId: string; hold: boolean }
 export interface Draft {
   draft_id: string; txn_id: string; book_id: string; status: "queued" | "awaiting_approval" | "rejected_by_gl"; created_at: string;
   /** Why the ledger refused the posting, when status is rejected_by_gl. */
@@ -110,7 +112,8 @@ export const api = (s: Pick<Session, "tenant" | "principal" | "sid"> & { stepUpA
   books: () => call<{ book_id: string; accounts: number }[]>(s, "GET", "/books"),
   openBook: (bookId: string, entityId: string, entityType: string) => call(s, "POST", "/books", { bookId, entityId, entityType }),
   accounts: (book: string) => call<Account[]>(s, "GET", `/books/${book}/accounts`),
-  journals: (book: string, limit = 20) => call<Journal[]>(s, "GET", `/books/${book}/journals?limit=${limit}`),
+  journals: (book: string, limit = 20, before?: number) => call<Journal[]>(s, "GET", `/books/${book}/journals?limit=${limit}${before ? `&before=${before}` : ""}`),
+  parties: () => call<PartyOption[]>(s, "GET", "/parties"),
   // A book-scoped member lists the drafts of one book (the core refuses a tenant-wide list for them).
   drafts: (book?: string) => call<Draft[]>(s, "GET", book ? `/drafts?book=${encodeURIComponent(book)}` : "/drafts"),
   /** `assertion`: the passkey signature over this approval, when it is above the approval limit (signed commands). */

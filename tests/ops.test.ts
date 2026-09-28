@@ -70,6 +70,30 @@ describe("simulate, then commit exactly that", () => {
     expect((await cell.gl.state(T, B)).seq).toBe(seq + 1);                   // one commit only
   });
 
+  it("journal: a multi-line voucher is checked (balance, voucher type, control accounts) and posts only on commit", async () => {
+    const unbalanced = await plan("journal", { voucherType: "payment", date: "2026-10-09", narration: "Office rent and GST",
+      lines: [{ account: "BIZEXP", debit: "10,000" }, { account: "GSTIN", debit: "1,800" }, { account: "BANK", credit: "11,000" }] });
+    expect(unbalanced.blocked).toBe(true);
+    expect(unbalanced.checks.find((c) => c.label === "Debits equal credits")).toMatchObject({ ok: false, detail: expect.stringMatching(/difference ₹800/) });
+    const notPayment = await plan("journal", { voucherType: "payment", date: "2026-10-09", narration: "Reclass",
+      lines: [{ account: "BIZEXP", debit: 100 }, { account: "LIVING", credit: 100 }] });
+    expect(notPayment.checks.find((c) => c.label.startsWith("A payment"))).toMatchObject({ ok: false });
+    const control = await plan("journal", { voucherType: "sales", date: "2026-10-09", narration: "Invoice 42",
+      lines: [{ account: "DEBTORS", debit: 1000 }, { account: "FEES", credit: 1000 }] });
+    expect(control.checks.find((c) => c.label.startsWith("Control accounts"))).toMatchObject({ ok: false, detail: expect.stringMatching(/line 1 \(DEBTORS\)/) });
+
+    const p = await plan("journal", { voucherType: "payment", date: "2026-10-09", narration: "Office rent and GST", reference: "INV-77",
+      lines: [{ account: "bizexp", debit: "10,000", memo: "October rent" }, { account: "GSTIN", debit: "1,800" }, { account: "CASH", credit: "11,800" }] });
+    expect(p.blocked).toBe(false);
+    expect(p.journals[0]).toMatchObject({ voucherType: "payment", narration: "Office rent and GST (ref INV-77)" });
+    expect(p.journals[0]!.lines.map((l) => [l.accountId, l.amount])).toEqual([["BIZEXP", "1000000"], ["GSTIN", "180000"], ["CASH", "-1180000"]]);
+    const seq = (await cell.gl.state(T, B)).seq;
+    expect(await commit(p)).toMatchObject({ status: "committed" });
+    const st = await cell.gl.state(T, B);
+    expect(st.seq).toBe(seq + 1);
+    expect([...st.journals.values()].some((j) => j.narration === "Office rent and GST (ref INV-77)")).toBe(true);
+  });
+
   it("refuses a tampered hash and a plan the books have moved past", async () => {
     const a = await plan("record", { narration: "Tea", amount: 20, direction: "out", account: "LIVING", via: "CASH", date: "2026-10-06" });
     await expect(cell.ops.commit(T, a.planId, OWNER, "0".repeat(64))).rejects.toThrow(/not the plan on record/);

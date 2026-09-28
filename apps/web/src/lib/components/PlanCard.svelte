@@ -10,7 +10,8 @@
   import DashboardView from "./DashboardView.svelte";
   import SignPrompt from "./SignPrompt.svelte";
 
-  let { plan, compact = false }: { plan: Plan; compact?: boolean } = $props();
+  /** `onsettled`: told the plan's new status after a commit or discard (the Record screen moves on to its result). */
+  let { plan, compact = false, onsettled }: { plan: Plan; compact?: boolean; onsettled?: (status: Plan["status"], message: string | null) => void } = $props();
 
   // Local copies: the card updates itself after commit/discard without reloading the page.
   let status = $state<Plan["status"]>("proposed");
@@ -24,7 +25,7 @@
   $effect.pre(() => { status = plan.status; });
   $effect.pre(() => { showDetail = !compact; });
 
-  const OP_LABEL: Record<string, string> = { record: "Record", post: "Post", balance: "Balance", reconcile: "Reconcile", allocate: "Allocate",
+  const OP_LABEL: Record<string, string> = { record: "Record", journal: "Voucher", post: "Post", balance: "Balance", reconcile: "Reconcile", allocate: "Allocate",
     rebalance: "Rebalance", close: "Close", carry_forward: "Carry forward", report: "Report", simulate: "What-if", dashboard: "Position",
     schedules: "Schedules", suspense: "Suspense",
     // read answers from the agent's tools (kind "read"; nothing to approve)
@@ -51,6 +52,7 @@
     const d = result.data ?? {};
     if (result.type === "success" && d.status) {
       status = d.status as Plan["status"]; message = (d.message as string) ?? null;
+      onsettled?.(status, message);
       await invalidateAll();
       // Approved drafts post asynchronously (agent -> bus -> ledger); refresh again once they land.
       if (plan.op === "post" && status === "committed") setTimeout(() => void invalidateAll(), 1500);

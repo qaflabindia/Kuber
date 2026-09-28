@@ -555,15 +555,17 @@ export class Reporting {
   }
 
   /** Most recent journals with their lines, newest first: pick the journals first, then read only their lines. */
-  async recentJournals(tenantId: string, bookId: string, limit = 20) {
+  /** Newest journals first (the day book); `beforeSeq` pages backwards. */
+  async recentJournals(tenantId: string, bookId: string, limit = 20, beforeSeq?: number) {
     const keys = await this.store.keys(tenantId);
     return openNarrations(keys, await this.store.tenantTx(tenantId, (tx) => tx<({ journal_id: string; narration: string } & Record<string, any>)[]>`
       WITH heads AS MATERIALIZED (
         SELECT journal_id FROM reporting.lines WHERE tenant_id = ${tenantId} AND book_id = ${bookId} AND line_no = 1
+          ${beforeSeq !== undefined ? tx`AND seq < ${beforeSeq}` : tx``}
         ORDER BY seq DESC LIMIT ${Math.min(Math.max(limit, 1), 200)})
       SELECT l.journal_id, max(l.seq) AS seq, max(l.txn_date)::text AS txn_date, max(l.narration) AS narration,
-             bool_or(l.provisional) AS provisional, max(l.reverses) AS reverses, max(l.principal) AS principal,
-             json_agg(json_build_object('accountId', l.account_id, 'amount', l.amount::text, 'partyId', l.party_id) ORDER BY l.line_no) AS lines
+             bool_or(l.provisional) AS provisional, max(l.reverses) AS reverses, max(l.principal) AS principal, max(l.voucher_type) AS voucher_type,
+             json_agg(json_build_object('accountId', l.account_id, 'amount', l.amount::text, 'partyId', l.party_id, 'memo', l.dimensions->>'memo') ORDER BY l.line_no) AS lines
       FROM reporting.lines l JOIN heads h ON h.journal_id = l.journal_id
       WHERE l.tenant_id = ${tenantId} AND l.book_id = ${bookId}
       GROUP BY l.journal_id ORDER BY max(l.seq) DESC`));

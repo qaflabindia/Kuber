@@ -13,7 +13,7 @@ import type { PolicyEngine } from "@kuber/policy";
 import type { Agent } from "@kuber/agent";
 import type { Reporting } from "@kuber/reporting";
 
-export type OpName = "record" | "post" | "balance" | "reconcile" | "allocate" | "rebalance" | "report" | "close" | "carry_forward" | "simulate" | "dashboard"
+export type OpName = "record" | "journal" | "post" | "balance" | "reconcile" | "allocate" | "rebalance" | "report" | "close" | "carry_forward" | "simulate" | "dashboard"
   // finance requirements: recurring and recognition schedules (FIN-GL-02/03), suspense resolution (FIN-GL-05)
   | "schedule_approve" | "schedule_cancel" | "schedules" | "resolve_suspense" | "suspense"
   // group consolidation (FIN-GRP-01..04, modules/consolidation), registered by the cell with Operations.register

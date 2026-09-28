@@ -128,6 +128,94 @@ export const record: OpDef<z.infer<typeof RecordInput>> = {
   },
 };
 
+// ---------------------------------------------------------------- capture: vouchers (multi-line)
+/** Voucher types a person records from the Record screen (Tally/Zoho vocabulary). */
+export const VOUCHER_TYPES = ["payment", "receipt", "contra", "journal", "sales", "purchase"] as const;
+const VoucherLine = z.object({
+  account: AccountId,
+  debit: Rupees.optional(), credit: Rupees.optional(),
+  party: z.string().min(1).max(200).optional().describe("party master id; required on control-account lines (debtors, creditors)"),
+  memo: z.string().max(200).optional(),
+  dimensions: z.record(z.string(), z.string()).optional(),
+});
+const JournalInput = z.object({
+  voucherType: z.enum(VOUCHER_TYPES).default("journal"),
+  date: IsoDate.optional(),
+  narration: z.string().min(2).max(200),
+  reference: z.string().max(60).optional().describe("the source document: invoice, bill or cheque number"),
+  lines: z.array(VoucherLine).min(2).max(50),
+  controlledAdjustment: z.object({ reason: z.string().min(3) }).optional()
+    .describe("superuser or controller only: control-account lines that are not a registered party's own posting"),
+});
+
+/**
+ * Voucher-type rules (what makes a payment a payment): checked in the plan so the person sees them before
+ * posting; the ledger's own rules (balance, open period, control accounts, suspense) are checked too.
+ */
+function voucherChecks(s: BookState, type: typeof VOUCHER_TYPES[number], lines: { account: string; dr: bigint; cr: bigint }[]): Check[] {
+  const acc = (id: string) => s.accounts.get(id);
+  const cash = (l: { account: string }) => !!acc(l.account)?.isCashLike;
+  const nat = (l: { account: string }, n: string) => acc(l.account)?.nature === n;
+  switch (type) {
+    case "payment": return [{ label: "A payment is paid out of a bank, cash or card account (credit)", ok: lines.some((l) => l.cr > 0n && cash(l)), blocking: true }];
+    case "receipt": return [{ label: "A receipt is received into a bank, cash or card account (debit)", ok: lines.some((l) => l.dr > 0n && cash(l)), blocking: true }];
+    case "contra": return [{ label: "A contra moves money between bank, cash and card accounts only", ok: lines.every(cash), blocking: true }];
+    case "sales": return [{ label: "A sale credits an income account", ok: lines.some((l) => l.cr > 0n && nat(l, "income")), blocking: true }];
+    case "purchase": return [{ label: "A purchase debits an expense or asset account", ok: lines.some((l) => l.dr > 0n && (nat(l, "expense") || nat(l, "asset"))), blocking: true }];
+    default: return [];
+  }
+}
+
+export const journal: OpDef<z.infer<typeof JournalInput>> = {
+  name: "journal", title: "Record a voucher", kind: "write", gate: "policy", event: "EVT-TXN-INGESTED",
+  description: "Record a voucher of several lines (payment, receipt, contra, journal, sales, purchase): each line debits or credits one account; debits must equal credits. Returns the journal it would post; nothing is posted until committed (and approved, where policy requires).",
+  input: JournalInput,
+  async plan(ctx, i) {
+    const s = ctx.state, checks: Check[] = [];
+    const date = i.date ?? ctx.today;
+    const rows = i.lines.map((l, n) => ({ ...l, n: n + 1, dr: l.debit ?? 0n, cr: l.credit ?? 0n }));
+    for (const r of rows) {
+      if (!s.accounts.has(r.account)) checks.push({ label: `Line ${r.n}: account ${r.account} exists`, ok: false, blocking: true, detail: `No account ${r.account} in this book` });
+      if ((r.dr > 0n) === (r.cr > 0n)) checks.push({ label: `Line ${r.n}: a debit or a credit, not both`, ok: false, blocking: true });
+      if (r.account === "SUSPENSE") checks.push({ label: `Line ${r.n}: not the suspense account`, ok: false, blocking: true, detail: "Suspense is cleared through Resolve suspense" });
+    }
+    const dr = rows.reduce((a, r) => a + r.dr, 0n), cr = rows.reduce((a, r) => a + r.cr, 0n);
+    checks.push({ label: "Debits equal credits", ok: dr === cr && dr > 0n, blocking: true, detail: dr === cr ? rs(dr) : `debits ${rs(dr)}, credits ${rs(cr)}: difference ${rs(dr - cr)}` });
+    if (checks.every((c) => c.ok)) checks.push(...voucherChecks(s, i.voucherType, rows));
+
+    // Control accounts (FIN-GL-01): a line naming a registered party is that party's subledger posting; any other
+    // control line is a manual entry, allowed only as a controlled adjustment by a superuser or controller.
+    const control = rows.filter((r) => s.accounts.get(r.account)?.isControl);
+    const named = control.map((r) => r.party).filter((p): p is string => !!p);
+    const registered = named.length && ctx.svc.parties?.entities ? await ctx.svc.parties.entities(ctx.tenant, named) : new Map<string, string>();
+    const manual = control.filter((r) => !(r.party && registered.has(r.party)));
+    if (manual.length) {
+      const which = manual.map((r) => `line ${r.n} (${r.account})`).join(", ");
+      checks.push({ label: "Control accounts name a registered party, or are a controlled adjustment", ok: !!i.controlledAdjustment && manual.every((r) => !!r.party), blocking: true,
+        detail: i.controlledAdjustment ? `${which}: ${i.controlledAdjustment.reason}` : `${which}: choose the customer or supplier, or mark it a controlled adjustment` });
+      if (i.controlledAdjustment) checks.push({ label: "Controlled adjustment flagged by a superuser or controller", ok: isAdjuster(ctx.principal), blocking: true });
+    }
+
+    const narration = i.reference ? `${i.narration} (ref ${i.reference})` : i.narration;
+    const lines: Line[] = rows.filter((r) => s.accounts.has(r.account)).map((r) => ({
+      accountId: r.account, amount: (r.dr > 0n ? r.dr : -r.cr).toString(),
+      ...(r.party ? { partyId: r.party } : {}), dimensions: { ...(r.dimensions ?? {}), ...(r.memo ? { memo: r.memo } : {}) } }));
+    if (checks.every((c) => c.ok)) validates(s, date, lines, checks);
+    const seed = `voucher/${i.voucherType}/${date}/${narration}/${lines.map((l) => `${l.accountId}:${l.amount}:${l.partyId ?? ""}`).join(",")}`;
+    const action = post(jid(ctx, seed, 0), date, narration, lines, i.voucherType);
+    if (i.controlledAdjustment && manual.length && action.type === "gl" && action.command.kind === "PostJournal") action.command.controlledAdjustment = { reason: i.controlledAdjustment.reason };
+    const label = i.voucherType.charAt(0).toUpperCase() + i.voucherType.slice(1);
+    return {
+      title: `${label} voucher · ${rs(dr)}`,
+      summary: `${narration}: ${rows.length} lines, debits ${rs(dr)} = credits ${rs(cr)}, dated ${date}.`,
+      actions: [action], checks, amountPaise: dr,
+      sections: [{ title: "Voucher", kind: "table", columns: ["Account", "Party", "Debit", "Credit"], money: [2, 3],
+        rows: rows.map((r) => [name(s, r.account), r.party ?? "", r.dr > 0n ? r.dr.toString() : "", r.cr > 0n ? r.cr.toString() : ""]) }],
+      ...(i.controlledAdjustment && manual.length ? { data: { controlledAdjustment: { reason: i.controlledAdjustment.reason, accounts: manual.map((r) => r.account) } } } : {}),
+    };
+  },
+};
+
 // ---------------------------------------------------------------- commit
 const PostInput = z.object({
   draftIds: z.array(z.string()).optional().describe("specific drafts; omit to take every draft Kuber has classified"),
@@ -607,4 +695,4 @@ export const simulate: OpDef<z.infer<typeof SimInput>> = {
   },
 };
 
-export const OPERATIONS = [record, postDrafts, balance, reconcile, allocate, rebalance, close, carryForward, report, simulate, dashboard] as OpDef<any>[];
+export const OPERATIONS = [record, journal, postDrafts, balance, reconcile, allocate, rebalance, close, carryForward, report, simulate, dashboard] as OpDef<any>[];
