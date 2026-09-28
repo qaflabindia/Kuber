@@ -32,7 +32,8 @@ export interface ToolRegistration {
 export interface InputVerdict { ok: boolean; reason?: string; category?: "in_scope" | "out_of_scope" | "injection" | "empty" | "too_long" }
 export interface ToolVerdict { ok: boolean; reason?: string }
 export interface ScreenedOutput { text: string; flags: string[] }   // flags e.g. ["instruction_like:ignore previous"]
-export interface GroundingResult { ok: boolean; ungrounded: string[] }  // figures in the reply not found in tool outputs
+/** Figures in the reply not found in tool outputs; `partialTotals`: figures presented as totals that only a partial result grounds (context integrity). */
+export interface GroundingResult { ok: boolean; ungrounded: string[]; partialTotals?: string[] }
 
 export interface ToolCallRecord {
   tool: string; inputHash: string; outputHash: string; ok: boolean;

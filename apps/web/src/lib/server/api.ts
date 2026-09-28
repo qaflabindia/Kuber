@@ -97,6 +97,8 @@ export interface Plan {
 export interface CopilotReply { reply: string; cards: Plan[]; suggestions?: string[]; engine: string; trace: { tool: string; ok: boolean }[] }
 
 /** `stepUpAt`: the person's last passkey step-up (see stepup.ts), for sensitive approvals. */
+/** A structured decision reason (codes plus optional text). */
+export type Reason = { codes: string[]; text?: string };
 export const api = (s: Pick<Session, "tenant" | "principal" | "sid"> & { stepUpAt?: number }) => ({
   /** Sign-out: the core revokes this session id, so a copied cookie stops working too. */
   signOut: () => call<void>(s, "POST", "/sessions/revoke", {}),
@@ -107,11 +109,12 @@ export const api = (s: Pick<Session, "tenant" | "principal" | "sid"> & { stepUpA
   // A book-scoped member lists the drafts of one book (the core refuses a tenant-wide list for them).
   drafts: (book?: string) => call<Draft[]>(s, "GET", book ? `/drafts?book=${encodeURIComponent(book)}` : "/drafts"),
   /** `assertion`: the passkey signature over this approval, when it is above the approval limit (signed commands). */
-  approve: (id: string, accountId?: string, assertion?: unknown) => call(s, "POST", `/drafts/${id}/approve`, { ...(accountId ? { accountId } : {}), ...(assertion ? { assertion } : {}) }),
-  reject: (id: string, reason: string) => call(s, "POST", `/drafts/${id}/reject`, { reason }),
+  /** `correction`: the structured reason when the draft is approved to another account (required above the approval limit). */
+  approve: (id: string, accountId?: string, assertion?: unknown, correction?: Reason) => call(s, "POST", `/drafts/${id}/approve`, { ...(accountId ? { accountId } : {}), ...(assertion ? { assertion } : {}), ...(correction ? { correction } : {}) }),
+  reject: (id: string, reason: string, codes?: string[]) => call(s, "POST", `/drafts/${id}/reject`, { reason, ...(codes?.length ? { codes } : {}) }),
   ratifications: () => call<Ratification[]>(s, "GET", "/ratifications"),
   ratify: (journalId: string, assertion?: unknown) => call(s, "POST", `/journals/${journalId}/ratify`, assertion ? { assertion } : {}),
-  correct: (journalId: string, toAccount: string, learn: boolean) => call(s, "POST", `/journals/${journalId}/correct`, { toAccount, learn }),
+  correct: (journalId: string, toAccount: string, learn: boolean, reason?: Reason) => call(s, "POST", `/journals/${journalId}/correct`, { toAccount, learn, ...(reason ? { reason } : {}) }),
   chat: (book: string, text: string) => call<{ accepted: number; duplicate: boolean }>(s, "POST", `/books/${book}/chat`, { text }),
   statement: (book: string, csv: string, instrument: string) =>
     call<{ accepted: number; skipped: number; duplicate: boolean }>(s, "POST", `/books/${book}/statements?instrument=${encodeURIComponent(instrument)}`, csv, "text/csv"),
@@ -132,7 +135,7 @@ export const api = (s: Pick<Session, "tenant" | "principal" | "sid"> & { stepUpA
   /** `assertion`: the passkey signature over this plan (step-up-class plans; see signing options). */
   commit: (id: string, hash: string, assertion?: unknown) =>
     call<{ planId: string; status: string; steps?: string[]; message?: string }>(s, "POST", `/plans/${id}/commit`, { hash, ...(assertion ? { assertion } : {}) }),
-  discard: (id: string) => call(s, "POST", `/plans/${id}/discard`, {}),
+  discard: (id: string, reason?: Reason) => call(s, "POST", `/plans/${id}/discard`, reason ? { reason } : {}),
   verify: (book: string) => call<{ intact: boolean; firstBrokenJournal: string | null }>(s, "GET", `/books/${book}/verify`),
   // Period close (FIN-CLS-01..04): plans returned here are committed through commit() like any other.
   closeOverview: (book: string) => call<CloseOverview>(s, "GET", `/books/${book}/close`),

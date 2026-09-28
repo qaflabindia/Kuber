@@ -1,5 +1,6 @@
 import { fail } from "@sveltejs/kit";
 import { api, ApiError } from "$lib/server/api";
+import { reasonFrom } from "$lib/reasons";
 import type { Actions, PageServerLoad } from "./$types";
 
 export const load: PageServerLoad = async ({ locals }) => {
@@ -35,7 +36,7 @@ export const actions: Actions = {
     const f = await request.formData();
     const id = String(f.get("journalId") ?? ""), to = String(f.get("accountId") ?? ""), learn = f.get("learn") === "on";
     if (!to || to === "SUSPENSE") return fail(400, { id, message: "Choose the account it should have gone to." });
-    try { await api(locals.session!).correct(id, to, learn); return { id, done: "corrected" }; }
+    try { await api(locals.session!).correct(id, to, learn, reasonFrom(f)); return { id, done: "corrected" }; }
     catch (e) { return fail(409, { id, message: e instanceof Error ? e.message : "Could not correct." }); }
   },
 };

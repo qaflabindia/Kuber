@@ -19,7 +19,7 @@
  * module): membership, role, book scope and separation of duties. Without a guard, nothing passes.
  */
 import type { Sql, TransactionSql } from "postgres";
-import { POLICY_CHECKER, canonical, isPrivilegedPrincipal, planLifecycle, sha256, uuid, type CommandSignature, type CommandSummary, type EventData, type Line } from "@kuber/contracts";
+import { DecisionReason, POLICY_CHECKER, canonical, isPrivilegedPrincipal, planLifecycle, sha256, uuid, type CommandSignature, type CommandSummary, type EventData, type Line } from "@kuber/contracts";
 import { tenantRlsFor, type EventStore, type Migration } from "@kuber/eventstore";
 import { DomainError, type BookState } from "@kuber/gl";
 import { AgentError } from "@kuber/agent";
@@ -73,6 +73,13 @@ export class OpsError extends Error {
 class AttestRefused extends Error { constructor(readonly inner: unknown) { super("signature refused"); } }
 
 const RANK: Record<string, number> = { L0: 0, L1: 1, L2: 2, L3: 3, L4: 4 };
+/** Largest journal's total debits (paise): the amount a plan moves (the same measure as identity's planAmount). */
+const maxJournalDebits = (p: Pick<Plan, "journals">) => p.journals.reduce((m, j) => {
+  const d = j.lines.reduce((a, l) => (BigInt(l.amount) > 0n ? a + BigInt(l.amount) : a), 0n);
+  return d > m ? d : m;
+}, 0n);
+/** A plain JSON object (no bigint, no functions): safe to keep on the plan. */
+const isJsonInput = (v: unknown) => { if (!v || typeof v !== "object" || Array.isArray(v)) return false; try { JSON.stringify(v); return true; } catch { return false; } };
 export const isAgent = (principal: string) => /^(agent|system):/.test(principal);
 /** Deny by default: an Operations service built without a guard refuses every step. */
 export const DENY_ALL: OpsGuard = { check: async () => { throw new OpsError("forbidden", "no authorization service configured", 403); } };
@@ -85,6 +92,12 @@ export class Operations {
   private readonly bookGates: BookGate[] = [];
   /** Recurring and recognition schedules (FIN-GL-02/03): approved through a plan, run by `runSchedules`. */
   readonly schedules: Schedules;
+  /**
+   * Context integrity (never captured): why discarding a plan moving `amountPaise` needs a structured
+   * reason (above the tenant's SoD limit), or null. Set by the cell; plans policy cleared for an
+   * agent to commit (L3/L4) always need one.
+   */
+  reasonRequiredAbove?: (tenant: string, amountPaise: bigint) => Promise<string | null>;
   constructor(private sql: Sql, private store: EventStore, private svc: Services, private clock: () => string = () => new Date().toISOString().slice(0, 10),
     private guard: OpsGuard = DENY_ALL) {
     this.schedules = new Schedules(store, svc.gl, svc.policies, guard, () => this.clock(), (t, id) => this.get(t, id),
@@ -183,6 +196,8 @@ export class Operations {
       checks, journals, effects, sections: d.sections ?? [], data: d.data, notes: d.notes ?? [], links: d.links ?? [],
       basisSeq: state.seq, basisVersion: state.version, createdAt: new Date().toISOString(), createdBy: principal, hash: "",
       ...(opts.onBehalfOf ? { requestedBy: opts.onBehalfOf } : {}), ...(d.fence ? { fence: d.fence } : {}),
+      // The input as given, so a plan referenced later (e.g. from a conversation) can be simulated again, not trusted.
+      ...(def.kind === "write" && isJsonInput(rawInput) ? { input: rawInput as Record<string, unknown> } : {}),
       status: committable ? "proposed" : "preview", blocked,
       needsPerson: def.gate === "human" || !decision || RANK[decision.level]! < 3,
     };
@@ -234,12 +249,33 @@ export class Operations {
     return r?.n ?? 0;
   }
 
-  async discard(tenant: string, planId: string, principal: string) {
+  /**
+   * Withdraw a proposal, recording PlanDiscarded with the reason. A structured reason is required for
+   * a plan policy cleared for an agent to commit (L3/L4, policy gate) and above the SoD limit.
+   */
+  async discard(tenant: string, planId: string, principal: string, reason?: DecisionReason) {
+    let why: DecisionReason | undefined;
+    if (reason !== undefined) {
+      const r = DecisionReason.safeParse(reason);
+      if (!r.success) throw new OpsError("bad_reason", `invalid reason: ${r.error.issues.map((i) => i.message).join("; ")}`, 400);
+      why = r.data;
+    }
     const p = await this.get(tenant, planId);
     await this.guard.check({ step: "discard", tenant, book: p.bookId, principal, op: { name: p.op, kind: p.kind, gate: p.gate }, plan: p });
-    const n = await this.store.tenantTx(tenant, (tx) => tx`
-      UPDATE ops.plans SET status = 'discarded', resolved_by = ${principal}, resolved_at = now()
-      WHERE tenant_id = ${tenant} AND plan_id = ${planId} AND status = 'proposed' RETURNING 1`);
+    if (!why && p.status === "proposed") {
+      const autonomous = p.kind === "write" && p.gate === "policy" && !p.needsPerson;
+      const need = autonomous ? `${p.policy?.ids.length ? `policy ${p.policy.ids.join(", ")}` : "policy"} cleared this plan for an agent to commit (${p.policy?.level ?? "L3+"})`
+        : await this.reasonRequiredAbove?.(tenant, maxJournalDebits(p)) ?? null;
+      if (need) throw new OpsError("reason_required", `discarding this plan needs a structured reason (codes such as superseded, stale, wrong_amount, not_needed): ${need}`, 422);
+    }
+    const n = await this.store.tenantTx(tenant, async (tx) => {
+      const r = await tx`
+        UPDATE ops.plans SET status = 'discarded', resolved_by = ${principal}, resolved_at = now()
+        WHERE tenant_id = ${tenant} AND plan_id = ${planId} AND status = 'proposed' RETURNING 1`;
+      if (r.length) await this.store.append("ops", tenant, { streamId: `${tenant}/plan/${planId}`, expected: "any",
+        events: [{ type: "PlanDiscarded", data: { planId, bookId: p.bookId, op: p.op, ...(why ? { reason: why } : {}) } }] }, { principal, commandId: planId }, tx);
+      return r;
+    });
     if (!n.length) throw new OpsError("not_open", "plan is not open");
     return { planId, status: "discarded" as const };
   }

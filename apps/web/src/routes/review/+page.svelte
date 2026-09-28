@@ -1,5 +1,6 @@
 <script lang="ts">
   import { enhance } from "$app/forms";
+  import { REASONS } from "$lib/reasons";
   import { date, humanReason, inr, levelLabel, prettyNarration } from "$lib/format";
   import AccountSelect from "$lib/components/AccountSelect.svelte";
   import Icon from "$lib/components/Icon.svelte";
@@ -104,6 +105,9 @@
             <label for="acc-{d.draft_id}">Record as</label>
             <AccountSelect id="acc-{d.draft_id}" accounts={data.accounts} bind:value={choice[d.draft_id]!} direction={d.proposal.direction} />
           </div>
+          {#if choice[d.draft_id] !== d.proposal.accountId}
+            <select name="code" aria-label="Why change it" class="reason">{#each REASONS as [code, label]}<option value={code} selected={code === "wrong_account"}>{label}</option>{/each}</select>
+          {/if}
           <button class="btn primary" disabled={busy === d.draft_id || choice[d.draft_id] === "SUSPENSE"}>
             <Icon name="check" size={15} /> {choice[d.draft_id] !== d.proposal.accountId ? "Approve as changed" : "Approve"}
           </button>
@@ -111,6 +115,7 @@
         {#if rejecting === d.draft_id}
           <form method="POST" action="?/reject" class="reject" use:enhance={act(d.draft_id)}>
             <input type="hidden" name="id" value={d.draft_id} />
+            <select name="code" aria-label="Reason code" class="reason">{#each REASONS as [code, label]}<option value={code} selected={code === "duplicate"}>{label}</option>{/each}</select>
             <input name="reason" placeholder="Why? e.g. duplicate, not mine" aria-label="Reason for rejecting" />
             <button class="btn">Reject</button>
             <button type="button" class="btn quiet" onclick={() => (rejecting = null)}>Cancel</button>

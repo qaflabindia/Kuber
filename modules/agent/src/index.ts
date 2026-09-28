@@ -20,7 +20,7 @@
  */
 import type { Sql, TransactionSql } from "postgres";
 import {
-  POLICY_CHECKER, addDays, draftLifecycle, journalIdForRequest, stableId, uuid,
+  DecisionReason, POLICY_CHECKER, addDays, draftLifecycle, journalIdForRequest, reasonText, sha256, stableId, uuid,
   type CommandSignature, type Decision, type Envelope, type EventData, type Line, type RawTxn,
 } from "@kuber/contracts";
 import { DENY_ALL_GUARD, once, type EventStore, type MetaInput, type ModuleGuard, type NewEvent, type Projection } from "@kuber/eventstore";
@@ -69,6 +69,12 @@ export class Agent {
    * only provisional ones; without the hook, or for other instruments, provisional matching applies.
    */
   clearing?: ClearingHook;
+  /**
+   * Context integrity (never captured): why a decision on an item of `amountPaise` needs a
+   * structured reason, or null. Set by the cell from the tenant's SoD (approval) limit; without it
+   * only policy-autonomous items require one. `null` amount: not known yet (fail closed when a limit is set).
+   */
+  reasonRequiredAbove?: (tenantId: string, amountPaise: bigint | null, tx: TransactionSql) => Promise<string | null>;
 
   constructor(private sql: Sql, private store: EventStore, private policies: PolicyEngine,
               private clock: () => string = () => new Date().toISOString().slice(0, 10),
@@ -486,8 +492,13 @@ export class Agent {
    * `opts.attest` (signed commands, design 16.4): verifies the person's signature over this approval
    * inside the transaction, just before the approval is recorded, and returns it for DraftApproved.
    */
+  /**
+   * `opts.correction`: approving to another account than proposed corrects the draft; outside a plan
+   * (a plan's commit is its own record of the override) that needs a structured reason above the SoD limit.
+   */
   async approveDraft(tenantId: string, draftId: string, principal: string, accountId?: string, commandId?: string, inTx?: TransactionSql,
-                     opts: { attest?: (tx: TransactionSql) => Promise<CommandSignature> } = {}) {
+                     opts: { attest?: (tx: TransactionSql) => Promise<CommandSignature>; correction?: DecisionReason } = {}) {
+    const correction = opts.correction ? checkedReason(opts.correction) : undefined;
     const run = async (tx: TransactionSql) => {
       const keys = await this.store.keys(tenantId);
       const [row] = await tx<{ txn_id: string; book_id: string; status: string; proposal: unknown }[]>`
@@ -500,6 +511,8 @@ export class Agent {
       const accounts = await this.accountSet(tx, tenantId, d.book_id);
       if (!accounts.has(final)) throw new AgentError("no_account", `unknown account ${final}`);
       const lines = d.proposal.lines.map((l) => (l.accountId === d.proposal.accountId ? { ...l, accountId: final } : l));
+      const corrected = final !== d.proposal.accountId;
+      if (corrected && !correction && !commandId) await this.requireReason(tx, tenantId, debitTotal(d.proposal.lines), false, `correcting draft ${draftId} to ${final}`);
       if (d.proposal.direction === "out" && this.paymentHolds) {
         const held = await this.paymentHolds(tenantId, lines.map((l) => l.partyId).filter((p): p is string => !!p), tx);
         if (held.length) throw new AgentError("party_hold", `payments to ${held.map((h) => h.partyId).join(", ")} are held: bank details changed and not yet verified and released (POL-501)`);
@@ -508,7 +521,7 @@ export class Agent {
       const requestId = `req-${d.txn_id}`, journalId = journalIdForRequest(tenantId, requestId);
       const signature = opts.attest ? await opts.attest(tx) : undefined;
       const events: NewEvent[] = [
-        { type: "DraftApproved", data: { draftId, accountId: final, ...(signature ? { signature } : {}) } },
+        { type: "DraftApproved", data: { draftId, accountId: final, ...(signature ? { signature } : {}), ...(corrected && correction ? { correction } : {}) } },
         { type: "PostingRequested", data: { requestId, bookId: d.book_id, txnDate: d.proposal.txnDate, narration: d.proposal.narration,
           voucherType: d.proposal.voucherType, lines, provisional: d.proposal.provisional, autonomy: "human",
           confidence: d.proposal.confidence, sourceStream: `${tenantId}/txn/${d.txn_id}` } },
@@ -536,7 +549,14 @@ export class Agent {
     return r?.book_id ?? null;
   }
 
-  async rejectDraft(tenantId: string, draftId: string, principal: string, reason: string) {
+  /**
+   * Reject a draft. `reason` is free text (kept for older callers); `structured` is the reason as
+   * codes, required when the draft's amount is above the SoD limit (context integrity: a rejection
+   * above the limit is never recorded without a reason the next decision can learn from).
+   */
+  async rejectDraft(tenantId: string, draftId: string, principal: string, reason: string | DecisionReason, structured?: DecisionReason) {
+    const why = typeof reason === "string" ? (structured ? checkedReason(structured) : undefined) : checkedReason(reason);
+    const text = typeof reason === "string" ? reason : reasonText(why!);
     return this.store.tenantTx(tenantId, async (tx) => {
       const [b] = await tx<{ book_id: string }[]>`SELECT book_id FROM agent.drafts WHERE tenant_id = ${tenantId} AND draft_id = ${draftId}`;
       if (!b) throw new AgentError("not_open", `draft ${draftId} is not open`);
@@ -545,11 +565,22 @@ export class Agent {
         UPDATE agent.drafts SET status = 'rejected', resolved_by = ${principal}, resolved_at = now()
         WHERE tenant_id = ${tenantId} AND draft_id = ${draftId} AND status IN ${tx(REVIEWABLE)} RETURNING txn_id, proposal`;
       if (!d) throw new AgentError("not_open", `draft ${draftId} is not open`);
-      const direction = openProposal(await this.store.keys(tenantId), draftId, d.proposal).direction;
+      const proposal = openProposal(await this.store.keys(tenantId), draftId, d.proposal);
+      if (!why) await this.requireReason(tx, tenantId, debitTotal(proposal.lines), false, `rejecting draft ${draftId}`);
+      const direction = proposal.direction;
       if (direction) await this.recordOutcome(tx, tenantId, b.book_id, actionTypeOf(direction), false, "rejected");
       await this.store.append("agent", tenantId, { streamId: `${tenantId}/txn/${d.txn_id}`, expected: "any",
-        events: [{ type: "DraftRejected", data: { draftId, reason } }] }, { principal }, tx);
+        events: [{ type: "DraftRejected", data: { draftId, reason: text, ...(why ? { structured: why } : {}) } }] }, { principal }, tx);
     });
+  }
+
+  /**
+   * Throws reason_required when a decision on this item must carry a structured reason: the item
+   * was made autonomously under policy (L3/L4), or its amount is above the SoD limit.
+   */
+  private async requireReason(tx: TransactionSql, tenantId: string, amountPaise: bigint | null, autonomous: boolean, what: string) {
+    const why = autonomous ? "the entry was posted autonomously under policy" : await this.reasonRequiredAbove?.(tenantId, amountPaise, tx) ?? null;
+    if (why) throw new AgentError("reason_required", `${what} needs a structured reason (codes: ${DECISION_REASON_HINT}): ${why}`);
   }
 
   /** Statement lines waiting for a person to say whether they are a provisional entry already in the books (every page). */
@@ -677,18 +708,24 @@ export class Agent {
    * for that account and counterparty. A one-off correction (a client lunch on a food app) must not
    * rewrite the counterparty's rule, so learning is opt-in: pass `learn: true` for "always use this account".
    */
-  async correct(tenantId: string, journalId: string, toAccount: string, principal: string, opts: { learn?: boolean } = {}) {
+  /**
+   * `opts.reason`: why. Required when the journal was posted autonomously under policy (a ratification
+   * correction) or its amount is above the SoD limit; optional otherwise.
+   */
+  async correct(tenantId: string, journalId: string, toAccount: string, principal: string, opts: { learn?: boolean; reason?: DecisionReason } = {}) {
+    const reason = opts.reason ? checkedReason(opts.reason) : undefined;
     return this.store.tenantTx(tenantId, async (tx) => {
       await this.guard.permit(tenantId, principal, "journal.ratify", { allBooks: true }, tx);
-      const [j] = await tx<{ book_id: string; principal: string; party_id: string | null; counter_account: string | null; reversed: boolean }[]>`
-        SELECT book_id, principal, party_id, counter_account, reversed FROM agent.journal_index WHERE tenant_id = ${tenantId} AND journal_id = ${journalId}`;
+      const [j] = await tx<{ book_id: string; principal: string; party_id: string | null; counter_account: string | null; reversed: boolean; amount: string | null }[]>`
+        SELECT book_id, principal, party_id, counter_account, reversed, amount FROM agent.journal_index WHERE tenant_id = ${tenantId} AND journal_id = ${journalId}`;
       if (!j) throw new AgentError("not_found", `no journal ${journalId} (it may not be projected yet)`);
       if (j.reversed) throw new AgentError("already_reversed", `${journalId} is already reversed`);
       if (!j.counter_account) throw new AgentError("no_counter", `${journalId} has no classifiable line`);
       if (j.counter_account === SUSPENSE) throw new AgentError("suspense_item", `${journalId} holds a suspense item: resolve the item (resolve_suspense) instead of correcting the journal`);
+      if (!reason) await this.requireReason(tx, tenantId, j.amount !== null && /^-?\d+$/.test(j.amount) ? absBig(BigInt(j.amount)) : null, j.principal === AGENT_PRINCIPAL, `correcting ${journalId}`);
       await this.journalOutcome(tx, tenantId, journalId, false, "corrected");
       const requestId = `corr-${uuid()}`;
-      const events: NewEvent[] = [{ type: "CorrectionRequested", data: { requestId, bookId: j.book_id, journalId, fromAccount: j.counter_account, toAccount } }];
+      const events: NewEvent[] = [{ type: "CorrectionRequested", data: { requestId, bookId: j.book_id, journalId, fromAccount: j.counter_account, toAccount, ...(reason ? { reason } : {}) } }];
       if (j.party_id && opts.learn) {
         const keys = await this.store.keys(tenantId);
         const [p] = await tx<{ name: string }[]>`SELECT name FROM agent.parties WHERE tenant_id = ${tenantId} AND party_id = ${j.party_id}`;
@@ -711,12 +748,44 @@ export class Agent {
   }
 
   async addRule(tenantId: string, pattern: string, accountId: string, principal: string) {
-    return this.store.tenantTx(tenantId, async (tx) => {
-      await this.guard.permit(tenantId, principal, "rules.manage", { allBooks: true }, tx);
-      const events = await this.learn(tx, tenantId, pattern, accountId, principal, await this.store.keys(tenantId));
-      await this.store.append("agent", tenantId, { streamId: `${tenantId}/rules`, expected: "any", events }, { principal }, tx);
-    });
+    return this.store.tenantTx(tenantId, (tx) => this.addRuleIn(tx, tenantId, pattern, accountId, principal));
   }
+
+  /** addRule inside the caller's transaction (a committed propose_rule plan). */
+  async addRuleIn(tx: TransactionSql, tenantId: string, pattern: string, accountId: string, principal: string, commandId?: string) {
+    await this.guard.permit(tenantId, principal, "rules.manage", { allBooks: true }, tx);
+    const events = await this.learn(tx, tenantId, pattern, accountId, principal, await this.store.keys(tenantId));
+    if (events.length) await this.store.append("agent", tenantId, { streamId: `${tenantId}/rules`, expected: "any", events }, { principal, ...(commandId ? { commandId } : {}) }, tx);
+    return events.length > 0;
+  }
+
+  /**
+   * Context integrity (never captured): the ops extension for standing business rules a person
+   * stated in chat. They are never remembered as conversation; the copilot turns them into plans,
+   * and only a person's commit applies them here: `rule` adds a classification rule (rules.manage),
+   * `policy_note` records a POL-900 policy change note (authority.manage; the policy files change
+   * only through POL-900).
+   */
+  standingRuleExtension = async (tx: TransactionSql, ctx: { tenant: string; book: string; principal: string; approvedBy: string | null; planId: string },
+                                 action: { kind: string; payload: unknown }): Promise<string> => {
+    const who = ctx.approvedBy ?? ctx.principal;
+    if (action.kind === "rule") {
+      const p = action.payload as { pattern: string; accountId: string };
+      const accounts = await this.accountSet(tx, ctx.tenant, ctx.book);
+      if (!accounts.has(p.accountId)) throw new AgentError("no_account", `unknown account ${p.accountId}`);
+      const added = await this.addRuleIn(tx, ctx.tenant, p.pattern, p.accountId, who, ctx.planId);
+      return added ? `classification rule "${p.pattern}" → ${p.accountId} added` : `classification rule "${p.pattern}" → ${p.accountId} already in force`;
+    }
+    if (action.kind === "policy_note") {
+      const p = action.payload as { noteId: string; statement: string; event: string | null; note: string; requestedBy: string | null };
+      await this.guard.permit(ctx.tenant, who, "authority.manage", { allBooks: true }, tx);
+      await this.store.append("agent", ctx.tenant, { streamId: `${ctx.tenant}/policy-notes`, expected: "any", events: [{ type: "PolicyChangeNoteRecorded",
+        data: { noteId: p.noteId, bookId: ctx.book, statement: p.statement, event: p.event, noteHash: sha256(p.note), requestedBy: p.requestedBy } }] },
+        { principal: who, commandId: ctx.planId }, tx);
+      return `policy change note ${p.noteId} recorded for POL-900 review`;
+    }
+    throw new AgentError("bad_action", `unknown standing-rule action ${action.kind}`);
+  };
 
   // ------------------------------------------------------------------ queries
   /**
@@ -990,6 +1059,16 @@ export class Agent {
     return new Set(rows.map((r) => r.account_id));
   }
 }
+
+const DECISION_REASON_HINT = "wrong_account, wrong_amount, wrong_party, wrong_period, duplicate, not_business, missing_evidence, policy_breach, suspected_fraud, other";
+/** A structured reason, validated (codes from the list; "other" needs text). */
+function checkedReason(r: DecisionReason): DecisionReason {
+  const p = DecisionReason.safeParse(r);
+  if (!p.success) throw new AgentError("bad_reason", `invalid reason: ${p.error.issues.map((i) => i.message).join("; ")}`);
+  return p.data;
+}
+const absBig = (v: bigint) => (v < 0n ? -v : v);
+const debitTotal = (lines: { amount: string }[]) => lines.reduce((a, l) => (BigInt(l.amount) > 0n ? a + BigInt(l.amount) : a), 0n);
 
 interface Proposal { txnDate: string; narration: string; voucherType: string; lines: Line[]; provisional: boolean;
   accountId: string; confidence: number; partyName?: string | null; partyId?: string | null; direction?: "in" | "out" }

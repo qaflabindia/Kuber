@@ -82,7 +82,7 @@ describe("a freelancer's first two months, event-driven", () => {
 
   it("a correction reverses, reposts, learns, and limits the agent for that counterparty", async () => {
     const github = (await cell.agent.openRatifications(T)).find((r) => (r.narration as string).includes("GITHUB"))!;
-    const { newJournalId } = await cell.agent.correct(T, github.journal_id as string, "LIVING", OWNER);
+    const { newJournalId } = await cell.agent.correct(T, github.journal_id as string, "LIVING", OWNER, { reason: { codes: ["wrong_account"], text: "personal subscription" } });
     await cell.settle();
     const living = await cell.reporting.drill(T, B, "LIVING");
     expect(living.some((l) => l.journal_id === newJournalId)).toBe(true);

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { enhance } from "$app/forms";
+  import { REASONS } from "$lib/reasons";
   import { date, inr, prettyNarration } from "$lib/format";
   import AccountSelect from "$lib/components/AccountSelect.svelte";
   import Icon from "$lib/components/Icon.svelte";
@@ -57,6 +58,7 @@
             <label for="c-{r.journal_id}">Should have been</label>
             <AccountSelect id="c-{r.journal_id}" accounts={data.accounts} bind:value={choice[r.journal_id]!} direction={r.direction} />
           </div>
+          <select name="code" aria-label="Why it was wrong" class="reason">{#each REASONS as [code, label]}<option value={code} selected={code === "wrong_account"}>{label}</option>{/each}</select>
           <label class="check"><input type="checkbox" name="learn" /> Always use this for {p.title}</label>
           <button class="btn primary" disabled={busy === r.journal_id || !choice[r.journal_id]}>Correct</button>
           <button type="button" class="btn quiet" onclick={() => (fixing = null)}>Cancel</button>

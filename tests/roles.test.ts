@@ -176,7 +176,7 @@ describe("ROLE-03 admin and treasurer separation", () => {
     expect((await as(P.admin, "PUT", "/settings/separation", { soloSuperuser: true, sodLimitPaise: null })).statusCode).toBe(403);
     expect((await as(P.admin, "POST", "/members/invitations", { role: "auditor", displayName: "Firm" })).statusCode).toBe(201);
     expect((await as(P.admin, "GET", "/me")).json()).toMatchObject({ role: "admin", permissions: ["self", "members.read", "members.manage", "settings.manage"] });
-    await cell.ops.discard(T, p.planId, P.staff);
+    await cell.ops.discard(T, p.planId, P.staff, { codes: ["not_needed"] });
   });
 
   it("ROLE-03 the treasurer who verified a party's bank change cannot approve a payment to that party; another person can", async () => {
@@ -237,7 +237,7 @@ describe("ROLE-04 agent checker separation", () => {
     await expect(cell.ops.commit(T, p.planId, POLICY_CHECKER, p.hash)).rejects.toThrow(/never acts/);
     await expect(cell.identity.permit(T, POLICY_CHECKER, "capture", { book: B })).rejects.toThrow(/never acts/);
     await expect(cell.identity.addMember(T, "operator:test", { principal: POLICY_CHECKER })).rejects.toThrow(/unknown role/);
-    await cell.ops.discard(T, p.planId, P.staff);
+    await cell.ops.discard(T, p.planId, P.staff, { codes: ["not_needed"] });
   });
 });
 
@@ -248,7 +248,7 @@ describe("ROLE-05 no language-model checker; excluded classes need a person", ()
     await expect(cell.ops.approve(T, p.planId, "agent:copilot", p.hash)).rejects.toThrow(/never a checker/);
     await expect(cell.identity.check({ step: "execute", tenant: T, book: B, principal: P.staff, op: { name: "record", kind: "write", gate: "policy" },
       plan: p, approvedBy: "agent:copilot" })).rejects.toThrow(/never be the recorded approver/);
-    await cell.ops.discard(T, p.planId, P.staff);
+    await cell.ops.discard(T, p.planId, P.staff, { codes: ["not_needed"] });
   });
 
   it("ROLE-05 period operations, payments and amounts above the limit wait for a person even when an agent commits", async () => {
@@ -262,14 +262,14 @@ describe("ROLE-05 no language-model checker; excluded classes need a person", ()
       const over = await cell.ops.plan(T, B, P.agent, "record", record("5,000", { direction: "in", account: "FEES", narration: "Receipt" }));
       expect(over.needsPerson).toBe(false);
       expect(await cell.ops.commit(T, over.planId, P.agent, over.hash)).toMatchObject({ status: "awaiting_person", message: expect.stringMatching(/above the approval limit/) });
-      await cell.ops.discard(T, over.planId, P.agent);
+      await cell.ops.discard(T, over.planId, P.agent, { codes: ["policy_breach"], text: "above the approval limit" });
     } finally { await cell.identity.setSettings(T, P.su, { soloSuperuser: false, sodLimitPaise: null }); }
     // Period operations: an agent cannot even prepare them.
     await expect(cell.ops.plan(T, B, P.agent, "close", { periodEnd: "2026-09-30" })).resolves.toMatchObject({ gate: "human", needsPerson: true });
     // Master data and authority: an agent has no such action.
     await expect(cell.parties.register(T, P.agent, { partyId: "V-AG", entityId: "ent-r", kind: "vendor", name: "X" })).rejects.toThrow(/agent may not/);
     await expect(cell.identity.authority.setMatrix(T, P.agent, true)).rejects.toThrow(/not a member/);
-    await cell.ops.discard(T, pay.planId, P.agent);
+    await cell.ops.discard(T, pay.planId, P.agent, { codes: ["not_needed"] });
   });
 });
 

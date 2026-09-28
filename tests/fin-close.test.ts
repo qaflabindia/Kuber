@@ -216,7 +216,7 @@ describe("FIN-CLS-02 account substantiation", () => {
     expect(cert.blocked).toBe(true);
     expect(failed(cert, /Every required account substantiated/)?.detail).toMatch(/BANK \(missing\).*DEBTORS \(missing\)/);
     expect(failed(cert, /Completeness: .*open plan/)).toBeTruthy();
-    await cell.ops.discard(T, pending.planId, P.pia);
+    await cell.ops.discard(T, pending.planId, P.pia, { codes: ["not_needed"] });
     expect((await svc().status(T, "main", PE)).findings.map((f) => f.code)).not.toContain("pending_plans");
   });
 

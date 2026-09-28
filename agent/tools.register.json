@@ -1,9 +1,9 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "owner": "System Owner (Unassigned)",
   "approvedBy": "Pending \u2014 System Owner",
   "approvedAt": "pending",
-  "changeNote": "Initial register: every ops operation, kuber_commit (disabled for the copilot) and the read tools. External ext_* tools are denied until listed here by exact name (F17).",
+  "changeNote": "Initial register: every ops operation, kuber_commit (disabled for the copilot) and the read tools. External ext_* tools are denied until listed here by exact name (F17). 1.1.0: kuber_propose_rule and kuber_propose_policy_change (standing rules stated in chat become governed proposals).",
   "policy": "Default deny: a tool not listed here, or listed with enabled false, is refused. The copilot may run only tools whose reversibility is none or simulation.",
   "tools": [
     {
@@ -786,6 +786,34 @@
       "op": "certify_bank_reconciliation",
       "onCommit": "irreversible",
       "note": "FIN-CASH-03: prepares the certification (the preparer is recorded); an independent superuser, controller or treasurer commits it with a passkey signature. Irreversible: a certification is withdrawn by a later posting, never undone."
+    },
+    {
+      "name": "kuber_propose_rule",
+      "owner": "Financial Controller",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "financial"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "op": "propose_rule",
+      "onCommit": "reversible",
+      "note": "Context integrity: a standing classification rule stated in chat becomes a proposal; a person with rules.manage commits it. Reversible: a later rule for the same pattern supersedes it."
+    },
+    {
+      "name": "kuber_propose_policy_change",
+      "owner": "Admin",
+      "reversibility": "simulation",
+      "permission": "plan.prepare",
+      "dataClasses": [
+        "policy"
+      ],
+      "untrustedOutput": true,
+      "enabled": true,
+      "op": "propose_policy_change",
+      "onCommit": "reversible",
+      "note": "Context integrity: a standing business rule stated in chat becomes a POL-900 policy change note; committing records the note (authority.manage). Policy files change only through POL-900."
     }
   ]
 }

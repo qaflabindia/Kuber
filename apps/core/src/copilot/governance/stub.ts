@@ -127,7 +127,7 @@ export class StubGovernance implements CoreGovernance {
     const figs = [...reply.matchAll(MONEY)].map((m) => ({ text: m[0].trim(), p: toPaise(m[1]!) }));
     if (!figs.length) return { ok: true, ungrounded: [] };
     const vals = new Set<bigint>();
-    for (const o of toolOutputs) for (const v of moneyIn(o, true)) vals.add(v);
+    for (const o of toolOutputs) for (const v of moneyIn(o.replace(/^Completeness:.*$/gm, ""), true)) vals.add(v);
     const ok = (v: bigint) => vals.has(v) || [...vals].some((a) => vals.has(v - a) || vals.has(a - v) || vals.has(a + v));
     const ungrounded = figs.filter((f) => !ok(f.p)).map((f) => f.text);
     return { ok: ungrounded.length === 0, ungrounded };

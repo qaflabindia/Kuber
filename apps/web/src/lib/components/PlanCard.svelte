@@ -1,5 +1,6 @@
 <script lang="ts">
   import { enhance } from "$app/forms";
+  import { REASONS } from "$lib/reasons";
   import { invalidateAll } from "$app/navigation";
   import type { SubmitFunction } from "@sveltejs/kit";
   import { Signer } from "$lib/sign.svelte";
@@ -174,6 +175,7 @@
       <div class="acts">
         <form method="POST" action="/?/discard" use:enhance={settle}>
           <input type="hidden" name="planId" value={plan.planId} />
+          <select name="code" aria-label="Why discard" class="reason sm">{#each REASONS as [code, label]}<option value={code} selected={code === "not_needed"}>{label}</option>{/each}</select>
           <button class="btn quiet sm" disabled={busy}>Discard</button>
         </form>
         <form method="POST" action="/?/commit" use:enhance={commitSubmit} bind:this={commitForm}>

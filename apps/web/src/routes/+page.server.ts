@@ -1,5 +1,6 @@
 import { fail } from "@sveltejs/kit";
 import { api, ApiError } from "$lib/server/api";
+import { reasonFrom } from "$lib/reasons";
 import { stepUpAt } from "$lib/server/stepup";
 import type { Actions, PageServerLoad } from "./$types";
 
@@ -48,8 +49,9 @@ export const actions: Actions = {
     }
   },
   discard: async ({ request, locals }) => {
-    const id = String((await request.formData()).get("planId") ?? "");
-    try { await api(locals.session!).discard(id); return { planId: id, status: "discarded" }; }
+    const f = await request.formData();
+    const id = String(f.get("planId") ?? "");
+    try { await api(locals.session!).discard(id, reasonFrom(f)); return { planId: id, status: "discarded" }; }
     catch (e) { return fail(409, { planId: id, ...problem(e, "Could not discard.") }); }
   },
 };

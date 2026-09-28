@@ -26,7 +26,7 @@ import { ToolRegister, loadRegister } from "./register.ts";
 import { MAX_INPUT_CHARS, loadPatterns, screenInput, screenToolOutput, type PatternLibrary } from "./screening.ts";
 
 export type * from "./contracts.ts";
-export { checkGrounding, extractFigures } from "./grounding.ts";
+export { PARTIAL_MARK, TOTAL_MARK, checkCompleteness, checkGrounding, extractFigures, type CompletenessResult, type Fragment } from "./grounding.ts";
 export { AGENT_DIR, PromptRegistry, RegistryError, checkLock, computeLock, writeLock } from "./prompts.ts";
 export { PROCESSING_ENV, PROCESSING_HEADER, ProcessingNotApproved, middlewareHeaders, parseProcessingApproval, processingFromEnv, requireProcessingApproval } from "./processing.ts";
 export { AGENT_GOVERNANCE_MIGRATIONS, DEFAULT_LIMITS, RateLimiter, TurnRecorder, turnStream, type AgentPeriodStats, type RateLimits, type TurnRow } from "./recorder.ts";

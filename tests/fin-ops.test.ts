@@ -465,7 +465,7 @@ describe("FIN-OPS-03 autonomy kill switch", () => {
     await cell.settle();
     const auto = (await cell.agent.openRatifications(T)).filter((x) => /\/(3|4)\/GITHUB/.test(x.narration as string));
     expect(auto).toHaveLength(2);                                                                              // posted at L3
-    await cell.agent.correct(T, auto[0]!.journal_id as string, "LIVING", OWNER);
+    await cell.agent.correct(T, auto[0]!.journal_id as string, "LIVING", OWNER, { reason: { codes: ["wrong_account"] } });
     await cell.gl.execute(T, B, { kind: "ReverseJournal", journalId: auto[1]!.journal_id as string, reversalJournalId: uuid(), reason: "duplicate charge" }, { principal: OWNER });
     await cell.settle();
     const status = await new OpsAdmin(owner, cell).status();

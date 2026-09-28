@@ -22,7 +22,7 @@ import { ACTIONS, AccessDenied, IdentityError, LEGACY_ALIASES, PERSON_ROLES, can
 import type { CommandSignature, SignedAction } from "@kuber/contracts";
 import type { TransactionSql } from "postgres";
 import { z, ZodError } from "zod";
-import { Account, BankDetails, BookPurpose, Id, IsoDate, PartyKind, PartyTerms, Principal, TaxStatus, parseAmount, uuid, type Line } from "@kuber/contracts";
+import { Account, BankDetails, BookPurpose, DecisionReason, Id, IsoDate, PartyKind, PartyTerms, Principal, TaxStatus, parseAmount, uuid, type Line } from "@kuber/contracts";
 import { CommandConflict, ConcurrencyError, GuardDenied } from "@kuber/eventstore";
 import { DomainError, type BookCommand } from "@kuber/gl";
 import { AgentError } from "@kuber/agent";
@@ -156,7 +156,7 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     if (err instanceof IdentityError) return reply.code(err.statusCode).send({ error: err.code, message: err.message });
     if (err instanceof ZodError) return reply.code(400).send({ error: "invalid_request", issues: err.issues });
     if (err instanceof DomainError) return reply.code(422).send({ error: err.code, message: err.message });
-    if (err instanceof AgentError) return reply.code(err.code === "not_found" ? 404 : 409).send({ error: err.code, message: err.message });
+    if (err instanceof AgentError) return reply.code(err.code === "not_found" ? 404 : err.code === "reason_required" || err.code === "bad_reason" ? 422 : 409).send({ error: err.code, message: err.message });
     if (err instanceof IngestionError) return reply.code(422).send({ error: err.code, message: err.message, detail: err.detail });
     if (err instanceof OpsError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof ConsolidationError) return reply.code(err.status).send({ error: err.code, message: err.message });
@@ -382,7 +382,7 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   app.post<T>("/v1/tenants/:tenant/drafts/:id/approve", async (req, reply) => {
     const { tenant, principal, member } = await who(req, "draft.decide");
     await draftInScope(tenant, member, req.params.id);
-    const b = z.object({ accountId: z.string().optional(), assertion: Assertion }).parse(req.body ?? {});
+    const b = z.object({ accountId: z.string().optional(), assertion: Assertion, correction: DecisionReason.optional() }).parse(req.body ?? {});
     // Above the approval limit, approving a draft is a signed command (design 16.4).
     const intent = await draftIntent(cell, tenant, req.params.id, b.accountId);
     const reason = await amountReason(cell, tenant, intent.amount);
@@ -391,13 +391,16 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
       attest = await attestFor(req, tenant, principal, b.assertion, async () => intent);
       if (!attest) return signatureRequired(reply, "draft.approve", reason);
     }
-    return reply.code(202).send(await cell.agent.approveDraft(tenant, req.params.id, principal, b.accountId, undefined, undefined, attest ? { attest } : {}));
+    return reply.code(202).send(await cell.agent.approveDraft(tenant, req.params.id, principal, b.accountId, undefined, undefined,
+      { ...(attest ? { attest } : {}), ...(b.correction ? { correction: b.correction } : {}) }));
   });
   app.post<T>("/v1/tenants/:tenant/drafts/:id/reject", async (req, reply) => {
     const { tenant, principal, member } = await who(req, "draft.decide");
     await draftInScope(tenant, member, req.params.id);
-    const b = z.object({ reason: z.string().min(1) }).parse(req.body);
-    await cell.agent.rejectDraft(tenant, req.params.id, principal, b.reason);
+    // `reason`: free text (older clients) or { codes, text }; `codes`: the structured reason with a free-text `reason` (required above the SoD limit).
+    const b = z.object({ reason: z.union([z.string().min(1), DecisionReason]), codes: DecisionReason.shape.codes.optional() }).parse(req.body);
+    if (typeof b.reason === "string") await cell.agent.rejectDraft(tenant, req.params.id, principal, b.reason, b.codes ? { codes: b.codes, text: b.reason } : undefined);
+    else await cell.agent.rejectDraft(tenant, req.params.id, principal, b.reason);
     return reply.code(204).send();
   });
   // Source originals (F18): the retained, sealed upload behind a signal, with its hash re-verified.
@@ -459,8 +462,8 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
   });
   app.post<T>("/v1/tenants/:tenant/journals/:id/correct", async (req, reply) => {
     const { tenant, principal } = await who(req, "journal.ratify", { allBooks: true });
-    const b = z.object({ toAccount: z.string(), learn: z.boolean().default(false) }).parse(req.body);
-    return reply.code(202).send(await cell.agent.correct(tenant, req.params.id, b.toAccount, principal, { learn: b.learn }));
+    const b = z.object({ toAccount: z.string(), learn: z.boolean().default(false), reason: DecisionReason.optional() }).parse(req.body);
+    return reply.code(202).send(await cell.agent.correct(tenant, req.params.id, b.toAccount, principal, { learn: b.learn, ...(b.reason ? { reason: b.reason } : {}) }));
   });
   app.post<P>("/v1/tenants/:tenant/rules", async (req, reply) => {
     const { tenant, principal } = await who(req, "rules.manage", { allBooks: true });
@@ -714,7 +717,11 @@ export function buildServer(cell: Cell, opts: ServerOptions = {}): FastifyInstan
     const r = await cell.ops.commit(tenant, req.params.id, principal, b.hash, attest ? { attest } : {});
     return reply.code(r.status === "committed" ? 200 : 202).send(r);
   });
-  app.post<T>("/v1/tenants/:tenant/plans/:id/discard", async (req) => { const { tenant, principal } = await who(req, "read"); return cell.ops.discard(tenant, req.params.id, principal); });
+  app.post<T>("/v1/tenants/:tenant/plans/:id/discard", async (req) => {
+    const { tenant, principal } = await who(req, "read");
+    const b = z.object({ reason: DecisionReason.optional() }).parse(req.body ?? {});
+    return cell.ops.discard(tenant, req.params.id, principal, b.reason);
+  });
 
   // ------------------------------------------------------------ journal lifecycle (FIN-GL-01)
   // One vocabulary over every path an entry takes: draft, submitted, approved, posting, posted, failed.

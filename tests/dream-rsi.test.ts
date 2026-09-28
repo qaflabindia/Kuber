@@ -296,7 +296,7 @@ describe("Dream-RSI in Kuber", () => {
     await submit([{ name: "ZETA HOSTING", hint: "zeta hosting", direction: "out", amount: 250_000, date: "2026-10-02" }]); await approveAll();
     await submit(Array.from({ length: 5 }, (_, i) => ({ name: "ZETA HOSTING", hint: "zeta hosting", direction: "out" as const, amount: 250_000 + i * 100, date: "2026-10-15" })));
     const zeta = await cell.agent.openRatifications(T);
-    for (const r of zeta.slice(0, 2)) await cell.agent.correct(T, r.journal_id, "LIVING", OWNER);
+    for (const r of zeta.slice(0, 2)) await cell.agent.correct(T, r.journal_id, "LIVING", OWNER, { reason: { codes: ["wrong_account"] } });
     await ratifyAll();
     await cell.settle();
     await submit([{ name: "SWIGGY", hint: "swiggy", direction: "out", amount: 64_200, date: "2026-10-20" }]); await approveAll("BIZEXP");

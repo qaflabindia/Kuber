@@ -24,6 +24,7 @@ import { BANK_MIGRATIONS, BankService, bankExtension, bankOperations } from "@ku
 import { MIGRATION_MIGRATIONS, Migration } from "@kuber/migration";
 import { sealIdentityColumns } from "./keys-admin.ts";
 import { Portal } from "./portal.ts";
+import { STANDING_RULE_OPERATIONS } from "./standing-rule-ops.ts";
 import { AGENT_GOVERNANCE_MIGRATIONS } from "./copilot/governance/recorder.ts";
 
 export interface CellOptions {
@@ -272,6 +273,18 @@ export class Cell {
     // Mapped statements and KPIs (FIN-RPT-01/02): the book's framework, basis and fiscal year come from the GL's book state.
     reporting.fin.bookInfo = async (t, b) => { const st = await gl.state(t, b); return st.exists ? { ...st.config } : null; };
     ops.register(REPORT_OPERATIONS);
+    // Context integrity: standing rules stated in chat become governed proposals (classification rule, POL-900 note), applied by the agent module on a person's commit.
+    ops.register(STANDING_RULE_OPERATIONS);
+    ops.registerExtension("agent", agent.standingRuleExtension);
+    // Context integrity: rejections, corrections and discards above the tenant's SoD limit carry a structured reason.
+    const aboveLimit = async (t: string, amount: bigint | null, tx?: Parameters<typeof identity.settings>[1]) => {
+      const lim = (await identity.settings(t, tx)).sodLimitPaise;
+      if (lim === null) return null;
+      if (amount === null) return "an approval limit is set and the amount is not known yet";
+      return amount > BigInt(lim) ? `the amount is above the approval limit of ₹${(BigInt(lim) / 100n).toLocaleString("en-IN")}` : null;
+    };
+    agent.reasonRequiredAbove = (t, amount, tx) => aboveLimit(t, amount, tx);
+    ops.reasonRequiredAbove = (t, amount) => aboveLimit(t, amount);
     // Report ↔ close (FIN-RPT-01 × FIN-CLS-03/04): a period the close workflow has certified is what makes
     // its statements "certified", and a reopen withdraws that; other periods keep the snapshot source.
     reporting.fin.certification = new CloseCertificationSource(close, reporting.fin.certification);

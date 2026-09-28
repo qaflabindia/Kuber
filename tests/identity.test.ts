@@ -323,7 +323,7 @@ describe("F02: roles, book scope and maker-checker", () => {
         expect((await commit(P.approver, big)).json().error).toBe("step_up_required");
         expect((await commit(P.approver, big, Date.now() - STEP_UP_MAX_AGE_MS - 1000)).json().error).toBe("step_up_required");
         expect((await commit(P.approver, big, Date.now())).json()).toMatchObject({ error: "step_up_required", reason: expect.stringMatching(/above the approval limit/) });
-        await cell.ops.discard(T, big.planId, P.controller);
+        await cell.ops.discard(T, big.planId, P.controller, { codes: ["not_needed"] });
         const small = await cell.ops.plan(T, B, P.controller, "record", recordInput(500));
         const r = await commit(P.approver, small);
         expect(r.statusCode).toBe(200);

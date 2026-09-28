@@ -3,7 +3,11 @@
  * as cards. AAWDS specification (design section 2):
  *
  *   E   trigger sync (one chat request per turn); adaptation: session memory only. History comes
- *       from the client, capped here at 8 exchanges; the server keeps no conversation.
+ *       from the client, capped here at the last 8 messages (user and assistant only, oldest first);
+ *       the server keeps no conversation. History is context for the model, never grounds: figures
+ *       in it are not evidence (GEN-01 grounds only on this turn's tool outputs), a plan it names is
+ *       simulated again, and a standing rule stated in chat becomes a governed proposal instead of
+ *       being remembered (context integrity).
  *   L1  tools only (agent-tools.ts read tools, the ops catalogue as plan tools); no code execution.
  *       kuber_commit is never offered: writes are plans a person approves on the canvas.
  *   L3  mixed: the deterministic router (router.ts) is the static fast path; only when it cannot
@@ -27,10 +31,11 @@ import { readGuard } from "../agent-tools.ts";
 import { kuberTools, type ToolResult, type ToolSpec, type Who } from "../tools.ts";
 import type { ExternalTools } from "./external.ts";
 import type { LlmProvider } from "./provider.ts";
-import { HELP, ROUTER_VERSION, helpText, route, type AccountRef, type Routed } from "./router.ts";
+import { HELP, ROUTER_VERSION, helpText, route, type AccountRef, type Routed, type StandingRule } from "./router.ts";
 import { isReasoner, llmReasoner, type Reasoner, type ReasonerPrompt, type ReasonerStep } from "./reasoner-types.ts";
 import type { GroundingResult, InputVerdict, Reversibility, ToolCallRecord, TurnRecord } from "./governance/contracts.ts";
 import { createStubGovernance, deniedFlag, type CoreGovernance } from "./governance/stub.ts";
+import { checkCompleteness, extractFigures, toolValues } from "./governance/grounding.ts";
 
 export interface CopilotReply {
   reply: string; cards: Plan[]; suggestions?: string[]; engine: string; trace: { tool: string; ok: boolean }[];
@@ -49,6 +54,40 @@ const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const HALTED = "The copilot is halted for this book, so I can answer questions from the books but not prepare changes. A person with authority can resume it.";
 const UNVERIFIED = "Some figures in the drafted answer could not be verified against the books, so this answer shows only what the tools returned.";
+const PARTIAL_TOTAL = "The drafted answer presented a figure from a partial result as a total, so this answer shows only what the tools returned.";
+const NO_MEMORY = "I don't keep rules or preferences from our conversation. To make that a standing rule, say it as one (for example \"Always book Swiggy to STAFFWELF\" or \"From now on, payments above 50,000 need my approval\") and I'll prepare it as a proposal for approval.";
+const ASSERTED = "The figure you mentioned is not what the books show; the figures above are from the books as they are now.";
+const PLAN_NOT_FOUND = "I can't find the plan mentioned earlier in this book, so I won't rely on what the conversation says about it. What would you like me to simulate against the current books?";
+
+// ---------------------------------------------------------------- context integrity
+/** The reply claims to remember something for later: the copilot keeps no memory, and standing rules are proposals. */
+const MEMORY_CLAIM = /\b(I(?:'| wi)ll (?:remember|keep (?:that|this|it) in mind|note (?:that|this)|do (?:that|this|so) from now on|always (?:do|book|post|classify|use|treat))|noted for (?:the )?future|(?:got it|noted|understood|okay|ok)[,.!]?\s+(?:from now on|going forward|next time)|I(?:'ve| have) (?:noted|saved|remembered|stored) (?:that|this|it))\b/i;
+/** The person refers to a plan from earlier in the conversation. */
+const PLAN_REF = /\b(?:that|the|this|same|previous|earlier|above|last|your) plan\b|\bplan (?:above|from before|you (?:made|prepared|showed))\b|^\s*(?:ok(?:ay)?|yes|sure|fine)?[,.!\s]*(?:go ahead|proceed|do it|approve it|commit it|confirm(?: it)?)\b/i;
+const PLAN_ID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+/** A question about a figure the person states ("my cash is 6 lakh, right?"). */
+const ASKING = /\?\s*$|^(?:what|how|is|are|do|does|did|can|could|show|tell)\b|\b(?:right|correct|isn't it|is that right)\s*[?.!]*\s*$/i;
+/** The most recent plan id the conversation mentions (newest message first). */
+const historyPlanId = (hist: HistoryItem[]) => { for (const h of [...hist].reverse()) { const ids = h.text.match(PLAN_ID); if (ids?.length) return ids.at(-1)!.toLowerCase(); } return null; };
+const POLICY_ID = /\bPOL-\d{3}\b/g;
+
+/**
+ * Stored controls are cited when they act (unretrieved context): a blocked plan names what blocks
+ * it and the policies involved; a plan held for a person names the policy, its approver and reasons.
+ */
+export function policyCitation(writes: Plan[]): string {
+  const blocked = writes.filter((w) => w.blocked);
+  if (blocked.length) {
+    const failing = blocked.flatMap((w) => w.checks.filter((c) => c.blocking && !c.ok));
+    const ids = [...new Set(failing.flatMap((c) => `${c.label} ${c.detail ?? ""}`.match(POLICY_ID) ?? []))];
+    const gov = [...new Set(blocked.flatMap((w) => w.policy?.ids ?? []))].filter((x) => !ids.includes(x));
+    return `Blocked by: ${failing.map((c) => `${c.label}${c.detail ? ` (${c.detail})` : ""}`).join("; ")}.${ids.length ? ` Policy: ${ids.join(", ")}.` : ""}${gov.length ? ` Governing policy for this operation: ${gov.join(", ")}.` : ""}`;
+  }
+  const held = writes.filter((w) => w.needsPerson && w.policy);
+  if (!held.length) return "";
+  return held.map((w) => `Policy ${w.policy!.ids.join(", ")} (${w.policy!.level}) requires approval by ${w.policy!.approver}${w.policy!.reasons.length ? `: ${w.policy!.reasons.join("; ")}` : ""}.`)
+    .filter((x, i, a) => a.indexOf(x) === i).join(" ");
+}
 
 class TimedOut extends Error { constructor() { super("turn timed out"); } }
 const within = <T>(p: Promise<T>, deadline: number): Promise<T> => {
@@ -95,7 +134,9 @@ export class Copilot {
     const t0 = Date.now(), turnId = randomUUID(), gov = this.governance;
     const person = who.principal;
     const agentWho: Who = { ...who, principal: COPILOT, onBehalfOf: person };
-    const hist = history.slice(-HISTORY_MAX).map((h) => ({ role: h.role, text: String(h.text ?? "").slice(0, HISTORY_CHARS) }));
+    // Only user and assistant messages, the most recent HISTORY_MAX, in their original (oldest first) order.
+    const hist: HistoryItem[] = (Array.isArray(history) ? history : []).filter((h) => h && (h.role === "user" || h.role === "assistant"))
+      .slice(-HISTORY_MAX).map((h) => ({ role: h.role, text: String(h.text ?? "").slice(0, HISTORY_CHARS) }));
     const turn = newTurn(text);
     let input: InputVerdict = { ok: false, category: "empty" };
     let engine = "rules", steps = 0;
@@ -133,16 +174,26 @@ export class Copilot {
       fyStartMonth = s.config?.fiscalYearStartMonth ?? 4;
     } catch (e) { return finish(`I can't read this book for you: ${errText(e)}`, "refused"); }
     const r = route(text, this.clock(), accounts, { fyStartMonth });
+    const rulesDone = (reply: string, outcome: TurnRecord["outcome"], extra: { suggestions?: string[] } = {}) => {
+      const post = this.contextChecks(reply, turn, text, "rules");
+      grounding = gov.checkGrounding(post.reply, turn.outputs);
+      if (post.partialTotals.length) grounding = { ok: false, ungrounded: [...grounding.ungrounded, ...post.partialTotals.map((x) => `${x} (partial total)`)], partialTotals: post.partialTotals };
+      return finish(post.reply, outcome, extra);
+    };
+
+    // Competing context: a plan the conversation names is simulated again against the current books, never trusted from history.
+    const planRef = PLAN_REF.test(text) ? historyPlanId(hist) : null;
+    if (planRef) {
+      if (halted) return finish(HALTED, "halted");
+      return this.fromHistoryPlan(planRef, who, agentWho, turn, rulesDone);
+    }
 
     if (halted) {
-      const writes = r.kind === "chat" || (r.kind === "op" && r.intents.some((i) => this.cell.ops.defs.get(i.op as never)?.kind === "write"));
+      const writes = r.kind === "chat" || r.kind === "standing_rule" || (r.kind === "op" && r.intents.some((i) => this.cell.ops.defs.get(i.op as never)?.kind === "write"));
       if (writes) return finish(HALTED, "halted");
       if (r.kind === "help" && r.reason === "unrecognised") return finish(`${HALTED} Ask a question the built-in rules answer, for example "Sales this month" or "Trial balance".`, "halted", { suggestions: HELP });
     }
-    if (r.kind !== "help" || r.reason === "asked" || !this.reasoner || halted) return this.withRules(r, who, agentWho, turn, (reply, outcome, extra) => {
-      grounding = gov.checkGrounding(reply, turn.outputs);
-      return finish(reply, outcome, extra);
-    });
+    if (r.kind !== "help" || r.reason === "asked" || !this.reasoner || halted) return this.withRules(r, who, agentWho, turn, rulesDone);
 
     // ------------------------------------------------ bounded model loop (router could not resolve)
     engine = this.reasoner.name;
@@ -187,12 +238,72 @@ export class Copilot {
       reply = summary ? `${summary}\n\n${UNVERIFIED}` : `I couldn't verify the figures in that answer against your books, so I won't state them. Ask for a specific report, for example "Profit and loss this year".`;
       outcome = summary ? "answered" : "error";
     }
-    return finish(reply, outcome);
+    // Context integrity: no memory claims, no partial result presented as a total, partial views and acting policies named.
+    const post = this.contextChecks(reply, turn, text, "model");
+    if (post.partialTotals.length) grounding = { ok: false, ungrounded: [...grounding.ungrounded, ...post.partialTotals.map((x) => `${x} (partial total)`)], partialTotals: post.partialTotals };
+    return finish(post.reply, outcome);
   }
 
-  /** A reply built only from tool summaries (figures exactly as the tools returned them). */
+  /** A reply built only from tool summaries (figures exactly as the tools returned them), with any partial view named. */
   private grounded(turn: TurnState): string {
-    return [...new Set(turn.results.filter((r) => !r.result.isError).map((r) => r.result.summary ?? r.result.text.split("\n").slice(0, 2).join(" ")))].join("\n");
+    const lines = [...new Set(turn.results.filter((r) => !r.result.isError).map((r) => r.result.summary ?? r.result.text.split("\n").slice(0, 2).join(" ")))];
+    return lines.length ? [...lines, ...this.fragmentNotes(turn)].join("\n") : "";
+  }
+
+  /** The sentences naming every partial result this turn used ("Showing 6 of 14 accounts ..."). */
+  private fragmentNotes(turn: TurnState): string[] {
+    return [...new Set(turn.results.filter((r) => !r.result.isError && r.result.completenessNote).map((r) => r.result.completenessNote!))];
+  }
+
+  /**
+   * Context integrity on a drafted reply (both paths):
+   *   uncaptured   a model reply that claims to remember a rule is replaced (rules become proposals);
+   *   fragment     a figure presented as a total that only a partial result grounds is refused, and
+   *                every partial result used is named in the reply;
+   *   competing    a figure the person asserts that the books do not show is called out;
+   *   unretrieved  the policies and checks that block or hold a plan are cited.
+   */
+  private contextChecks(draft: string, turn: TurnState, question: string, path: "rules" | "model"): { reply: string; partialTotals: string[] } {
+    let reply = draft;
+    const proposals = turn.cards.some((c) => c.op === "propose_rule" || c.op === "propose_policy_change");
+    if (path === "model" && MEMORY_CLAIM.test(reply) && !proposals) {
+      const summary = this.grounded(turn);
+      reply = summary ? `${summary}\n\n${NO_MEMORY}` : NO_MEMORY;
+    }
+    const frag = checkCompleteness(reply, turn.results.filter((r) => !r.result.isError).map((r) => ({ text: r.result.text, completeness: r.result.completeness, scopeTotals: r.result.scopeTotals })));
+    if (!frag.ok) { const summary = this.grounded(turn); reply = summary ? `${summary}\n\n${PARTIAL_TOTAL}` : PARTIAL_TOTAL; }
+    const low = reply.toLowerCase();
+    const notes = this.fragmentNotes(turn).filter((n) => !low.includes(n.toLowerCase().split(" (")[0]!.split(";")[0]!));
+    if (notes.length) reply = `${reply}\n${notes.join("\n")}`;
+    const writes = turn.cards.filter((c) => c.kind === "write");
+    const cite = policyCitation(writes);
+    if (cite && ((cite.match(POLICY_ID) ?? []).some((id) => !reply.includes(id)) || (writes.some((w) => w.blocked) && !reply.includes("Blocked by")))) reply = `${reply} ${cite}`;
+    // A figure the person states ("my cash is 6 lakh, right?") is a claim, not evidence: say when the books show otherwise.
+    if (ASKING.test(question.trim()) && turn.results.some((r) => !r.result.isError)) {
+      const vals = toolValues(turn.outputs);
+      const claimed = extractFigures(question).filter((f) => f.kind === "money" && !vals.money.has(f.value));
+      if (claimed.length && !reply.includes(ASSERTED)) reply = `${reply}\n${ASSERTED}`;
+    }
+    return { reply, partialTotals: frag.partialTotals };
+  }
+
+  /** A plan named in the conversation: looked up in this book and simulated again against the current books (never trusted from history). */
+  private async fromHistoryPlan(planId: string, who: Who, agentWho: Who, turn: TurnState,
+                                done: (reply: string, outcome: TurnRecord["outcome"], extra?: { suggestions?: string[] }) => Promise<CopilotReply>): Promise<CopilotReply> {
+    let p: Plan | null = null;
+    try { await readGuard(this.cell, agentWho, "kuber_plans"); p = await this.cell.ops.get(who.tenant, planId); } catch { p = null; }
+    if (!p || p.bookId !== who.book) return done(PLAN_NOT_FOUND, "answered");
+    if (p.status === "committed" || p.status === "discarded") return done(`The plan mentioned earlier is already ${p.status}, so there is nothing to approve. What would you like me to simulate against the current books?`, "answered");
+    if (!p.input) return done("The plan mentioned earlier was made before Kuber kept plan inputs, so I can't simulate it again from the conversation. What would you like me to simulate against the current books?", "answered");
+    const cur = await this.cell.gl.state(who.tenant, who.book);
+    const changed = p.status === "stale" || p.basisVersion === undefined || p.basisVersion !== cur.version;
+    const name = `kuber_${p.op}`;
+    const res = await this.call(turn, agentWho, who.principal, kuberTools(this.cell, agentWho, this.clock).find((t) => t.name === name), name, p.input);
+    if (!res.ok) return done(`I couldn't simulate the plan mentioned earlier again: ${"reason" in res ? res.reason : res.text}`, "answered");
+    const lead = changed ? "The books changed since the plan mentioned earlier was simulated, so I simulated it again against the current books instead of relying on the conversation."
+      : "I simulated the plan mentioned earlier again against the current books instead of relying on the conversation.";
+    const writes = turn.cards.filter((c) => c.kind === "write");
+    return done(`${lead} ${writes.some((c) => c.blocked) ? "This can't go ahead yet." : "Here is exactly what would change. Nothing is posted until you approve it."}`, "answered");
   }
 
   private reversibility(name: string, tool?: ToolSpec): Reversibility {
@@ -237,6 +348,7 @@ export class Copilot {
                           done: (reply: string, outcome: TurnRecord["outcome"], extra?: { suggestions?: string[] }) => Promise<CopilotReply>): Promise<CopilotReply> {
     if (r.kind === "help") return done(r.text, "answered", { suggestions: HELP });
     if (r.kind === "clarify") return done(r.text, "answered", r.suggestions ? { suggestions: r.suggestions } : {});
+    if (r.kind === "standing_rule") return this.captureRule(r.rule, who, agentWho, turn, done);
     if (r.kind === "chat") {
       // Capture path: channels parse it, the agent classifies it, policy decides whether it posts. Done as the person.
       const t0 = Date.now();
@@ -256,10 +368,31 @@ export class Copilot {
     }
     const writes = turn.cards.filter((c) => c.kind === "write");
     const reads = turn.results.filter((x) => !x.result.isError && x.result.plan?.kind !== "write").map((x) => x.result.summary).filter(Boolean);
+    const cite = policyCitation(writes);
     const reply = errors.length ? `That didn't work: ${errors.join("; ")}`
-      : writes.some((c) => c.blocked) ? "This can't go ahead yet. The card shows what to resolve first."
-      : writes.length ? "Here is exactly what would change. Nothing is posted until you approve it."
+      : writes.some((c) => c.blocked) ? `This can't go ahead yet. The card shows what to resolve first.${cite ? ` ${cite}` : ""}`
+      : writes.length ? `Here is exactly what would change. Nothing is posted until you approve it.${cite ? ` ${cite}` : ""}`
       : reads.join("\n");
     return done(reply, errors.length && !turn.results.length ? "error" : "answered");
+  }
+
+  /**
+   * Never captured: a standing rule stated in chat becomes a governed proposal (a classification rule
+   * or a POL-900 policy change note), prepared through the same governed tool call as any plan. It is
+   * never kept as conversation: the reply says so, and nothing changes until a person approves.
+   */
+  private async captureRule(rule: StandingRule, who: Who, agentWho: Who, turn: TurnState,
+                            done: (reply: string, outcome: TurnRecord["outcome"], extra?: { suggestions?: string[] }) => Promise<CopilotReply>): Promise<CopilotReply> {
+    const name = rule.kind === "classification" ? "kuber_propose_rule" : "kuber_propose_policy_change";
+    const args = rule.kind === "classification" ? { pattern: rule.pattern, account: rule.account, statedAs: rule.statedAs } : { statement: rule.statement };
+    const res = await this.call(turn, agentWho, who.principal, kuberTools(this.cell, agentWho, this.clock).find((t) => t.name === name), name, args);
+    if (!res.ok) return done(`I couldn't prepare that rule as a proposal (${"reason" in res ? res.reason : res.text}). I don't keep rules from our conversation, so nothing changes.`, "answered");
+    const plan = turn.cards.at(-1);
+    if (!plan || plan.blocked) {
+      const why = plan ? plan.checks.filter((c) => c.blocking && !c.ok).map((c) => `${c.label}${c.detail ? ` (${c.detail})` : ""}`).join("; ") : "no proposal was prepared";
+      return done(`I prepared that rule as a proposal, but it can't go ahead: ${why}. I don't keep rules from our conversation, so nothing changes.`, "answered");
+    }
+    const who2 = rule.kind === "classification" ? "A person with rules.manage approves it on the card" : "Under POL-900 a person records the note and an admin approves any new policy version";
+    return done(`Captured as a proposal awaiting approval, not as something I remember from this conversation. ${plan.summary} ${who2}.`, "answered");
   }
 }

@@ -73,6 +73,7 @@ export function extractFigures(text: string): Figure[] {
 
 const TOKEN = new RegExp(String.raw`(₹|\bRs\.?\s*|\bINR\s*)?(-?)(${NUM})(?:\s*(${UNIT})\b)?(\s*(?:%|percent\b|per\s+cent\b|rupees?\b|paise\b))?`, "gi");
 const DATE_PART = /\d{4}-\d{2}-\d{2}/g;
+const COMPLETENESS_LINE = /^Completeness:.*$/gm;
 
 export interface ToolValues {
   /** Every value a tool output shows: each number as rupees (with its unit) and, if an integer, also as raw paise. */
@@ -86,7 +87,8 @@ export interface ToolValues {
 export function toolValues(outputs: string[]): ToolValues {
   const money = new Set<bigint>(), moneyTerms = new Set<bigint>(), percent = new Set<bigint>();
   for (const raw of outputs) {
-    const o = raw.replace(DATE_PART, (d) => " ".repeat(d.length));      // dates are not figures
+    // Dates are not figures; nor are the counts in a tool's "Completeness:" line (rows shown, rows in all).
+    const o = raw.replace(COMPLETENESS_LINE, "").replace(DATE_PART, (d) => " ".repeat(d.length));
     TOKEN.lastIndex = 0;
     for (let m = TOKEN.exec(o); m; m = TOKEN.exec(o)) {
       const [, cur, , num, unit = "", suffix = ""] = m;
@@ -121,4 +123,41 @@ export function checkGrounding(reply: string, toolOutputs: string[]): GroundingR
   const vals = toolValues(toolOutputs);
   const ungrounded = figs.filter((f) => !(f.kind === "money" ? groundedIn(f.value, vals.money, vals.moneyTerms) : groundedIn(f.value, vals.percent, vals.percent))).map((f) => f.text);
   return { ok: ungrounded.length === 0, ungrounded };
+}
+
+// ---------------------------------------------------------------- completeness (context integrity: fragments)
+/** A tool result as the completeness check sees it. */
+export interface Fragment { text: string; completeness?: { complete: boolean }; scopeTotals?: string[] }
+export interface CompletenessResult { ok: boolean; partialTotals: string[] }
+
+/** The reply says the figures are partial (then a total over the rows shown is stated honestly). */
+export const PARTIAL_MARK = /\b(showing \d+|shown|partial(ly)?|incomplete|first \d+|top \d+|largest \d+|of the \d+|more exist|at least|not (all|every|the whole|complete)|so far|only (the|those)|excluding|excluded|left out|on this page|this page)\b/i;
+/** The sentence presents a figure as a total of the whole. */
+export const TOTAL_MARK = /\b(totals?|in all|altogether|overall|combined|sum(med)?|all together|grand|across all|all (of )?(the |your |my )?(accounts|journals|entries|transactions|payments|parties|entities|lines|items|vendors|customers))\b/i;
+
+/**
+ * GEN-01 for partial results: a figure presented as a total (its sentence says total, overall, in
+ * all, …) may not come from a result that is incomplete (a page, a top-N cut, entities outside the
+ * scope) unless the reply marks it partial. A figure is fine when a complete result, or an incomplete
+ * result's scope totals (figures that cover the whole scope, such as a ledger's closing balance),
+ * ground it; it is a partial total when only the incomplete results' rows ground it. Figures no
+ * tool grounds at all are the grounding check's business, not counted here.
+ */
+export function checkCompleteness(reply: string, fragments: Fragment[]): CompletenessResult {
+  const partial = fragments.filter((f) => f.completeness && !f.completeness.complete);
+  if (!partial.length || PARTIAL_MARK.test(reply)) return { ok: true, partialTotals: [] };
+  const complete = toolValues(fragments.filter((f) => !f.completeness || f.completeness.complete).map((f) => f.text));
+  for (const f of partial) for (const p of f.scopeTotals ?? []) { if (/^-?\d+$/.test(p)) { const v = BigInt(p.replace("-", "")) * PAISA; complete.money.add(v); complete.moneyTerms.add(v); } }
+  const rows = toolValues(partial.map((f) => f.text));
+  const out: string[] = [];
+  for (const sentence of reply.split(/(?<=[.!?;\n])\s+/)) {
+    if (!TOTAL_MARK.test(sentence)) continue;
+    for (const fig of extractFigures(sentence)) {
+      if (fig.kind !== "money") continue;
+      if (groundedIn(fig.value, complete.money, complete.moneyTerms)) continue;
+      const all = new Set([...rows.moneyTerms, ...complete.moneyTerms]);
+      if (groundedIn(fig.value, rows.money, all)) out.push(fig.text);
+    }
+  }
+  return { ok: out.length === 0, partialTotals: [...new Set(out)] };
 }

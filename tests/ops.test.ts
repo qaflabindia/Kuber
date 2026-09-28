@@ -107,7 +107,7 @@ describe("simulate, then commit exactly that", () => {
     expect(p.checks.find((c) => c.label.startsWith("Statement agrees"))!.ok).toBe(true);
     const off = await plan("reconcile", { account: "BANK", statementBalance: "1,30,106.50", asOf: "2026-10-31", adjustTo: "BIZEXP" });
     expect(off.journals[0]!.lines).toEqual([expect.objectContaining({ accountId: "BANK", amount: "-10000" }), expect.objectContaining({ accountId: "BIZEXP", amount: "10000" })]);
-    await cell.ops.discard(T, off.planId, OWNER);
+    await cell.ops.discard(T, off.planId, OWNER, { codes: ["superseded"] });
   });
 
   it("allocate: splits by weight to the paisa, across cost centres", async () => {

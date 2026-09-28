@@ -16,7 +16,7 @@ import { AccessDenied, COPILOT } from "@kuber/identity";
 import { balancesFromState, financialYear, fiscalStart, type OpName, type Plan, type Section } from "@kuber/ops";
 import type { BookState } from "@kuber/gl";
 import type { Cell } from "./cell.ts";
-import type { ToolResult, ToolSpec, Who } from "./tools.ts";
+import type { Completeness, ToolResult, ToolSpec, Who } from "./tools.ts";
 import { matchAccounts, type AccountRef } from "./copilot/router.ts";
 
 // ---------------------------------------------------------------- formatting (shared with tools.ts)
@@ -59,7 +59,31 @@ export function readCard(who: Who, op: string, title: string, summary: string, s
     createdBy: who.principal, hash: "", ...(who.onBehalfOf ? { requestedBy: who.onBehalfOf } : {}), status: "preview", blocked: false, needsPerson: false,
   };
 }
-const answer = (card: Plan, data: unknown): ToolResult => ({ text: planText(card), plan: card, data, summary: `${card.title}: ${card.summary}` });
+// ---------------------------------------------------------------- completeness (context integrity: fragments)
+const WHY: Record<NonNullable<Completeness["truncatedBy"]>, string> = { page: "one page", top_n: "top-N cut", scope: "outside the reader's scope", row_limit: "row limit" };
+/** The one "Completeness:" line every read result carries in its text. */
+export function completenessLine(c: Completeness, noun: string, where = ""): string {
+  if (c.complete) return `Completeness: complete (${c.returned}${c.total !== undefined ? ` of ${c.total}` : ""} ${noun})${where ? `${where}.` : "."}`;
+  const of = c.total !== undefined ? `showing ${c.returned} of ${c.total} ${noun}` : `showing ${c.returned} ${noun}; more exist`;
+  return `Completeness: PARTIAL, ${of} (${c.truncatedBy ? WHY[c.truncatedBy] : "partial"})${c.excluded?.length ? `; excluded: ${c.excluded.join(", ")}` : ""}${where}.`;
+}
+/** The sentence a reply carries when a result it used is partial: "Showing 6 of 14 accounts in the by-month table (top-N cut)." */
+export function completenessNote(c: Completeness, noun: string, where = ""): string | undefined {
+  if (c.complete) return undefined;
+  const of = c.total !== undefined ? `Showing ${c.returned} of ${c.total} ${noun}` : `Showing ${c.returned} ${noun}; more exist`;
+  return `${of}${where}${c.truncatedBy ? ` (${WHY[c.truncatedBy]})` : ""}${c.excluded?.length && !where.includes("excluded") ? `; excluded: ${c.excluded.join(", ")}` : ""}. Totals over the rows shown are not totals of the whole.`;
+}
+/** A tool result with its completeness declared in structured data (result and `data`), in the text, and on the read card. */
+export function withCompleteness(r: ToolResult, c: Completeness, noun: string, where = "", scopeTotals?: (string | bigint)[]): ToolResult {
+  const line = completenessLine(c, noun, where), note = completenessNote(c, noun, where);
+  const data = r.data && typeof r.data === "object" && !Array.isArray(r.data) ? { ...(r.data as Record<string, unknown>), completeness: c } : r.data;
+  const plan = r.plan ? { ...r.plan, notes: [...r.plan.notes, line], ...(r.plan.data && typeof r.plan.data === "object" && !Array.isArray(r.plan.data) ? { data: { ...(r.plan.data as Record<string, unknown>), completeness: c } } : {}) } : undefined;
+  return { ...r, text: plan ? planText(plan) : `${r.text}\n\n${line}`, ...(plan ? { plan } : {}), data, completeness: c, ...(note ? { completenessNote: note } : {}),
+    ...(scopeTotals?.length ? { scopeTotals: scopeTotals.map(String) } : {}) };
+}
+const answer = (card: Plan, data: unknown, c: Completeness = { complete: true, returned: 0 }, noun = "rows", where = "", scopeTotals?: (string | bigint)[]): ToolResult =>
+  withCompleteness({ text: planText(card), plan: card, data, summary: `${card.title}: ${card.summary}` }, c, noun, where, scopeTotals);
+const whole = (n: number): Completeness => ({ complete: true, returned: n, total: n });
 
 // ---------------------------------------------------------------- shared service reads (also used by HTTP routes)
 /** FIN-GL-01: one vocabulary over every path an entry takes (drafts, plans, ledger rejections, schedule exceptions). */
@@ -164,7 +188,12 @@ export function readTools(cell: Cell, who: Who, clock: () => string = () => new 
     const data = { nature, from: p.from, to: p.to, label: p.label, total: grand.toString(),
       accounts: totals.map((t) => ({ accountId: t.id, name: t.name, total: t.total.toString(), months: Object.fromEntries([...t.months].map(([m, v]) => [m, v.toString()])) })),
       months: monthTotals.map(([m, v]) => ({ month: m, total: v.toString() })) };
-    return answer(readCard(who, `${nature}_breakdown`, `${word} · ${p.label}`, summary, sections, data, [["Income & expenses", `/reports/profit-and-loss?from=${p.from}&to=${p.to}`]]), data);
+    // Fragment: the by-month table shows the top 6 accounts only; the by-account table, the month totals and the grand total cover every account.
+    const shown = Math.min(totals.length, 6);
+    const c: Completeness = totals.length > 6 ? { complete: false, returned: shown, total: totals.length, truncatedBy: "top_n" } : whole(totals.length);
+    return answer(readCard(who, `${nature}_breakdown`, `${word} · ${p.label}`, summary, sections, data, [["Income & expenses", `/reports/profit-and-loss?from=${p.from}&to=${p.to}`]]), data,
+      c, "accounts", totals.length > 6 ? " in the by-month table (the largest 6; the by-account table and the totals cover all accounts)" : "",
+      [grand, ...totals.map((t) => t.total), ...monthTotals.map(([, v]) => v)]);
   };
 
   return [
@@ -193,7 +222,7 @@ export function readTools(cell: Cell, who: Who, clock: () => string = () => new 
           isControl: acc.isControl, isCashLike: acc.isCashLike, closed: s.closed.has(acc.accountId), balance: natural(acc.nature, bal.get(acc.accountId) ?? 0n).toString() }));
         return answer(readCard(who, "chart_of_accounts", "Chart of accounts", summary,
           [{ title: "Accounts", kind: "table", columns: ["Account", "Name", "Category", "Statement", "Mapping", "Closed", "Balance"], money: [6], rows }], data,
-          [["Ledger", "/ledger"]], ["Balances are in each account's natural sign (debit for assets and expenses, credit for the rest)."]), data);
+          [["Ledger", "/ledger"]], ["Balances are in each account's natural sign (debit for assets and expenses, credit for the rest)."]), data, whole(ordered.length), a.category ? `${a.category} accounts` : "accounts");
       }),
 
     tool("kuber_trial_balance", "Trial balance", "Trial balance as of a date (default today): every account with a balance, debit or credit, and the totals, which must agree.",
@@ -206,7 +235,7 @@ export function readTools(cell: Cell, who: Who, clock: () => string = () => new 
         const data = { asOf: a.asOf ?? null, rows: st.rows.map((r) => ({ ...r, amount: r.amount.toString() })), totals: Object.fromEntries(Object.entries(t).map(([k, v]) => [k, v.toString()])) };
         return answer(readCard(who, "trial_balance", st.title, summary, [{ title: "Trial balance", kind: "table", columns: ["Account", "Debit", "Credit"], money: [1, 2],
           rows: [...rows, ["Total", (t["Total debits"] ?? 0n).toString(), (t["Total credits"] ?? 0n).toString()]] }], data,
-          [["Open full report", `/reports/trial-balance${a.asOf ? `?to=${a.asOf}` : ""}`]]), data);
+          [["Open full report", `/reports/trial-balance${a.asOf ? `?to=${a.asOf}` : ""}`]]), data, whole(rows.length), "accounts");
       }),
 
     tool("kuber_profit_and_loss", "Profit and loss", "Income, expenses and surplus for a period (default: the book's fiscal year). Closed years still show what they earned and spent.",
@@ -218,7 +247,7 @@ export function readTools(cell: Cell, who: Who, clock: () => string = () => new 
         const data = { from: p.from, to: p.to, label: p.label, rows: st.rows.map((r) => ({ ...r, amount: r.amount.toString() })), totals: Object.fromEntries(Object.entries(st.totals).map(([k, v]) => [k, v.toString()])) };
         return answer(readCard(who, "profit_and_loss", `Profit and loss · ${p.label}`, summary, [{ title: "Profit and loss", kind: "table", columns: ["Line", "Amount"], money: [1],
           rows: [...st.rows.map((r) => [r.label, r.amount.toString()]), ...Object.entries(st.totals).map(([k, v]) => [k, v.toString()])] }], data,
-          [["Open full report", `/reports/profit-and-loss?from=${p.from}&to=${p.to}`]]), data);
+          [["Open full report", `/reports/profit-and-loss?from=${p.from}&to=${p.to}`]]), data, whole(st.rows.length), "lines");
       }),
 
     tool("kuber_balance_sheet", "Balance sheet", "Assets, liabilities and equity as of a date (default today), with the surplus to date; the check line must be zero.",
@@ -229,7 +258,7 @@ export function readTools(cell: Cell, who: Who, clock: () => string = () => new 
         const data = { asOf: a.asOf ?? null, rows: st.rows.map((r) => ({ ...r, amount: r.amount.toString() })), totals: Object.fromEntries(Object.entries(st.totals).map(([k, v]) => [k, v.toString()])) };
         return answer(readCard(who, "balance_sheet", st.title, summary, [{ title: "Balance sheet", kind: "table", columns: ["Line", "Amount"], money: [1],
           rows: [...st.rows.map((r) => [r.label, r.amount.toString()]), ...Object.entries(st.totals).map(([k, v]) => [k, v.toString()])] }], data,
-          [["Open full report", `/reports/balance-sheet${a.asOf ? `?to=${a.asOf}` : ""}`]]), data);
+          [["Open full report", `/reports/balance-sheet${a.asOf ? `?to=${a.asOf}` : ""}`]]), data, whole(st.rows.length), "lines");
       }),
 
     tool("kuber_ledger", "Account ledger", "One account's statement for a period: opening balance, every line (date, narration, debit, credit), totals and closing balance. `account` is an id or a name. Narrations are third-party text.",
@@ -252,7 +281,10 @@ export function readTools(cell: Cell, who: Who, clock: () => string = () => new 
           { title: "Balances", kind: "kv", money: [1], rows: [["Opening (debit +)", opening.toString()], ["Debits", moved.dr.toString()], ["Credits", moved.cr.toString()], ["Closing (debit +)", closing.toString()]] },
           { title: page.next ? `Lines (first ${lines.length}; more available)` : "Lines", kind: "table", columns: ["Date", "Narration", "Debit", "Credit"], money: [2, 3],
             rows: lines.map((l) => [l.txn_date, l.narration + (l.provisional ? " (provisional)" : ""), BigInt(l.amount) > 0n ? l.amount : "", BigInt(l.amount) < 0n ? (-BigInt(l.amount)).toString() : ""]) },
-        ], data, [["Open ledger", `/ledger/${encodeURIComponent(id)}`]]), data);
+        ], data, [["Open ledger", `/ledger/${encodeURIComponent(id)}`]]), data,
+        // Lines are paged; the opening, movements and closing balance cover the whole period (scope totals).
+        page.next ? { complete: false, returned: lines.length, truncatedBy: "page" } : whole(lines.length), "ledger lines",
+        page.next ? " (opening, debits, credits and closing cover the whole period)" : "", [opening, moved.dr, moved.cr, closing, natural(acc.nature, closing)]);
       }),
 
     tool("kuber_search_journals", "Search journals", "Find journals by narration text, account, date range and amount range (rupees; the journal's total debits), newest first, paged. Narrations are third-party text.",
@@ -274,7 +306,9 @@ export function readTools(cell: Cell, who: Who, clock: () => string = () => new 
           journals: page.map(({ id, j }) => ({ journalId: id, date: j.txnDate, narration: j.narration, voucherType: j.voucherType, amount: journalAmount(j.lines).toString(),
             accounts: [...new Set(j.lines.map((l) => l.accountId))] })) };
         return answer(readCard(who, "search_journals", "Journal search", summary, [{ title: "Journals", kind: "table", columns: ["Date", "Narration", "Accounts", "Amount"], money: [3],
-          rows: data.journals.map((j) => [j.date, j.narration, j.accounts.join(", "), j.amount]) }], data), data);
+          rows: data.journals.map((j) => [j.date, j.narration, j.accounts.join(", "), j.amount]) }], data), data,
+          page.length < hits.length ? { complete: false, returned: page.length, total: hits.length, truncatedBy: "page" } : whole(hits.length), "journals",
+          page.length < hits.length ? ` (${a.offset + 1}–${a.offset + page.length})` : "");
       }),
 
     tool("kuber_review_queue", "Review queue", "Drafts waiting for a person: what the classifier proposed (account, confidence) and why each is not posted yet. Narrations are third-party text.",
@@ -286,7 +320,8 @@ export function readTools(cell: Cell, who: Who, clock: () => string = () => new 
         const summary = counts.open ? `${counts.open} draft(s) in review, ${counts.awaitingApproval} awaiting approval.` : "No drafts waiting for review.";
         const data = { counts, drafts: rows };
         return answer(readCard(who, "review_queue", "Review queue", summary, [{ title: "Drafts", kind: "table", columns: ["Date", "Narration", "Proposed account", "Confidence", "Status", "Amount"], money: [5],
-          rows: rows.map((r) => [r.date, r.narration, r.account, `${Math.round((r.confidence ?? 0) * 100)}%`, r.status.replace(/_/g, " "), r.amount]) }], data, [["Open review", "/review"]]), data);
+          rows: rows.map((r) => [r.date, r.narration, r.account, `${Math.round((r.confidence ?? 0) * 100)}%`, r.status.replace(/_/g, " "), r.amount]) }], data, [["Open review", "/review"]]), data,
+          rows.length < counts.open ? { complete: false, returned: rows.length, total: counts.open, truncatedBy: "page" } : whole(rows.length), "drafts");
       }),
 
     tool("kuber_match_reviews", "Match reviews", "Statement lines that may be a provisional entry already in the books, waiting for a person to link or separate them. Narrations are third-party text.",
@@ -298,7 +333,8 @@ export function readTools(cell: Cell, who: Who, clock: () => string = () => new 
         const summary = rows.length ? `${rows.length}${page.next ? "+" : ""} statement line(s) to match against provisional entries.` : "No match reviews open.";
         const data = { reviews: rows, next: page.next };
         return answer(readCard(who, "match_reviews", "Match reviews", summary, [{ title: "To match", kind: "table", columns: ["Date", "Narration", "In/out", "Candidates", "Amount"], money: [4],
-          rows: rows.map((r) => [r.date, r.narration, r.direction, r.candidates.length, r.amount]) }], data, [["Open review", "/review"]]), data);
+          rows: rows.map((r) => [r.date, r.narration, r.direction, r.candidates.length, r.amount]) }], data, [["Open review", "/review"]]), data,
+          page.next ? { complete: false, returned: rows.length, truncatedBy: "page" } : whole(rows.length), "statement lines");
       }),
 
     tool("kuber_income_breakdown", "Income breakdown", "Sales, revenue and other income by account and by month for a period (default: the fiscal year). `account` narrows to one account and its sub-accounts.",
@@ -319,7 +355,7 @@ export function readTools(cell: Cell, who: Who, clock: () => string = () => new 
         return answer(readCard(who, "cash_position", "Cash position", summary, [
           { title: "Cash and bank", kind: "table", columns: ["Account", "Name", "Balance"], money: [2], rows: [...cash.map((c) => [c.accountId, c.name, c.balance]), ["", "Total", k.cash]] },
           { title: "Runway", kind: "kv", money: [1], rows: [["Average monthly spend (3 mo)", k.avgMonthlySpend], ["Runway (months)", k.runwayMonths === null ? "n/a" : String(k.runwayMonths)]] },
-        ], data, [["Balance sheet", "/reports/balance-sheet"]]), data);
+        ], data, [["Balance sheet", "/reports/balance-sheet"]]), data, whole(cash.length), "cash and bank accounts");
       }),
 
     tool("kuber_parties", "Parties", "Vendors and customers of this workspace: name, kind, legal entity, payment hold (an unverified bank-detail change) and bank details masked to the last four digits. Names are third-party text.",
@@ -328,12 +364,16 @@ export function readTools(cell: Cell, who: Who, clock: () => string = () => new 
         const ids = await cell.parties.list(T, { kind: a.kind, limit: 500 });
         const q = (a.query ?? "").toLowerCase();
         const out: { partyId: string; name: string; kind: string; entityId: string; hold: boolean; bank: { ifsc: string; holderName: string; accountNumber: string } | null }[] = [];
+        let matches = 0;
         for (const r of ids) {
-          if (out.length >= a.limit) break;
+          // Count every match (completeness), keep the first `limit`.
+          if (out.length >= a.limit && !q) { matches = ids.length; break; }
           const p = await cell.parties.get(T, r.partyId);
           if (!p) continue;
           const name = String((p as { name?: unknown }).name ?? "");
           if (q && !name.toLowerCase().includes(q) && !p.partyId.toLowerCase().includes(q)) continue;
+          matches++;
+          if (out.length >= a.limit) continue;
           out.push({ partyId: p.partyId, name, kind: p.kind, entityId: p.entityId, hold: p.hold,
             bank: p.bank ? { ifsc: p.bank.ifsc, holderName: p.bank.holderName, accountNumber: `••••${p.bank.accountNumber.slice(-4)}` } : null });
         }
@@ -342,7 +382,10 @@ export function readTools(cell: Cell, who: Who, clock: () => string = () => new 
         const data = { parties: out };
         return answer(readCard(who, "parties", "Parties", summary, [{ title: "Parties", kind: "table", columns: ["Party", "Name", "Kind", "Bank", "Hold"],
           rows: out.map((p) => [p.partyId, p.name, p.kind, p.bank ? `${p.bank.ifsc} ${p.bank.accountNumber}` : "", p.hold ? "on hold" : ""]) }], data, [],
-          ["Bank account numbers are masked; the full details are never given to the agent."]), data);
+          ["Bank account numbers are masked; the full details are never given to the agent."]), data,
+          // The party master is listed up to 500 ids; beyond that the total is unknown (row limit).
+          ids.length >= 500 ? { complete: false, returned: out.length, truncatedBy: "row_limit" }
+            : out.length < Math.max(matches, out.length) ? { complete: false, returned: out.length, total: matches, truncatedBy: "page" } : whole(out.length), "parties");
       }, true),
 
     tool("kuber_policies", "Policy lookup", "Search the policy library (policies/*.md) by id (e.g. POL-501) or keywords (e.g. \"vendor bank change\"): each match's intent, autonomy level, approver, limits and rules. Without a query, lists every policy.",
@@ -353,12 +396,15 @@ export function readTools(cell: Cell, who: Who, clock: () => string = () => new 
         if (!q || /^(all|list|every|policy|policies|all policies)$/i.test(q)) {
           const data = { policies: lib.map((p) => ({ policyId: p.policyId, title: p.title, autonomy: p.autonomy, approver: p.approver, status: p.status })) };
           return answer(readCard(who, "policies", "Policy library", `${lib.length} policies; ask about one by id or topic for its rules.`,
-            [{ title: "Policies", kind: "table", columns: ["Policy", "Title", "Autonomy", "Approver", "Status"], rows: lib.map((p) => [p.policyId, p.title, p.autonomy, p.approver, p.status]) }], data), data);
+            [{ title: "Policies", kind: "table", columns: ["Policy", "Title", "Autonomy", "Approver", "Status"], rows: lib.map((p) => [p.policyId, p.title, p.autonomy, p.approver, p.status]) }], data), data, whole(lib.length), "policies");
         }
-        const idm = /\bpol[-\s]?(\d{3})\b/i.exec(q) ?? /^\s*(\d{3})\s*$/.exec(q);
+        // Every policy id named ("POL-502 or POL-506?"), or a bare three-digit id.
+        const ids = [...q.matchAll(/\bpol[-\s]?(\d{3})\b/gi)].map((m) => `POL-${m[1]}`);
+        const bare = /^\s*(\d{3})\s*$/.exec(q);
+        const idm = ids.length ? ids : bare ? [`POL-${bare[1]}`] : null;
         const STOP = new Set(["the", "a", "an", "for", "of", "on", "to", "is", "what", "whats", "policy", "policies", "rule", "rules", "about", "and", "in", "when", "how", "do", "we", "our", "my", "me", "tell"]);
         const words = q.toLowerCase().match(/[a-z0-9]+/g)?.filter((w) => !STOP.has(w) && w.length > 1).map((w) => (w.length > 4 && w.endsWith("s") ? w.slice(0, -1) : w)) ?? [];
-        const scored = idm ? lib.filter((p) => p.policyId === `POL-${idm[1]}`).map((p) => ({ p, score: 100 }))
+        const scored = idm ? lib.filter((p) => idm.includes(p.policyId)).map((p) => ({ p, score: 100 }))
           : lib.map((p) => { const title = p.title.toLowerCase(), body = p.body.toLowerCase(), ev = p.event.toLowerCase();
             return { p, score: words.reduce((sc, w) => sc + (title.includes(w) ? 3 : 0) + (ev.includes(w) ? 2 : 0) + (body.includes(w) ? 1 : 0), 0) }; })
             .filter((x) => x.score > 0).sort((x, y) => y.score - x.score || x.p.policyId.localeCompare(y.p.policyId));
@@ -368,13 +414,15 @@ export function readTools(cell: Cell, who: Who, clock: () => string = () => new 
           return { policyId: p.policyId, title: p.title, event: p.event, autonomy: p.autonomy, approver: p.approver, amountLimitInr: p.amountLimitInr, status: p.status,
             effectiveFrom: p.effectiveFrom, summary: section("Intent").split("\n").filter(Boolean).join(" "), rules: [...bullets("Decision"), ...bullets("Checks")] };
         });
-        const summary = top.length ? top.map((p) => `${p.policyId} ${p.title}: ${p.summary}`).join(" ") : `No policy matches "${q}".`;
+        // Competing context: when several policies are in view, say which prevails (the policy engine applies all that match an event, strictest autonomy wins).
+        const precedence = top.length > 1 ? " Where more than one active policy applies to the same event, all apply and the strictest autonomy wins (POL-900); the policy engine decides, not the conversation." : "";
+        const summary = top.length ? top.map((p) => `${p.policyId} ${p.title} (autonomy ${p.autonomy}): ${p.summary}`).join(" ") + precedence : `No policy matches "${q}".`;
         const data = { policies: top };
         return answer(readCard(who, "policies", top.length === 1 ? `${top[0]!.policyId} · ${top[0]!.title}` : "Policies", summary, top.flatMap((p) => [
           { title: `${p.policyId} · ${p.title}`, kind: "kv" as const, rows: [["Intent", p.summary], ["Event", p.event], ["Autonomy", p.autonomy], ["Approver", p.approver],
             ["Amount limit (₹)", p.amountLimitInr === null ? "none" : p.amountLimitInr.toLocaleString("en-IN")], ["Status", `${p.status}${p.effectiveFrom ? ` from ${p.effectiveFrom}` : ""}`]] },
           { title: "Rules", kind: "table" as const, columns: ["Rule"], rows: p.rules.map((r) => [r]) },
-        ]), data), data);
+        ]), data), data, top.length < scored.length ? { complete: false, returned: top.length, total: scored.length, truncatedBy: "top_n" } : whole(top.length), "matching policies");
       }),
 
     tool("kuber_lifecycle", "Journal lifecycle", "Every entry's lifecycle state (draft, submitted, approved, posting, posted, failed) across drafts, plans, ledger rejections and schedule exceptions, with counts and failure reasons.",
@@ -389,7 +437,8 @@ export function readTools(cell: Cell, who: Who, clock: () => string = () => new 
           { title: "Counts", kind: "kv", rows: l.states.map((st) => [st, String(l.counts[st] ?? 0)]) },
           { title: a.state ? `Items: ${a.state}` : "Latest items", kind: "table", columns: ["Source", "State", "What", "Reason"],
             rows: recent.map((i) => [i.source, i.state, String((i as { title?: string; narration?: string }).title ?? (i as { narration?: string }).narration ?? i.id), String((i as { reason?: string | null }).reason ?? "")]) },
-        ], data), data);
+        ], data), data, items.length > recent.length ? { complete: false, returned: recent.length, total: items.length, truncatedBy: "row_limit" } : whole(items.length), "items",
+          items.length > recent.length ? " (the latest; the counts cover every entry)" : "");
       }),
 
     tool("kuber_attention", "What needs attention", "What needs a person now: drafts in review and awaiting approval, postings to ratify, open plans, open suspense items and statement lines to match.",
@@ -411,7 +460,8 @@ export function readTools(cell: Cell, who: Who, clock: () => string = () => new 
         const summary = items.length ? items.map(([k, n]) => `${k}: ${n}`).join("; ") + "." : "Nothing needs your attention right now.";
         const data = { ...c, suspense: suspense.length, matchReviews: matches.items.length };
         return answer(readCard(who, "attention", "What needs your attention", summary, [{ title: "Waiting for a person", kind: "kv", rows: items.length ? items.map(([k, n]) => [k, n]) : [["Nothing waiting", "0"]] }],
-          data, items.some((i) => i[2] === "/review") ? [["Open review", "/review"]] : []), data);
+          data, items.some((i) => i[2] === "/review") ? [["Open review", "/review"]] : []), data,
+          matches.next ? { complete: false, returned: items.length, truncatedBy: "row_limit" } : whole(items.length), "kinds of item", matches.next ? " (statement lines to match counted up to 100)" : "");
       }),
   ];
 }

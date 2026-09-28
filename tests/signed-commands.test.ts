@@ -350,8 +350,9 @@ describe("drafts and ratifications above the approval limit", () => {
       const { o, assertion } = await sign(P.kiran, { action: "draft.approve", draftId: loan.id, accountId: "LOANS" });
       expect(o.summary).toMatchObject({ action: "draft.approve", book: F, amountPaise: "3250000" });
       expect(o.summary.accounts.map((a) => a.accountId)).toEqual(["BANK", "LOANS"]);
-      expect((await approve({ accountId: "LIVING", assertion })).json().error).toBe("signature_mismatch");      // another account
-      expect((await approve({ accountId: "LOANS", assertion })).statusCode).toBe(202);
+      const correction = { codes: ["wrong_account"], text: "home loan EMI" };                                   // above the limit, a correction carries its reason
+      expect((await approve({ accountId: "LIVING", assertion, correction })).json().error).toBe("signature_mismatch");      // another account
+      expect((await approve({ accountId: "LOANS", assertion, correction })).statusCode).toBe(202);
       await cell.settle();
       const ev = (await cell.evidence.find(T, loan.id))[0]!;
       expect(ev.record.approval).toMatchObject({ kind: "draft", by: P.kiran, signature: { kind: "webauthn", inputs: { action: "draft.approve", subject: loan.id }, verified: true } });

@@ -1,13 +1,14 @@
 export { Cell, CELL_MIGRATIONS, assertMigrated, migrateCell, requiredMigrationIds, sealWithOwner, type CellOptions } from "./cell.ts";
 export { buildServer } from "./server.ts";
-export { Copilot, MAX_STEPS, TURN_TIMEOUT_MS, type CopilotReply, type CopilotOptions, type HistoryItem } from "./copilot/index.ts";
-export { route, amountIn, dateIn, periodIn, fiscalYear, matchAccounts, resolveAccount, HELP, HELP_GROUPS, ROUTER_VERSION, type Routed, type AccountRef, type Intent, type ReadCall } from "./copilot/router.ts";
+export { Copilot, MAX_STEPS, TURN_TIMEOUT_MS, policyCitation, type CopilotReply, type CopilotOptions, type HistoryItem } from "./copilot/index.ts";
+export { route, amountIn, dateIn, periodIn, fiscalYear, matchAccounts, resolveAccount, standingRuleIn, HELP, HELP_GROUPS, ROUTER_VERSION, type Routed, type AccountRef, type Intent, type ReadCall, type StandingRule } from "./copilot/router.ts";
 export { llmReasoner, isReasoner, type Reasoner, type NextStep, type NextStepRequest, type ComposeRequest, type ReasonerStep } from "./copilot/reasoner-types.ts";
 export { StubGovernance, createStubGovernance, type CoreGovernance, type StubOptions } from "./copilot/governance/stub.ts";
 export { readTools, readCard, journalLifecycle, attentionCounts, rs } from "./agent-tools.ts";
 export type { LlmProvider, Turn, Message, LlmTool } from "./copilot/provider.ts";
 export { parseGrants } from "./mcp.ts";
-export { kuberTools, planText } from "./tools.ts";
+export { kuberTools, planText, completenessLine, completenessNote, withCompleteness, type Completeness, type ToolResult, type ToolSpec } from "./tools.ts";
+export { STANDING_RULE_OPERATIONS, policyNote, proposePolicyChange, proposeRule } from "./standing-rule-ops.ts";
 export { KeyAdmin, SEALED_COLUMNS, sealColumnsOnce, sealIdentityColumns } from "./keys-admin.ts";
 export { PROJECTION_TABLES, RETENTION, pruneOutbox } from "./keys-admin.ts";
 export { OpsAdmin, CONSUMER_INPUTS, type BusConsumerAdmin, type ConsistencyReport } from "./ops-admin.ts";

@@ -24,7 +24,9 @@ export type OpName = "record" | "post" | "balance" | "reconcile" | "allocate" | 
   // cash and banks (FIN-CASH-03, modules/bank), registered by the cell with Operations.register
   | "bank_reconciliation" | "certify_bank_reconciliation"
   // mapped statements and KPIs (FIN-RPT-01/02), registered by the cell with Operations.register
-  | "financial_statements" | "cash_flow" | "equity_statement" | "kpis" | "kpi_drill";
+  | "financial_statements" | "cash_flow" | "equity_statement" | "kpis" | "kpi_drill"
+  // standing business rules stated in chat (context integrity), registered by the cell with Operations.register
+  | "propose_rule" | "propose_policy_change";
 
 export interface Services { gl: GeneralLedger; reporting: Reporting; agent: Agent; policies: PolicyEngine;
   /** Party master payment holds (FIN-MDM-03). Without it, no party is treated as held. */
@@ -123,6 +125,8 @@ export interface Plan {
   needsPerson: boolean;
   /** See Draft.fence. */
   fence?: { periodEnd: string };
+  /** Write plans: the operation's input as given (absent on plans made before it was kept), to simulate the plan again. */
+  input?: Record<string, unknown>;
 }
 
 export interface OpDef<I = unknown> {

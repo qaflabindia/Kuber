@@ -267,6 +267,38 @@ export const CHANNELS = {
   TransactionExtracted: z.object({ txnId: Id, signalId: Id, bookId: Id, trust: Trust, channel: z.string(), txn: RawTxn }),
 } as const;
 
+// ------------------------------------------------------------------ decision reasons (context integrity: never captured)
+/**
+ * Why a person rejected or corrected what the agent (or a plan) proposed, as codes plus optional
+ * text, so the decision can be learned from and audited instead of living only in someone's head.
+ * Required above the SoD (approval) limit and for policy-autonomous items (postings the agent made
+ * under L3/L4, plans policy cleared for an agent); optional below the limit. Events recorded before
+ * it was added carry only the free-text reason, or none.
+ */
+export const DECISION_REASON_CODES = [
+  "wrong_account",        // classified or planned to the wrong account
+  "wrong_amount",         // amount, tax or split is wrong
+  "wrong_party",          // counterparty is wrong or unknown
+  "wrong_period",         // date or period is wrong
+  "duplicate",            // already recorded elsewhere
+  "not_business",         // personal, or not this book's transaction
+  "missing_evidence",     // no invoice, receipt or approval behind it
+  "policy_breach",        // a policy or limit forbids it as proposed
+  "suspected_fraud",      // looks irregular: escalate
+  "superseded",           // replaced by a newer proposal or simulation
+  "stale",                // the books changed; no longer what would happen
+  "not_needed",           // withdrawn: nothing to do
+  "other",                // explained in the text
+] as const;
+export const DecisionReasonCode = z.enum(DECISION_REASON_CODES);
+export const DecisionReason = z.object({
+  codes: z.array(DecisionReasonCode).min(1).max(6),
+  text: z.string().trim().max(500).optional(),
+}).refine((r) => !r.codes.includes("other") || (r.text ?? "").length >= 3, { message: "code \"other\" needs a text explaining it" });
+export type DecisionReason = z.infer<typeof DecisionReason>;
+/** A decision reason as one line of text (the legacy free-text field). */
+export const reasonText = (r: DecisionReason) => `${r.codes.join(", ")}${r.text ? `: ${r.text}` : ""}`;
+
 // ------------------------------------------------------------------ Agent events
 export const Decision = z.object({
   policyIds: z.array(z.string()), level: AutonomyLevel,
@@ -310,12 +342,16 @@ export const AGENT = {
     proposal: z.object({ txnDate: IsoDate, narration: z.string(), voucherType: z.string(), lines: z.array(Line), provisional: z.boolean() }),
     accountId: Id, confidence: z.number(), partyName: z.string().optional(), amount: MinorString, direction: z.enum(["in", "out"]) }),
   /** `signature`: approving a draft above the approval limit over HTTP is a signed command. */
-  DraftApproved: z.object({ draftId: Id, accountId: Id, signature: CommandSignature.optional() }),
-  DraftRejected: z.object({ draftId: Id, reason: z.string() }),
+  DraftApproved: z.object({ draftId: Id, accountId: Id, signature: CommandSignature.optional(),
+    /** Approved to another account than the agent proposed (a correction of the draft): why. Absent on earlier events and on unchanged approvals. */
+    correction: DecisionReason.optional() }),
+  /** `structured`: the reason as codes (required above the SoD limit); absent on events recorded before it was added. */
+  DraftRejected: z.object({ draftId: Id, reason: z.string(), structured: DecisionReason.optional() }),
   RatificationRequested: z.object({ requestId: Id, dueBy: IsoDate }),
   /** `signature`: ratifying an automatic posting above the approval limit is a signed command. */
   Ratified: z.object({ journalId: Id, signature: CommandSignature.optional() }),
-  CorrectionRequested: z.object({ requestId: Id, bookId: Id, journalId: Id, fromAccount: Id, toAccount: Id }),
+  /** `reason`: why (required for policy-autonomous postings and above the SoD limit); absent on events recorded before it was added. */
+  CorrectionRequested: z.object({ requestId: Id, bookId: Id, journalId: Id, fromAccount: Id, toAccount: Id, reason: DecisionReason.optional() }),
   RuleLearned: z.object({ pattern: z.string(), accountId: Id }),
   AutonomyLimited: z.object({ key: z.string(), maxLevel: AutonomyLevel, until: IsoDate, reason: z.string() }),
   /** FIN-GL-05: an amount posted to suspense is an item-level case until it is resolved. */
@@ -355,6 +391,13 @@ export const AGENT = {
    * Appended in the same transaction as the tuning row the agent's decisions read, after the
    * approval (DreamProposalApproved). `tuning` holds thresholds only; no personal data.
    */
+  /**
+   * A standing business rule a person stated in chat, captured as a POL-900 policy change note that
+   * a person accepted for drafting (committed propose_policy_change plan). The policy registry is
+   * files: the note is the recorded proposal; the policy file changes only through POL-900.
+   */
+  PolicyChangeNoteRecorded: z.object({ noteId: Id, bookId: Id, statement: z.string().min(3).max(1000), event: z.string().max(100).nullable(),
+    noteHash: z.string().length(64), requestedBy: Principal.nullable() }),
   AutonomyTuningApplied: z.object({ bookId: Id, actionType: z.enum(["receipt", "payment"]), proposalId: Id,
     tuning: z.object({ l3MinConfidence: z.number(), l4MinConfidence: z.number().nullable(), relaxAfterAcceptances: z.number().int(),
       accuracyFloor: z.number(), amountCeilingPaise: z.number().int(), newCounterpartyKnownAfter: z.number().int(), amountZLimit: z.number().nullable() }),
@@ -387,6 +430,8 @@ export const OPS = {
     signature: CommandSignature.optional() }),
   /** FIN-MDM-04: an approval no longer stands (the approver's authority or delegation changed); the plan needs re-approval. */
   PlanApprovalInvalidated: z.object({ planId: Id, bookId: Id, approver: Principal, reason: z.string() }),
+  /** A proposal was withdrawn. `reason` required above the SoD limit and for plans policy cleared for an agent (L3/L4); absent on earlier discards. */
+  PlanDiscarded: z.object({ planId: Id, bookId: Id, op: z.string(), reason: DecisionReason.optional() }),
   /** FIN-MDM-04: a saved plan can no longer be executed as prepared (its preparer's authority changed). */
   PlanMarkedStale: z.object({ planId: Id, bookId: Id, reason: z.string() }),
   /** FIN-OPS-02: financial incident register. Amounts are paise. */

@@ -14,8 +14,12 @@ export type Routed =
   | { kind: "op"; intents: Intent[] }
   | { kind: "read"; calls: ReadCall[] }
   | { kind: "chat"; text: string }
+  /** Context integrity (never captured): a standing business rule stated in chat, to become a governed proposal, never conversation memory. */
+  | { kind: "standing_rule"; rule: StandingRule }
   | { kind: "clarify"; text: string; suggestions?: string[] }
   | { kind: "help"; text: string; reason: "asked" | "unrecognised" };
+/** A standing rule: a classification rule (pattern → account) or a policy statement (a POL-900 note). */
+export type StandingRule = { kind: "classification"; pattern: string; account: string; statedAs: string } | { kind: "policy"; statement: string };
 /** An account as the router sees it: id and name, with nature and cash flag when known. */
 export interface AccountRef { id: string; name: string; nature?: string; cash?: boolean }
 export interface RouteOptions { fyStartMonth?: number }
@@ -185,6 +189,13 @@ export function route(text: string, today: string, accountsIn: (string | Account
   if (/^(help|\?|what can you do|what do you do|how (do|can) i use|commands|menu|options|capabilities)\b/.test(l)) return { kind: "help", text: helpText("I can answer from your books and prepare changes for you to approve:"), reason: "asked" };
   if (/^(hi|hello|hey|namaste|good (morning|afternoon|evening))\b[\s!.,]*$/.test(l)) return { kind: "help", text: helpText("Hello. Ask me about your books, for example:"), reason: "asked" };
 
+  // ------------------------------------------------ standing rules (never remembered as conversation: a governed proposal)
+  const standing = standingRuleIn(t, accounts);
+  if (standing) return standing;
+
+  // A question about named policies is a policy lookup, never an operation it happens to mention ("POL-502 says auto-post ... which wins?").
+  if (/\bpol[-\s]?\d{3}\b/i.test(l) && (l.includes("?") || QUESTION.test(l))) return read("kuber_policies", { query: policyQuery(t) });
+
   // ------------------------------------------------ operations (plans a person approves)
   if (/\bwhat if\b|\bsimulat|\bcan i afford\b|\bsuppose\b/.test(l)) {
     const amt = amountIn(t);
@@ -329,6 +340,37 @@ function accountFilter(text: string, accounts: AccountRef[], nature: string, re:
   return r.kind === "one" ? r.id : undefined;
 }
 
+// ---------------------------------------------------------------- standing rules
+const STANDING_LEAD = /^(?:please\s+|ok(?:ay)?[,.]?\s+|note[:,]?\s+(?:that\s+)?|remember[:,]?\s+(?:that\s+)?|keep in mind[:,]?\s+(?:that\s+)?|for future reference[:,]?\s+|make (?:it|this) a rule(?: that)?[:,]?\s+)*(?:(?:from now on|going forward|henceforth|hereafter|in (?:the )?future|from today(?: onwards?)?|as a rule)[,:]?\s+)/i;
+const STANDING_ANY = /\b(from now on|going forward|henceforth|hereafter|from today onwards?|as a (standing )?rule|every time|each time|whenever)\b|\b(always|never)\s+(book|post|classify|record|put|code|categori[sz]e|treat|map|file|charge|send|route|pay|approve|auto-?post|allow|require|let)\b|\b(should|must|will|to)\s+always\s+(go|be)\b|\bremember (that|to)\b|\bkeep in mind\b|\bfor future reference\b|^note that\b/i;
+const CLASSIFY_VERB = String.raw`(?:book|post|classify|record|put|code|categori[sz]e|treat|map|file|charge|log)`;
+/**
+ * A standing business rule stated in chat ("always book Swiggy to staff welfare", "from now on payments
+ * above 50,000 need my approval"), or null. Questions are not rules. A classification rule needs an
+ * account named exactly and uniquely; otherwise the person is asked (a rule is never guessed).
+ */
+export function standingRuleIn(t: string, accounts: AccountRef[]): Routed | null {
+  const l = t.toLowerCase();
+  if (!STANDING_ANY.test(t) || /\?\s*$/.test(t) || /^(what|how|who|which|why|when|where|is|are|do|does|did|can|could|should i|would)\b/.test(l)) return null;
+  const body = t.replace(STANDING_LEAD, "").replace(/^(?:please\s+)?(?:remember (?:that|to)\s+|keep in mind(?: that)?\s+|note that\s+|for future reference[,:]?\s+)?/i, "").replace(/[.!]+$/, "").trim();
+  const cls = new RegExp(String.raw`^(?:(?:always|please)\s+)*${CLASSIFY_VERB}\s+(?:all\s+|any\s+|every\s+|each\s+)?(.+?)\s+(?:(?:payments?|charges?|bills?|expenses?|transactions?|spends?|orders?|purchases?)\s+)?(?:to|as|under|in|into|against)\s+(?:the\s+|my\s+|our\s+)?(.+?)(?:\s+(?:always|from now on|going forward|account))?$`, "i").exec(body)
+    ?? new RegExp(String.raw`^(?:all\s+|any\s+)?(.+?)\s+(?:payments?\s+|charges?\s+|bills?\s+|expenses?\s+|transactions?\s+)?(?:should|must|will|always)?\s*(?:always\s+)?(?:go(?:es)?|be\s+(?:booked|posted|classified|recorded|coded))\s+(?:to|as|under|in|into)\s+(?:the\s+|my\s+|our\s+)?(.+?)(?:\s+(?:always|from now on|going forward|account))?$`, "i").exec(body)
+    // "Zoom is a software cost (for us)": the item and the kind of cost it is.
+    ?? /^(?:all\s+|any\s+)?(.+?)\s+(?:is|are)\s+(?:always\s+)?(?:an?\s+|our\s+|my\s+)?(.+?)\s+(?:costs?|expenses?|charges?|spends?)(?:\s+for\s+(?:us|me))?$/i.exec(body);
+  const money = /(?:₹|\brs\.?|\binr)\s*\d|\b\d[\d,]*(?:\.\d+)?\s*(?:lakhs?|lacs?|k|crores?|cr)\b|\b\d{4,}\b/i.test(body);
+  if (cls && !money && !/\b(approv|limit|above|below|over|under \d|payments? to new)\b/i.test(cls[1]!)) {
+    const pattern = cls[1]!.replace(/^(?:the|my|our|all|any)\s+/i, "").replace(/\s+(?:payments?|charges?|bills?|orders?|rides?|trips?|subscriptions?|fees?|invoices?|expenses?|transactions?|spends?|purchases?)$/i, "").trim();
+    const phrase = cls[2]!.replace(/\s+(?:account|head|category)$/i, "").trim();
+    const pool = accounts.filter((a) => !a.cash && a.id !== "SUSPENSE" && (!a.nature || a.nature === "expense" || a.nature === "income" || a.nature === "asset" || a.nature === "liability"));
+    const r = resolveAccount(phrase, pool, "write");
+    if (r.kind === "one" && pattern.length >= 2) return { kind: "standing_rule", rule: { kind: "classification", pattern, account: r.id, statedAs: t.slice(0, 500) } };
+    const options = r.kind === "ambiguous" ? r.options : pool.filter((a) => a.nature === "expense").slice(0, 4);
+    return clarify(`To make that a standing rule I need the exact account for "${pattern}"${options.length ? `: ${listOf(options)}` : ""}? Say it with the account id, e.g. "Always book ${pattern} to ${options[0]?.id ?? "BIZEXP"}". I'll prepare it as a rule proposal for approval; I don't keep rules from our conversation.`,
+      options.map((o) => `Always book ${pattern} to ${o.id}`));
+  }
+  return { kind: "standing_rule", rule: { kind: "policy", statement: t.replace(/[.!]+$/, "").trim().slice(0, 1000) } };
+}
+
 function policyQuery(text: string): string {
   const q = text.replace(/[?!.]+$/, "")
     .replace(/^(please\s+)?(what('s| is| are)|tell me|show( me)?|explain|find|look up|is there)\s+/i, "")
@@ -339,7 +381,8 @@ function policyQuery(text: string): string {
 }
 
 function searchArgs(text: string, today: string, fyStart: number, accounts: AccountRef[]): Record<string, unknown> {
-  let s = text.replace(/[?!.]+$/, "");
+  // "… and total them", "…: what's the total?": what to do with the matches, not text to search for.
+  let s = text.replace(/[?!.]+$/, "").replace(/\s*[,:;]?\s*(?:and\s+)?(?:what(?:'s| is) the total|give me the total|total (?:them|it|these)(?: up)?|add (?:them|it|these) up|in total|altogether)\b.*$/i, "");
   const args: Record<string, unknown> = {};
   const num = String.raw`(?:₹|rs\.?\s*|inr\s*)?\d[\d,]*(?:\.\d+)?\s*(?:lakhs?|lacs?|k|thousand|crores?|cr)?`;
   const between = new RegExp(String.raw`\bbetween\s+(${num})\s+and\s+(${num})`, "i").exec(s);
@@ -407,5 +450,7 @@ function recordIntent(t: string, today: string, accounts: AccountRef[]): Routed 
     .replace(/\b(to|under|as|against|towards)\s+(the |my |our )?\S+(\s+\S+)?(?=\s+(from|via|by|using|through|with|into|on|dated)\b|$)/i, "")
     .replace(new RegExp(String.raw`\b(from|via|by|using|through|with|into|in)\s+(the |my |our )?(bank|cash|card|${via.replace(/[^\w:]/g, "")})\b`, "i"), "")
     .replace(/\b(on|dated)?\s*(\d{4}-\d{2}-\d{2}|\d{1,2}\s+[a-z]{3}[a-z]*\.?\s+\d{4})/i, "").replace(/^\s*(for|paid for|spent on)\s+/i, "").replace(/\s+/g, " ").trim();
-  return op("record", { narration: narration.length >= 2 ? narration.slice(0, 200) : `Recorded through Kuber: ${t.slice(0, 150)}`, amount, direction, account, via, ...(date ? { date } : {}) });
+  // A party named by its master id (V-…, C-…) goes on the plan, so its controls (payment holds, POL-501) apply.
+  const party = /\b([VC]-[A-Z0-9][A-Z0-9-]*)\b/.exec(t)?.[1];
+  return op("record", { narration: narration.length >= 2 ? narration.slice(0, 200) : `Recorded through Kuber: ${t.slice(0, 150)}`, amount, direction, account, via, ...(date ? { date } : {}), ...(party ? { party } : {}) });
 }
